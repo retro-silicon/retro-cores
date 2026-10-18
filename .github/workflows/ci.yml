@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Install Verilator
+        run: sudo apt-get update && sudo apt-get install -y verilator
+
+      - name: Test (elaboration + Verilator sims)
+        run: sbt -batch test
+
+      - name: Generate Verilog
+        run: sbt -batch "runMain retro.demo.DemoVerilog" "runMain retro.sm83.Sm83Verilog"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verilog
+          path: gen/
+          if-no-files-found: ignore

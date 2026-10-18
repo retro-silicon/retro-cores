@@ -1,0 +1,11 @@
+target/
+project/target/
+project/project/
+simWorkspace/
+gen/
+*.v
+*.vhd
+.bsp/
+.idea/
+.metals/
+.bloop/
