@@ -18,6 +18,9 @@ object BusOp {
   case class Write(address: String, data: String) extends BusOp
   /** Read the next opcode: ends the instruction, the read data becomes the new opcode. */
   case class Fetch(address: String) extends BusOp
+  /** Read the second byte of a prefixed opcode (SM83 0xCB): IR becomes page ## data and the new
+    * opcode starts at M-cycle 0, but this is not an instruction boundary. */
+  case class Prefix(address: String, page: Int) extends BusOp
 }
 
 /** At the end of this cycle, jump to M-cycle `target` of the same opcode when `cond` holds. */
@@ -33,6 +36,7 @@ case class MCycle(bus: BusOp = BusOp.Idle,
   def set(key: CtrlKey, value: BigInt): MCycle = copy(keys = keys :+ (key -> value))
   def branchIf(cond: String, target: Int): MCycle = copy(branch = Some(Branch(cond, target)))
   def isFetch = bus.isInstanceOf[BusOp.Fetch]
+  def loadsOpcode = isFetch || bus.isInstanceOf[BusOp.Prefix]
 }
 
 object MCycle {
@@ -40,12 +44,13 @@ object MCycle {
   def read(address: String) = MCycle(BusOp.Read(address))
   def write(address: String, data: String) = MCycle(BusOp.Write(address, data))
   def fetch(address: String) = MCycle(BusOp.Fetch(address))
+  def prefix(address: String, page: Int) = MCycle(BusOp.Prefix(address, page))
 }
 
 case class OpSpec(name: String, opcode: Int, cycles: Seq[MCycle]) {
-  require(cycles.nonEmpty && cycles.last.isFetch, s"$name: the last M-cycle must be a fetch")
-  require(cycles.init.forall(!_.isFetch), s"$name: only the last M-cycle may fetch")
-  for (c <- cycles; b <- c.branch) require(b.target > 0 && b.target < cycles.size, s"$name: branch target ${b.target} out of range")
+  // Earlier cycles may fetch too, when a branch reaches them (SM83 HALT has two exits).
+  require(cycles.nonEmpty && cycles.last.loadsOpcode, s"$name: the last M-cycle must be a fetch or a prefix")
+  for (c <- cycles; b <- c.branch) require(b.target >= 0 && b.target < cycles.size, s"$name: branch target ${b.target} out of range")
 }
 
 /** A control signal defined by a plugin and decoded per (opcode, M-cycle) by the sequencer.

@@ -7,22 +7,29 @@ import scala.collection.mutable.ArrayBuffer
 /** Instruction-level SM83 reference model, written independently of the opcode table in `Sm83`,
   * for cosimulation. It logs every bus access and counts M-cycles, including the overlapped fetch
   * of the next opcode at the end of each instruction, which is how the RTL trace reports them.
-  * Covers the same subset as the RTL. */
-class Sm83Reference(val mem: Array[Int]) {
+  *
+  * Interrupts: `requests(k)` must return IE & IF as the RTL saw it in M-cycle `k` (counting
+  * completed M-cycles from reset, the reset fetch being cycle 0). The model decides by itself
+  * when to dispatch, which vector to take and how long HALT waits. */
+class Sm83Reference(val mem: Array[Int], requests: Long => Int) {
   var a, f, b, c, d, e, h, l = 0
   var sp, pc = 0
+  var ime, imeNext = false
   private var ir = 0
+  private var vector = 0
+  private var cycle = 0L
   private val log = ArrayBuffer[BusAccess]()
-  private var internal = 0
 
-  private def read(addr: Int) = { val v = mem(addr & 0xFFFF); log += BusAccess(false, addr & 0xFFFF, v); v }
-  private def write(addr: Int, v: Int) = { mem(addr & 0xFFFF) = v & 0xFF; log += BusAccess(true, addr & 0xFFFF, v & 0xFF) }
+  private def read(addr: Int) = { cycle += 1; val v = mem(addr & 0xFFFF); log += BusAccess(false, addr & 0xFFFF, v); v }
+  private def write(addr: Int, v: Int) = { cycle += 1; mem(addr & 0xFFFF) = v & 0xFF; log += BusAccess(true, addr & 0xFFFF, v & 0xFF) }
   private def imm() = { val v = read(pc); pc = (pc + 1) & 0xFFFF; v }
-  private def idle() = internal += 1
+  private def idle() = cycle += 1
 
-  def hl = h << 8 | l
+  private def hl = h << 8 | l
   private def setHl(v: Int) = { h = (v >> 8) & 0xFF; l = v & 0xFF }
   private def zf = (f >> 7) & 1
+  private def nf = (f >> 6) & 1
+  private def hf = (f >> 5) & 1
   private def cf = (f >> 4) & 1
   private def flags(z: Boolean, n: Boolean, hc: Boolean, cy: Boolean) =
     f = (if (z) 0x80 else 0) | (if (n) 0x40 else 0) | (if (hc) 0x20 else 0) | (if (cy) 0x10 else 0)
@@ -31,8 +38,8 @@ class Sm83Reference(val mem: Array[Int]) {
     case 0 => b; case 1 => c; case 2 => d; case 3 => e; case 4 => h; case 5 => l; case 6 => read(hl); case 7 => a
   }
   private def setR(i: Int, v: Int): Unit = i match {
-    case 0 => b = v; case 1 => c = v; case 2 => d = v; case 3 => e = v; case 4 => h = v; case 5 => l = v
-    case 6 => write(hl, v); case 7 => a = v
+    case 0 => b = v & 0xFF; case 1 => c = v & 0xFF; case 2 => d = v & 0xFF; case 3 => e = v & 0xFF
+    case 4 => h = v & 0xFF; case 5 => l = v & 0xFF; case 6 => write(hl, v); case 7 => a = v & 0xFF
   }
   private def getRR(i: Int) = i match { case 0 => b << 8 | c; case 1 => d << 8 | e; case 2 => hl; case 3 => sp }
   private def setRR(i: Int, v: Int) = i match {
@@ -41,6 +48,10 @@ class Sm83Reference(val mem: Array[Int]) {
     case 2 => setHl(v)
     case 3 => sp = v & 0xFFFF
   }
+  private def cond(i: Int) = i match { case 0 => zf == 0; case 1 => zf == 1; case 2 => cf == 0; case 3 => cf == 1 }
+
+  private def push16(v: Int) = { idle(); sp = (sp - 1) & 0xFFFF; write(sp, v >> 8); sp = (sp - 1) & 0xFFFF; write(sp, v & 0xFF) }
+  private def pop16() = { val lo = read(sp); sp = (sp + 1) & 0xFFFF; val hi = read(sp); sp = (sp + 1) & 0xFFFF; hi << 8 | lo }
 
   private def alu(op: Int, v: Int): Unit = {
     val carry = if (op == 1 || op == 3) cf else 0
@@ -58,21 +69,64 @@ class Sm83Reference(val mem: Array[Int]) {
     }
   }
 
-  /** Call once after reset: fetches the first opcode, as the RTL's reset NOP does. */
-  def reset(): Unit = { ir = mem(pc); pc = (pc + 1) & 0xFFFF }
+  /** CB-page and accumulator rotates. Returns (result, carry out). */
+  private def shift(op: Int, v: Int): (Int, Boolean) = op match {
+    case 0 => (((v << 1) | (v >> 7)) & 0xFF, (v & 0x80) != 0)
+    case 1 => (((v >> 1) | (v << 7)) & 0xFF, (v & 1) != 0)
+    case 2 => (((v << 1) | cf) & 0xFF, (v & 0x80) != 0)
+    case 3 => ((v >> 1) | (cf << 7), (v & 1) != 0)
+    case 4 => ((v << 1) & 0xFF, (v & 0x80) != 0)
+    case 5 => ((v >> 1) | (v & 0x80), (v & 1) != 0)
+    case 6 => (((v << 4) | (v >> 4)) & 0xFF, false)
+    case 7 => (v >> 1, (v & 1) != 0)
+  }
 
-  /** Executes one instruction. Returns its bus accesses and M-cycle count. */
+  private def addSpE(): Int = {
+    val e8 = imm()
+    flags(false, false, (sp & 0xF) + (e8 & 0xF) > 0xF, (sp & 0xFF) + e8 > 0xFF)
+    (sp + e8.toByte) & 0xFFFF
+  }
+
+  // How the instruction's final fetch treats IME (key IME_OP in the RTL).
+  private val NONE = 0; private val DI = 1; private val EI = 2; private val RETI = 3
+
+  /** The instruction-ending fetch, with the interrupt check. */
+  private def fetch(imeOp: Int = NONE, increment: Boolean = true): Unit = {
+    val k = cycle
+    val opcode = read(pc)
+    if (increment) pc = (pc + 1) & 0xFFFF
+    val reqs = requests(k)
+    val effective = imeOp == RETI || ((ime || imeNext) && imeOp != DI)
+    val dispatch = effective && reqs != 0
+    ime = effective && !dispatch
+    imeNext = imeOp == EI && !dispatch
+    if (dispatch) { ir = Sm83.DISPATCH; vector = Integer.numberOfTrailingZeros(reqs) } else ir = opcode
+  }
+
+  /** Call once after reset: the reset NOP's fetch of the first opcode (M-cycle 0). */
+  def reset(): Unit = fetch()
+
+  /** Executes one instruction (CB-prefixed ones whole). Returns its bus accesses and M-cycles. */
   def step(): (Seq[BusAccess], Int) = {
-    log.clear(); internal = 0
-    val op = ir
-    op match {
-      case 0x00 =>
-      case 0x76 => sys.error("HALT not modelled")
+    log.clear()
+    val start = cycle
+    var imeOp = NONE
+    var increment = true
+    ir match {
+      case Sm83.DISPATCH => idle(); pc = (pc - 1) & 0xFFFF; push16(pc); pc = 0x40 + 8 * vector
+      case 0x00 | 0x10 => // NOP; STOP is not modelled and runs as a NOP, as in the RTL
+      case 0x76 =>
+        idle()
+        if (requests(cycle - 1) != 0 && !(ime || imeNext)) increment = false
+        else { while ({ idle(); requests(cycle - 1) == 0 }) {} }
       case o if (o & 0xC0) == 0x40 => setR((o >> 3) & 7, getR(o & 7))
       case o if (o & 0xC7) == 0x06 => setR((o >> 3) & 7, imm())
       case o if (o & 0xCF) == 0x01 => val lo = imm(); val hi = imm(); setRR(o >> 4, hi << 8 | lo)
       case o if (o & 0xCF) == 0x03 => idle(); setRR(o >> 4, getRR(o >> 4) + 1)
       case o if (o & 0xCF) == 0x0B => idle(); setRR(o >> 4, getRR(o >> 4) - 1)
+      case o if (o & 0xCF) == 0x09 =>
+        idle(); val v = getRR(o >> 4)
+        flags(zf == 1, false, (hl & 0xFFF) + (v & 0xFFF) > 0xFFF, hl + v > 0xFFFF); setHl(hl + v)
       case 0x02 => write(getRR(0), a)
       case 0x12 => write(getRR(1), a)
       case 0x0A => a = read(getRR(0))
@@ -81,6 +135,20 @@ class Sm83Reference(val mem: Array[Int]) {
       case 0x32 => write(hl, a); setHl(hl - 1)
       case 0x2A => a = read(hl); setHl(hl + 1)
       case 0x3A => a = read(hl); setHl(hl - 1)
+      case 0xE0 => val n = imm(); write(0xFF00 | n, a)
+      case 0xF0 => val n = imm(); a = read(0xFF00 | n)
+      case 0xE2 => write(0xFF00 | c, a)
+      case 0xF2 => a = read(0xFF00 | c)
+      case 0xEA => val lo = imm(); val hi = imm(); write(hi << 8 | lo, a)
+      case 0xFA => val lo = imm(); val hi = imm(); a = read(hi << 8 | lo)
+      case 0x08 => val lo = imm(); val hi = imm(); val nn = hi << 8 | lo; write(nn, sp & 0xFF); write(nn + 1, sp >> 8)
+      case 0xF9 => idle(); sp = hl
+      case 0xE8 => sp = addSpE(); idle(); idle()
+      case 0xF8 => setHl(addSpE()); idle()
+      case o if (o & 0xCF) == 0xC5 => push16(if (o == 0xF5) a << 8 | f else getRR((o >> 4) & 3))
+      case o if (o & 0xCF) == 0xC1 =>
+        val v = pop16()
+        if (o == 0xF1) { a = v >> 8; f = v & 0xF0 } else setRR((o >> 4) & 3, v)
       case o if (o & 0xC7) == 0x04 =>
         val r = (o >> 3) & 7; val v = getR(r); val n = (v + 1) & 0xFF
         f = (f & 0x10) | (if (n == 0) 0x80 else 0) | (if ((v & 0xF) == 0xF) 0x20 else 0); setR(r, n)
@@ -89,16 +157,44 @@ class Sm83Reference(val mem: Array[Int]) {
         f = (f & 0x10) | (if (n == 0) 0x80 else 0) | 0x40 | (if ((v & 0xF) == 0) 0x20 else 0); setR(r, n)
       case o if (o & 0xC0) == 0x80 => alu((o >> 3) & 7, getR(o & 7))
       case o if (o & 0xC7) == 0xC6 => alu((o >> 3) & 7, imm())
+      case 0x27 =>
+        var corr = 0; var carry = cf == 1
+        if (hf == 1 || (nf == 0 && (a & 0xF) > 9)) corr |= 0x06
+        if (carry || (nf == 0 && a > 0x99)) { corr |= 0x60; carry = true }
+        a = (if (nf == 1) a - corr else a + corr) & 0xFF
+        flags(a == 0, nf == 1, false, carry)
+      case 0x2F => a ^= 0xFF; f = (f & 0x90) | 0x60
+      case 0x37 => f = (f & 0x80) | 0x10
+      case 0x3F => f = (f & 0x80) | ((f & 0x10) ^ 0x10)
+      case o if (o & 0xE7) == 0x07 =>
+        val (r, co) = shift((o >> 3) & 3, a); a = r; flags(false, false, false, co)
       case 0x18 => val e8 = imm().toByte; idle(); pc = (pc + e8) & 0xFFFF
-      case o if (o & 0xE7) == 0x20 =>
-        val e8 = imm().toByte
-        val taken = ((o >> 3) & 3) match { case 0 => zf == 0; case 1 => zf == 1; case 2 => cf == 0; case 3 => cf == 1 }
-        if (taken) { idle(); pc = (pc + e8) & 0xFFFF }
+      case o if (o & 0xE7) == 0x20 => val e8 = imm().toByte; if (cond((o >> 3) & 3)) { idle(); pc = (pc + e8) & 0xFFFF }
       case 0xC3 => val lo = imm(); val hi = imm(); idle(); pc = hi << 8 | lo
-      case o => sys.error(f"opcode $o%02X not modelled")
+      case o if (o & 0xE7) == 0xC2 => val lo = imm(); val hi = imm(); if (cond((o >> 3) & 3)) { idle(); pc = hi << 8 | lo }
+      case 0xE9 => pc = hl
+      case 0xCD => val lo = imm(); val hi = imm(); push16(pc); pc = hi << 8 | lo
+      case o if (o & 0xE7) == 0xC4 => val lo = imm(); val hi = imm(); if (cond((o >> 3) & 3)) { push16(pc); pc = hi << 8 | lo }
+      case 0xC9 => pc = pop16(); idle()
+      case 0xD9 => pc = pop16(); idle(); imeOp = RETI
+      case o if (o & 0xE7) == 0xC0 => idle(); if (cond((o >> 3) & 3)) { pc = pop16(); idle() }
+      case o if (o & 0xC7) == 0xC7 => push16(pc); pc = o & 0x38
+      case 0xF3 => imeOp = DI
+      case 0xFB => imeOp = EI
+      case 0xCB =>
+        val x = imm()
+        val (r, y) = (x & 7, (x >> 3) & 7)
+        val v = getR(r)
+        x >> 6 match {
+          case 0 => val (res, co) = shift(y, v); flags(res == 0, false, false, co); setR(r, res)
+          case 1 => f = (f & 0x10) | 0x20 | (if ((v >> y & 1) == 0) 0x80 else 0)
+          case 2 => setR(r, v & ~(1 << y))
+          case 3 => setR(r, v | (1 << y))
+        }
+      case _ => // unused opcodes run as a NOP, as in the RTL
     }
-    ir = imm() // overlapped fetch of the next opcode
-    (log.toList, log.size + internal)
+    fetch(imeOp, increment)
+    (log.toList, (cycle - start).toInt)
   }
 
   def regs: Map[String, BigInt] = Map("A" -> a, "F" -> f, "B" -> b, "C" -> c, "D" -> d, "E" -> e, "H" -> h, "L" -> l,

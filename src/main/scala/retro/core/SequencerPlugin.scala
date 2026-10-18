@@ -23,6 +23,11 @@ trait SequencerService {
   def addSink(name: String, port: Flow[UInt]): Unit
   def addCond(name: String, value: Bool): Unit
   def newKey(name: String, width: Int, default: BigInt = 0): CtrlKey
+  /** When `valid` is high on a completing fetch, IR loads `opcode` instead of the fetched byte
+    * (which is discarded). This is how interrupt dispatch enters its own opcode. */
+  def addFetchOverride(valid: Bool, opcode: UInt): Unit
+  /** High in the cycle where an instruction-ending fetch completes. Usable from any build phase. */
+  def fetchFire: Bool
 }
 
 /** The M-cycle sequencer: a plain FSM holding the opcode register (IR) and the M-cycle counter
@@ -42,6 +47,13 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
   private val sinks = mutable.LinkedHashMap[String, Flow[UInt]]()
   private val conds = mutable.LinkedHashMap[String, Bool]()
   private val keys = ArrayBuffer[CtrlKey]()
+  private val overrides = ArrayBuffer[(Bool, UInt)]()
+
+  val early = during setup new Area {
+    val fetchFire = Bool()
+  }
+  def fetchFire = early.fetchFire
+  def addFetchOverride(valid: Bool, opcode: UInt) = overrides += valid -> opcode
 
   def addOp(op: OpSpec) = {
     require(!ops.contains(op.opcode), f"opcode 0x${op.opcode}%02X defined twice (${ops(op.opcode).name}, ${op.name})")
@@ -79,7 +91,11 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
 
     val fields = ArrayBuffer[Field]()
     def field(name: String, width: Int) = { val f = Field(name, width, fields.map(_.width).sum); fields += f; f }
-    val fKind = field("busKind", 2) // 0 idle, 1 read, 2 write, 3 fetch
+    val fKind = field("busKind", 2) // 0 idle, 1 read, 2 write, 3 fetch or prefix
+    val dataWidth = bus.busConfig.dataWidth
+    val pageWidth = (opcodeWidth - dataWidth) max 1
+    val fPrefix = field("prefix", 1)
+    val fPage = field("page", pageWidth)
     val fAddr = field("addr", selWidth)
     val fWdata = field("wdata", selWidth)
     val fSinks = sinks.keys.map(n => n -> field(s"sink_$n", selWidth)).toMap
@@ -101,6 +117,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
         case BusOp.Read(a) => put(fKind, 1); put(fAddr, src(op, a))
         case BusOp.Write(a, d) => put(fKind, 2); put(fAddr, src(op, a)); put(fWdata, src(op, d))
         case BusOp.Fetch(a) => put(fKind, 3); put(fAddr, src(op, a))
+        case BusOp.Prefix(a, page) => put(fKind, 3); put(fAddr, src(op, a)); put(fPrefix, 1); put(fPage, page)
       }
       require(c.assigns.map(_._1).distinct.size == c.assigns.size, s"$op: a sink is assigned twice in one cycle")
       for ((sink, source) <- c.assigns) put(fSinks.getOrElse(sink, sys.error(s"$op: unknown sink '$sink'")), src(op, source))
@@ -142,7 +159,8 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     }
 
     val kind = slice(fKind)
-    val fetch = kind === 3
+    val fetch = kind === 3 && !slice(fPrefix).asBool
+    val prefix = kind === 3 && slice(fPrefix).asBool
     master.cmd.valid := kind =/= 0
     master.cmd.write := kind === 2
     master.cmd.address := select(slice(fAddr), bus.busConfig.addressWidth)
@@ -160,9 +178,17 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     // Index 0 means "no branch", so prepend a constant False below the published conds.
     val condTaken = (conds.values.toSeq.asBits() ## False)(condSel)
 
+    fetchFire := done && fetch
+    // Later-registered overrides win.
+    val fetched = master.rdata.asBits.resize(opcodeWidth)
+    val nextOpcode = overrides.foldLeft(fetched) { case (acc, (valid, op)) => valid ? op.asBits.resize(opcodeWidth) | acc }
+
     when(done) {
       when(fetch) {
-        ir := master.rdata.asBits.resized
+        ir := nextOpcode
+        step := 0
+      } elsewhen (prefix) {
+        ir := (slice(fPage).asBits ## master.rdata.asBits).resize(opcodeWidth)
         step := 0
       } elsewhen (condTaken) {
         step := slice(fTarget)

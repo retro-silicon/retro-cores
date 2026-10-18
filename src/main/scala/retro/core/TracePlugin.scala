@@ -19,6 +19,7 @@ class TracePlugin extends FiberPlugin {
     val step = tap("step", s.step)
     val done = tap("done", s.done)
     val fetch = tap("fetch", s.fetch)
+    val prefix = tap("prefix", s.prefix)
     val busValid = tap("bus_valid", m.cmd.valid)
     val busWrite = tap("bus_write", m.cmd.write)
     val busAddress = tap("bus_address", m.cmd.address)

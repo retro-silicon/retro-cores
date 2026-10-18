@@ -14,7 +14,9 @@ case class BusAccess(write: Boolean, address: Int, data: Int) {
 case class CycleEvent(cycle: Long, opcode: Int, step: Int, done: Boolean, bus: Option[BusAccess], regs: Map[String, BigInt])
 
 /** One instruction, from the M-cycle after its opcode fetch to the fetch of the next opcode.
-  * `address` is where its opcode was fetched; `regs` are the values after it completed. */
+  * `address` is where its opcode was fetched. `opcode` is the full IR value: prefixed opcodes
+  * include their page (SM83 CB xx = 0x1xx), and an overridden fetch reports the opcode that
+  * replaced it (interrupt dispatch). `regs` are the values after it completed. */
 case class RetireEvent(index: Long, address: Int, opcode: Int, startCycle: Long, mcycles: Int, stalls: Int,
                        bus: Seq[BusAccess], regs: Map[String, BigInt])
 
@@ -48,6 +50,8 @@ class Probe(trace: TracePlugin, cd: ClockDomain) {
   private var retired = 0L
   // Instruction currently executing, known once its opcode fetch has been seen.
   private var current: Option[(Int, Int, Long)] = None // (address, opcode, start cycle)
+  // IR loaded at the last edge; read it in the next cycle rather than trusting the fetched byte.
+  private var opcodeLoaded = false
   private var mcycles, stalls = 0
   private val bus = ArrayBuffer[BusAccess]()
   private var pendingRetire: Option[RetireEvent] = None
@@ -60,6 +64,7 @@ class Probe(trace: TracePlugin, cd: ClockDomain) {
       if (t.busWrite.toBoolean) t.busWdata.toInt else t.busRdata.toInt)) else None
     val done = t.done.toBoolean
     val now = regs()
+    if (opcodeLoaded) { current = current.map { case (a, _, s) => (a, t.opcode.toInt, s) }; opcodeLoaded = false }
     val e = CycleEvent(cycle, t.opcode.toInt, t.step.toInt, done, access, now)
     // Register writes of the previous fetch cycle are visible now.
     for (r <- pendingRetire) { backends.foreach(_.onRetire(r.copy(regs = now))); pendingRetire = None }
@@ -73,9 +78,10 @@ class Probe(trace: TracePlugin, cd: ClockDomain) {
           pendingRetire = Some(RetireEvent(retired, addr, op, start, mcycles, stalls, bus.toList, Map.empty))
           retired += 1
         }
-        current = Some((access.get.address, access.get.data, cycle + 1))
+        current = Some((access.get.address, -1, cycle + 1))
+        opcodeLoaded = true
         mcycles = 0; stalls = 0; bus.clear()
-      }
+      } else if (t.prefix.toBoolean) opcodeLoaded = true
     } else stalls += 1
     cycle += 1
   }
