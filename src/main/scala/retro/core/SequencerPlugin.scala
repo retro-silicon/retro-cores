@@ -11,6 +11,8 @@ import scala.collection.mutable.ArrayBuffer
 import SequencerPlugin.Field
 
 object SequencerPlugin {
+  /** The bus read data of the current M-cycle. */
+  val RDATA = Value("rdata")
   /** A slice of the decoded control word. */
   case class Field(name: String, width: Int, offset: Int)
 }
@@ -19,10 +21,14 @@ trait SequencerService {
   /** Retain this before adding ops, sources, sinks, conds or keys from a build phase. */
   def seqLock: Retainer
   def addOp(op: OpSpec): Unit
-  def addSource(name: String, value: UInt): Unit
-  def addSink(name: String, port: Flow[UInt]): Unit
-  def addCond(name: String, value: Bool): Unit
-  def newKey(name: String, width: Int, default: BigInt = 0): CtrlKey
+  /** Provide the hardware behind a source. Every source an opcode names needs exactly one. */
+  def addSource(source: Source, value: UInt): Unit
+  def addSink(sink: Sink, port: Flow[UInt]): Unit
+  def addCond(cond: Cond, value: Bool): Unit
+  /** Declare a control key; the owning plugin calls this once, in build, before releasing. */
+  def addKey(key: CtrlKey): Unit
+  /** The decoded value of a key in the current cycle. Valid hardware once the key is added. */
+  def ctrl(key: CtrlKey): UInt
   /** When `valid` is high on a completing fetch, IR loads `opcode` instead of the fetched byte
     * (which is discarded). This is how interrupt dispatch enters its own opcode. */
   def addFetchOverride(valid: Bool, opcode: UInt): Unit
@@ -35,18 +41,18 @@ trait SequencerService {
   * IR ## STEP to a control word: the bus access, a source selection for each sink, a branch,
   * and plugin-defined keys. When the bus stalls the cycle is held and nothing is written.
   *
-  * @param illegal  what an opcode with no spec does, one M-cycle (default: fetch at PC, PC+1)
+  * @param illegal  what an opcode with no spec does, in one M-cycle (usually: fetch at PC, PC+1)
   * @param resetOpcode  IR at reset; its first M-cycle runs first, so make it one that fetches */
 class SequencerPlugin(val opcodeWidth: Int = 8,
                       val busPriority: Int = 0,
                       val resetOpcode: Int = 0,
-                      val illegal: MCycle = MCycle.fetch("PC").assign("PC" -> "PC+1")) extends FiberPlugin with SequencerService {
+                      val illegal: MCycleSpec) extends FiberPlugin with SequencerService {
   val seqLock = Retainer()
   private val ops = mutable.LinkedHashMap[Int, OpSpec]()
-  private val sources = mutable.LinkedHashMap[String, UInt]()
-  private val sinks = mutable.LinkedHashMap[String, Flow[UInt]]()
-  private val conds = mutable.LinkedHashMap[String, Bool]()
-  private val keys = ArrayBuffer[CtrlKey]()
+  private val sources = mutable.LinkedHashMap[Source, UInt]()
+  private val sinks = mutable.LinkedHashMap[Sink, Flow[UInt]]()
+  private val conds = mutable.LinkedHashMap[Cond, Bool]()
+  private val keys = mutable.LinkedHashMap[CtrlKey, UInt]()
   private val overrides = ArrayBuffer[(Bool, UInt)]()
 
   val early = during setup new Area {
@@ -59,15 +65,14 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     require(!ops.contains(op.opcode), f"opcode 0x${op.opcode}%02X defined twice (${ops(op.opcode).name}, ${op.name})")
     ops(op.opcode) = op
   }
-  def addSource(name: String, value: UInt) = { require(!sources.contains(name), s"source $name defined twice"); sources(name) = value }
-  def addSink(name: String, port: Flow[UInt]) = { require(!sinks.contains(name), s"sink $name defined twice"); sinks(name) = port }
-  def addCond(name: String, value: Bool) = { require(!conds.contains(name), s"cond $name defined twice"); conds(name) = value }
-  def newKey(name: String, width: Int, default: BigInt = 0): CtrlKey = {
-    val k = new CtrlKey(name, width, default)
-    k.value = UInt(width bits).setCompositeName(this, s"key_$name")
-    keys += k
-    k
+  def addSource(source: Source, value: UInt) = { require(!sources.contains(source), s"source $source provided twice"); sources(source) = value }
+  def addSink(sink: Sink, port: Flow[UInt]) = { require(!sinks.contains(sink), s"sink $sink provided twice"); sinks(sink) = port }
+  def addCond(cond: Cond, value: Bool) = { require(!conds.contains(cond), s"cond $cond provided twice"); conds(cond) = value }
+  def addKey(key: CtrlKey) = {
+    require(!keys.contains(key), s"key $key added twice")
+    keys(key) = UInt(key.width bits).setCompositeName(this, s"key_${key.name}")
   }
+  def ctrl(key: CtrlKey): UInt = keys.getOrElse(key, sys.error(s"key $key was never added; its plugin must call addKey"))
   def opSpecs: Seq[OpSpec] = ops.values.toSeq
 
   val logic = during setup new Area {
@@ -77,17 +82,17 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
 
     val master = bus.newMaster(busPriority)
     busRetainer.release()
-    addSource("rdata", master.rdata)
+    addSource(SequencerPlugin.RDATA, master.rdata)
 
     seqLock.await()
 
     // ---- Control word layout -------------------------------------------------------------
-    val sourceNames = sources.keys.toIndexedSeq
-    val condNames = conds.keys.toIndexedSeq
+    val sourceList = sources.keys.toIndexedSeq
+    val condList = conds.keys.toIndexedSeq
     val maxCycles = (ops.values.map(_.cycles.size) ++ Seq(1)).max
     val stepWidth = log2Up(maxCycles) max 1
-    val selWidth = log2Up(sourceNames.size + 1)
-    val condWidth = log2Up(condNames.size + 1)
+    val selWidth = log2Up(sourceList.size + 1)
+    val condWidth = log2Up(condList.size + 1)
 
     val fields = ArrayBuffer[Field]()
     def field(name: String, width: Int) = { val f = Field(name, width, fields.map(_.width).sum); fields += f; f }
@@ -98,18 +103,18 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     val fPage = field("page", pageWidth)
     val fAddr = field("addr", selWidth)
     val fWdata = field("wdata", selWidth)
-    val fSinks = sinks.keys.map(n => n -> field(s"sink_$n", selWidth)).toMap
+    val fSinks = sinks.keys.map(n => n -> field(s"sink_${n.name}", selWidth)).toMap
     val fCond = field("cond", condWidth)
     val fTarget = field("target", stepWidth)
-    val fKeys = keys.map(k => k -> field(s"key_${k.name}", k.width)).toMap
+    val fKeys = keys.keys.map(k => k -> field(s"key_${k.name}", k.width)).toMap
     val wordWidth = fields.map(_.width).sum
 
-    def src(op: String, name: String): BigInt = {
-      val i = sourceNames.indexOf(name)
-      require(i >= 0, s"$op: unknown source '$name' (have ${sourceNames.mkString(", ")})")
+    def src(op: String, source: Source): BigInt = {
+      val i = sourceList.indexOf(source)
+      require(i >= 0, s"$op: no plugin provides source '$source'")
       i + 1
     }
-    def encode(op: String, c: MCycle): BigInt = {
+    def encode(op: String, c: MCycleSpec): BigInt = {
       var w = BigInt(0)
       def put(f: Field, v: BigInt) = { require(v >= 0 && v < (BigInt(1) << f.width), s"$op: ${f.name}=$v does not fit"); w |= v << f.offset }
       c.bus match {
@@ -120,14 +125,15 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
         case BusOp.Prefix(a, page) => put(fKind, 3); put(fAddr, src(op, a)); put(fPrefix, 1); put(fPage, page)
       }
       require(c.assigns.map(_._1).distinct.size == c.assigns.size, s"$op: a sink is assigned twice in one cycle")
-      for ((sink, source) <- c.assigns) put(fSinks.getOrElse(sink, sys.error(s"$op: unknown sink '$sink'")), src(op, source))
+      for ((sink, source) <- c.assigns) put(fSinks.getOrElse(sink, sys.error(s"$op: no plugin provides sink '$sink'")), src(op, source))
       for (b <- c.branch) {
-        val i = condNames.indexOf(b.cond)
-        require(i >= 0, s"$op: unknown cond '${b.cond}' (have ${condNames.mkString(", ")})")
+        val i = condList.indexOf(b.cond)
+        require(i >= 0, s"$op: no plugin provides cond '${b.cond}'")
         put(fCond, i + 1); put(fTarget, b.target)
       }
       val set = c.keys.toMap
-      for (k <- keys) put(fKeys(k), set.getOrElse(k, k.default))
+      for (k <- set.keys) require(keys.contains(k), s"$op: key $k was never added")
+      for (k <- keys.keys) put(fKeys(k), set.getOrElse(k, k.default))
       w
     }
 
@@ -152,8 +158,8 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
       val r = UInt(width bits)
       r := 0
       switch(sel) {
-        for ((name, i) <- sourceNames.zipWithIndex) is(i + 1) { r := sources(name).resized }
-        if (sourceNames.size + 1 < (1 << selWidth)) default {}
+        for ((source, i) <- sourceList.zipWithIndex) is(i + 1) { r := sources(source).resized }
+        if (sourceList.size + 1 < (1 << selWidth)) default {}
       }
       r
     }
@@ -172,7 +178,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
       port.valid := done && sel =/= 0
       port.payload := select(sel, port.payload.getWidth)
     }
-    for (k <- keys) k.value := slice(fKeys(k))
+    for ((k, value) <- keys) value := slice(fKeys(k))
 
     val condSel = slice(fCond)
     // Index 0 means "no branch", so prepend a constant False below the published conds.

@@ -26,7 +26,7 @@ class Sm83CosimSim extends AnyFunSuite {
       val ctx = f"instruction #${e.index} at ${e.address}%04X ${e.opcode}%03X $name"
       assert(e.bus == refBus, s"$ctx: bus\n  rtl ${e.bus.mkString(", ")}\n  ref ${refBus.mkString(", ")}")
       assert(e.mcycles == refCycles, s"$ctx: ${e.mcycles} M-cycles, reference says $refCycles")
-      val rtlRegs = Sm83.architectural.map(n => n -> e.regs(n)).toMap
+      val rtlRegs = Sm83Regs.architectural.map(r => r.name -> e.regs(r.name)).toMap
       assert(rtlRegs == ref.regs, s"$ctx: registers\n  rtl $rtlRegs\n  ref ${ref.regs}")
       seen(e.opcode) += 1
       checked += 1

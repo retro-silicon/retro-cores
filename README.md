@@ -5,9 +5,11 @@ Cycle-accurate classic console CPUs (Sharp SM83, Ricoh 2A03) in SpinalHDL, built
 list of plugins, and every feature, including introspection, is a plugin that injects logic into
 the others.
 
-Status: the framework layer is in place, and an SM83 subset (186 opcodes: loads, 8-bit ALU,
-INC/DEC, 16-bit loads and inc/dec, JR/JR cc/JP) passes cosimulation against a reference model
-on random code. To add instructions, a CPU or a plugin, see [docs/EXTENDING.md](docs/EXTENDING.md).
+Status: the framework layer is in place and the SM83 implements the full documented opcode set
+(243 base opcodes plus the 256 CB ops), interrupts, EI/DI/RETI, HALT and the HALT bug. It passes
+cosimulation against a reference model on random code with random interrupts and wait states.
+STOP is not modelled. To add instructions, a CPU or a plugin, see
+[docs/EXTENDING.md](docs/EXTENDING.md).
 
 ## Build and run
 
@@ -76,11 +78,23 @@ These are the parts VexiiRiscv has no equivalent for:
   higher-priority master and the CPU stalls on the cycles it loses.
 - **`RegFilePlugin(spec)`**: registers, aliased pairs (`HL` = `H ## L`) and flags (`ZF` = `F[7]`)
   described as data. Each one is automatically a source and a sink of the sequencer, and each flag
-  is a branch condition.
-- **`SequencerPlugin`**: opcodes are data (`OpSpec` = a list of `MCycle`s, each with a bus op,
-  `sink -> source` transfers, plugin keys and an optional branch). The plugin collects every spec
-  and generates the decoder from `IR ## STEP` with SpinalHDL's `DecodingSpec`. One clock is one
-  M-cycle; a bus stall holds the cycle and suppresses all writes.
+  gives the branch conditions `isSet` and `isClear`.
+- **`SequencerPlugin`**: opcodes are data. An `OpSpec` is a list of `MCycleSpec`s, each with a bus
+  op, `sink -> source` transfers, control keys and an optional branch. The plugin collects every
+  spec and generates the decoder from `IR ## STEP` with SpinalHDL's `DecodingSpec`. One clock is
+  one M-cycle; a bus stall holds the cycle and suppresses all writes. Prefix pages (SM83 `CB`) and
+  a fetch override (interrupt dispatch) extend the opcode space.
+- **Typed operands**: everything a spec names is an object declared once by its owner, the way
+  VexiiRiscv declares `SrcKeys` and `Payload`s. Registers, pairs and flags are `Register`, `Pair`
+  and `Flag` objects in a `RegFileSpec`; computed values are `Value`s, conditions `Cond`s and
+  control signals `CtrlKey`s, kept in the companion object of the plugin that provides them
+  (`Alu.RESULT`, `Idu.inc(HL)`, `Interrupts.PENDING`, `Shifter.OP`). A typo does not compile; an
+  object no plugin provides fails elaboration with the opcode's name.
+
+  ```scala
+  op("LD A,(HL+)", 0x2A, read(HL).assign(A -> RDATA, HL -> Idu.inc(HL)), fetch)
+  op("JR NZ,e", 0x20, imm.assign(Z -> RDATA).branchIf(ZF.isSet, 2), idle.assign(PC -> Isa.PC_E), fetch)
+  ```
 - **`TracePlugin` + `retro.sim.Probe`**: whitebox taps, then a sim probe, then `TraceBackend`s.
   The probe emits per-cycle and per-instruction events (address, M-cycles, stalls, ordered bus
   accesses, registers after).
@@ -122,7 +136,7 @@ reference model, file traces, Konata).
 src/main/scala/retro/core/   framework: RetroCore, Bus, RegFile, Sequencer, Microcode, Trace,
                              StagePipelinePlugin, WhiteboxPlugin
 src/main/scala/retro/sim/    Probe and trace backends
-src/main/scala/retro/sm83/   SM83: register spec, ALU and ISA plugins, reference model
+src/main/scala/retro/sm83/   SM83: registers, ALU, shifter, interrupt and ISA plugins, reference model
 src/main/scala/retro/demo/   toy pipeline exercising the CtrlLink layer
 src/test/scala/retro/toy/    toy CPU testing sequencer, pairs, flags, branches, stalls, DMA
 src/test/scala/retro/sm83/   SM83 cosimulation (hand-written and random code)
@@ -131,8 +145,9 @@ docs/EXTENDING.md            adding an instruction, a plugin or a CPU
 
 ## Roadmap
 
-Done: scaffold, framework layer, SM83 subset with cosim, extension guide.
+Done: scaffold, framework layer, the SM83 instruction set with interrupts, extension guide.
 
-Next for SM83: stack and calls (`PUSH`/`POP`/`CALL`/`RET`/`RST`), the CB-prefixed shifter and bit
-operations, interrupts and HALT/STOP, the remaining loads (`LDH`, `LD (nn),SP`, `ADD HL,rr`,
-`ADD SP,e`), `DAA` and the other A/flag ops. Then the 2A03 (see the guide).
+Next: an SM83 SoC wrapper (IE/IF registers, timer, OAM DMA as a bus master), STOP, and checking
+HALT-exit and interrupt-dispatch timing against hardware test ROMs. The reference model encodes the
+timings documented in the guide, which have not been validated against real silicon. Then the
+2A03 (see the guide).

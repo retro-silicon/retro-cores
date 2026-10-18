@@ -1,30 +1,36 @@
 package retro.toy
 
 import retro.core._
+import retro.core.MCycleSpec.{idle, read, write}
+import retro.core.SequencerPlugin.RDATA
 import spinal.core._
 import spinal.lib.misc.plugin._
 
 /** A toy 8-bit CPU with SM83-like encodings and timings, used only to test the framework. */
 object Toy8 {
-  val regFile = RegFileSpec(
-    regs = Seq(RegSpec("A", 8), RegSpec("F", 8), RegSpec("H", 8), RegSpec("L", 8),
-               RegSpec("W", 8), RegSpec("Z", 8), RegSpec("PC", 16)),
-    pairs = Seq(PairSpec("HL", "H", "L"), PairSpec("WZ", "W", "Z")),
-    flags = Seq(FlagSpec("ZF", "F", 7)))
+  val A = Register("A", 8); val F = Register("F", 8); val H = Register("H", 8); val L = Register("L", 8)
+  val W = Register("W", 8); val Z = Register("Z", 8); val PC = Register("PC", 16)
+  val HL = Pair("HL", H, L); val WZ = Pair("WZ", W, Z)
+  val ZF = Flag("ZF", F, 7)
+  val regFile = RegFileSpec(Seq(A, F, H, L, W, Z, PC), Seq(HL, WZ), Seq(ZF))
+
+  // Values the ISA plugin computes.
+  val PC_INC = Value("PC+1"); val HL_INC = Value("HL+1"); val A_INC = Value("A+1")
+  val A_INC_ZERO = Value("zero(A+1)"); val PC_E = Value("PC+e")
 
   // Every opcode ends with the overlapped fetch of the next one.
-  private def fetch = MCycle.fetch("PC").assign("PC" -> "PC+1")
-  private def imm = MCycle.read("PC").assign("PC" -> "PC+1")
+  private val fetch = MCycleSpec.fetch(PC).assign(PC -> PC_INC)
+  private val imm = read(PC).assign(PC -> PC_INC)
 
   val ops = Seq(
     OpSpec("NOP", 0x00, Seq(fetch)),
-    OpSpec("LD HL,nn", 0x21, Seq(imm.assign("L" -> "rdata"), imm.assign("H" -> "rdata"), fetch)),
-    OpSpec("LD A,n", 0x3E, Seq(imm.assign("Z" -> "rdata"), fetch.assign("A" -> "Z"))),
-    OpSpec("LD (HL),A", 0x77, Seq(MCycle.write("HL", "A"), fetch)),
-    OpSpec("LD A,(HL)", 0x7E, Seq(MCycle.read("HL").assign("Z" -> "rdata"), fetch.assign("A" -> "Z"))),
-    OpSpec("INC A", 0x3C, Seq(fetch.assign("A" -> "A+1", "ZF" -> "zero(A+1)"))),
-    OpSpec("INC HL", 0x23, Seq(MCycle.idle.assign("HL" -> "HL+1"), fetch)),
-    OpSpec("JR NZ,e", 0x20, Seq(imm.assign("Z" -> "rdata").branchIf("ZF", 2), MCycle.idle.assign("PC" -> "PC+e"), fetch)))
+    OpSpec("LD HL,nn", 0x21, Seq(imm.assign(L -> RDATA), imm.assign(H -> RDATA), fetch)),
+    OpSpec("LD A,n", 0x3E, Seq(imm.assign(Z -> RDATA), fetch.assign(A -> Z))),
+    OpSpec("LD (HL),A", 0x77, Seq(write(HL, A), fetch)),
+    OpSpec("LD A,(HL)", 0x7E, Seq(read(HL).assign(Z -> RDATA), fetch.assign(A -> Z))),
+    OpSpec("INC A", 0x3C, Seq(fetch.assign(A -> A_INC, ZF -> A_INC_ZERO))),
+    OpSpec("INC HL", 0x23, Seq(idle.assign(HL -> HL_INC), fetch)),
+    OpSpec("JR NZ,e", 0x20, Seq(imm.assign(Z -> RDATA).branchIf(ZF.isSet, 2), idle.assign(PC -> PC_E), fetch)))
 
   val names = ops.map(o => o.opcode -> o.name).toMap
 
@@ -37,13 +43,13 @@ object Toy8 {
       awaitBuild()
 
       ops.foreach(seq.addOp)
-      val pc = rf.read("PC")
-      val aInc = rf.read("A") + 1
-      seq.addSource("PC+1", pc + 1)
-      seq.addSource("HL+1", rf.read("HL") + 1)
-      seq.addSource("A+1", aInc)
-      seq.addSource("zero(A+1)", (aInc === 0).asUInt)
-      seq.addSource("PC+e", (pc.asSInt + rf.read("Z").asSInt).asUInt)
+      val pc = rf.read(PC)
+      val aInc = rf.read(A) + 1
+      seq.addSource(PC_INC, pc + 1)
+      seq.addSource(HL_INC, rf.read(HL) + 1)
+      seq.addSource(A_INC, aInc)
+      seq.addSource(A_INC_ZERO, (aInc === 0).asUInt)
+      seq.addSource(PC_E, (pc.asSInt + rf.read(Z).asSInt).asUInt)
       retainer.release()
     }
   }
@@ -66,7 +72,7 @@ object Toy8 {
 
   def plugins(steal: Boolean) = Seq(
     new BusPlugin(RetroBusConfig(16, 8)),
-    new SequencerPlugin(),
+    new SequencerPlugin(illegal = fetch),
     new RegFilePlugin(regFile),
     new IsaPlugin,
     new TracePlugin

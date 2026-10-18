@@ -25,6 +25,6 @@ class TracePlugin extends FiberPlugin {
     val busAddress = tap("bus_address", m.cmd.address)
     val busWdata = tap("bus_wdata", m.cmd.data)
     val busRdata = tap("bus_rdata", m.rdata)
-    val regs = rf.spec.regs.map(r => r.name -> tap(s"reg_${r.name}", rf.regs.byName(r.name)))
+    val regs = rf.spec.regs.map(r => r.name -> tap(s"reg_${r.name}", rf.regs.byReg(r)))
   }
 }
