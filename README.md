@@ -10,7 +10,9 @@ Status: the framework layer is in place and the SM83 implements the full documen
 cosimulation against a reference model on random code with random interrupts and wait states,
 and on the Game Boy composition it passes Blargg's `cpu_instrs`, `instr_timing`, `mem_timing`,
 `mem_timing-2` and `halt_bug` and every Mooneye acceptance test for the CPU, interrupts, HALT,
-timer, serial clock and OAM DMA (see *Hardware test ROMs*). STOP is not modelled.
+timer, serial clock and OAM DMA (see *Hardware test ROMs*). STOP is not modelled. The Ricoh
+2A03 (NES CPU) runs on the same framework with all 256 opcodes, and is cycle-exact on the
+SingleStepTests `nes6502` set and on nestest (see *Ricoh 2A03*).
 
 CPUs and SoCs are generated the same way: a Game Boy is the SM83's plugin list plus SoC plugins
 (on-chip RAMs, IF/IE, timer, serial, PPU, joypad) in the same host. The whole system passes
@@ -42,6 +44,27 @@ them except HALT and STOP, 498,000 of 500,000: the tests come from ares, which r
 idle M-cycles and STOP as three, while here HALT keeps fetching at PC (the timing the Mooneye
 HALT tests pin down) and STOP is a NOP. Per-opcode reports go to `out/sm83-sst-*.txt`. The tests
 raise no interrupts, so dispatch, HALT exit and the EI delay are covered by the test ROMs below.
+
+### Ricoh 2A03 (NES CPU)
+
+```sh
+scripts/fetch-nes6502-tests.sh                     # SingleStepTests/65x02 nes6502 (MIT) into ./roms/sst-nes6502, about 1.1 GB
+scripts/fetch-nes-test-roms.sh                     # nestest and its Nintendulator log into ./roms/nes
+sbt "testOnly retro.r2a03.*"                       # single-step tests (1000 per opcode), nestest, interrupt checks
+SST_LIMIT=10000 sbt "testOnly retro.r2a03.R2A03SingleStepSim"   # all 2,560,000 tests (about 15 minutes)
+sbt "runMain retro.r2a03.R2A03Verilog"             # writes gen/R2A03Core.v
+```
+
+`retro.r2a03.Ricoh2A03` is a 6502 without decimal mode on the same framework as the SM83, with no
+change to `retro.core`. All 256 opcodes are implemented, the undocumented ones included (the
+unstable ANE/LXA use the constant EE; SHA/SHX/SHY/TAS corrupt the address high byte on a page
+cross), plus IRQ, NMI (with BRK hijacking), reset and JAM. It passes every one of the 2,560,000
+[SingleStepTests/65x02](https://github.com/SingleStepTests/65x02) `nes6502` tests cycle by cycle
+(read or write, address and data of every cycle, final registers and RAM), and runs nestest in
+automation mode matching all 8,991 lines of the Nintendulator log, cycle counts included.
+Interrupt dispatch, the CLI delay, NMI edge detection and the taken-branch polling quirk are
+checked by directed tests (`R2A03InterruptSim`), following the nesdev wiki. Not yet: a NES SoC
+(PPU, APU, OAM DMA, mappers) and a 2A03 reference model.
 
 ### Hardware test ROMs
 

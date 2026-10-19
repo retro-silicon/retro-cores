@@ -117,24 +117,50 @@ Examples from the SM83:
   Backends get `onCycle` (every clock, with stalls) and `onRetire` (every instruction, with its
   bus accesses and the registers after it).
 
-## Adding a new CPU (2A03 next)
+## Adding a new CPU
 
-1. **Registers.** Declare `Register`/`Pair`/`Flag` objects and a `RegFileSpec`. For the 6502 core
-   that is `A, X, Y, S, P, PC` and temporaries, with flags `C Z I D V N` as bits of `P`.
+The Ricoh 2A03 (`src/main/scala/retro/r2a03/Ricoh2A03.scala`) was the second CPU and the test of
+whether the framework is reusable. It went in without changing any file in `retro.core`. The
+steps, with what the 2A03 needed at each one:
+
+1. **Registers.** Declare `Register`/`Pair`/`Flag` objects and a `RegFileSpec`. The 2A03 has
+   `A X Y SP P`, PC as the pair `PCH:PCL`, the address temporaries `ADH:ADL` (pair `AD`) and the
+   data latch `D`, with the flags `C Z I D V N` as bits of `P`. Avoid names that clash with
+   `spinal.core` (`S`, `B`, `U`, `Reg`): the stack pointer is `SP` for that reason.
 2. **Bus.** `BusPlugin(RetroBusConfig(16, 8))`. The slave `stall` input models RDY.
-3. **Sequencer.** `new SequencerPlugin(opcodeWidth, resetOpcode = ..., illegal = ...)`. The
-   `illegal` cycle is what opcodes without a spec do.
-4. **Unit objects and plugins.** For example `Alu` with `OP`/`SRC` keys and `RESULT`/`FLAGS`
-   values, and an address-mode unit with `ZP_X`, `ABS_Y` and a page-cross `Cond`.
-5. **Opcode table.** Page-crossing penalty cycles are a `branchIf` that skips the fix-up cycle when
-   there is no carry. Read-modify-write dummy reads and writes are ordinary cycles.
-6. **Reference model and cosim.** Copy `Sm83Reference` and `Sm83CosimSim`. The probe and backends
-   are CPU-independent.
-7. **Toplevel.** `RetroCore(Seq(bus, sequencer, regfile, units..., isa, trace))`.
+3. **Sequencer.** `new SequencerPlugin(opcodeWidth, resetOpcode = ..., illegal = ...)`. The 2A03
+   uses 9 bits: the 256 opcodes, the interrupt dispatch at 0x100 and the reset sequence at 0x101.
+   `resetOpcode` is the reset sequence itself (7 cycles, then the fetch at the vector).
+4. **Unit objects and plugins.** `Alu` (`OP`/`SRC` keys, `RESULT` and one value per flag),
+   `Agu` (address generation: `ZP`, `STACK`, indexing with a no-carry `Cond`), `Interrupts`,
+   `Isa`. One plugin per unit provides the hardware.
+5. **Opcode table.** Generate it from the encoding where the encoding is regular: the 2A03 builds
+   addressing modes once (`addressed(mode, kind)`) and combines them with operand uses (read,
+   write, read-modify-write). Page-crossing penalty cycles are a `branchIf` that skips the fix-up
+   cycle when there is no carry. Dummy reads and writes are ordinary cycles. 6502-style overlap
+   (the result is written while the next opcode is fetched) is a transfer on the final `fetch`.
+   Sinks are resized, so `PCL -> Agu.PC_REL` takes the low byte of a 16-bit value.
+6. **Interrupts.** A plugin with `addFetchOverride`. The 6502 polls in the second-to-last cycle;
+   a register updated every completed cycle gives exactly that at the fetch. Exceptions are a
+   `CtrlKey` on the cycle concerned (`HOLD_POLL` on a taken branch, `SELECT` where the vector is
+   chosen and an NMI can hijack a BRK).
+7. **Tests.** Per-cycle single-instruction tests (SingleStepTests) when they exist, a known
+   program with a reference log (nestest), and directed tests for what neither covers
+   (`R2A03InterruptSim`). Copy `R2A03SingleStepSim`: reset, run to the first fetch, load the
+   state, compare every cycle. The probe and backends are CPU-independent.
+8. **Toplevel.** `RetroCore(Seq(bus, sequencer, regfile, units..., isa, trace))`.
 
-Not covered by the framework yet for the 2A03: 6502 interrupt polling happens on the
-second-to-last cycle rather than at the fetch. That needs a `CtrlKey` marking the polling cycle,
-read by the interrupt plugin, plus the hijacking rules for NMI during BRK.
+What the 2A03 showed about the framework:
+
+- Nothing in `retro.core` had to change: the bus, the sequencer, the register file and the trace
+  plugin carried a second, quite different CPU (every cycle a bus access, no prefix page, a
+  multi-cycle reset, interrupt polling before the fetch).
+- `OpSpec` requires the last cycle to be a fetch, so an instruction that never ends (JAM) carries
+  an unreachable fetch after its loop.
+- The single-step harnesses for the SM83 and the 2A03 are near copies; a shared one in `retro.sim`
+  would remove that.
+- There is no 2A03 reference model yet. The single-step tests and nestest stand in for one on the
+  CPU, but a NES system cosim (like `GameBoySim`) will need a model.
 
 ## SM83 timing notes
 
