@@ -161,18 +161,51 @@ Suite; `./roms` is gitignored and `GameBoyRomSim` is skipped when it is empty. T
 MBC5). Blargg's ROMs report over serial or in cartridge RAM, Mooneye's send the Fibonacci
 registers.
 
-Result on the RTL: 115 of the 134 ROMs pass, including all of Blargg's `cpu_instrs`,
+Result on the RTL: 114 of the 134 ROMs pass, including all of Blargg's `cpu_instrs`,
 `instr_timing`, `mem_timing`, `mem_timing-2` and `halt_bug`, every Mooneye acceptance test for
-CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, all twelve PPU tests
-(mode 3 lengths with objects and SCX, VRAM/OAM locking, LCD-on timing), Blargg's `oam_bug`
+CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, eleven of the twelve PPU
+tests (mode 3 lengths with objects and SCX, VRAM/OAM locking, LCD-on timing), Blargg's `oam_bug`
 (the DMG OAM corruption bug), and the MBC1 and MBC5 tests. The other 19 are registered as
 ignored with the reason: nine are for other models (DMG-0, MGB, SGB), `boot_hwio` needs the APU
 registers, MBC2 and the MBC1 multicart are not modelled, and `oam_bug`'s `7-timing_effect` alone
 runs far past its budget (part 7 of the combined `oam_bug` ROM, which passes, checks the same CRC).
+`intr_1_2_timing` fails since line 0's mode 2 interrupt reaches a running CPU an M-cycle late,
+as Mealybug's tests need; the two are not reconciled yet.
 
 `GameBoyLcdSim` runs [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (MIT, fetched by the
 same script) and checks the RTL's frame against the test's reference image and the reference
 model's frame, pixel for pixel; it writes both to `out/`.
+
+The same script fetches the DMG-relevant suites of
+[c-sp/game-boy-test-roms](https://github.com/c-sp/game-boy-test-roms) v7.0, Mealybug Tearoom
+Tests included (mid-scanline PPU register writes, checked by screenshot). Test ROMs are used
+whatever their license (some state none); commercial games never are.
+
+```sh
+sbt "Test/runMain retro.gb.GbSuiteReport rtl"        # every suite on the RTL; table in out/gb-suites-rtl.tsv
+sbt "Test/runMain retro.gb.GbSuiteReport model m3_"  # on the reference model, filtered by name
+```
+
+`SHARD=i/n` runs every n-th ROM, for parallel JVMs (give each its own `SIM_WORKSPACE`). Results
+on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped):
+
+| Suite | Pass | Fail |
+|---|---|---|
+| Mealybug Tearoom Tests | 15 | 9 |
+| Gambatte | 1323 | 461 |
+| GBMicrotest | 414 | 99 |
+| wilbertpol's Mooneye | 69 | 25 |
+| AGE | 3 | 11 |
+| Scribbltests | 4 | 1 |
+| SameSuite | 1 | 0 |
+| Bully, little-things, Strikethrough, TurtleTests | 0 | 5 |
+
+The pixel transfer is a port of SameBoy's DMG FIFO and fetcher, which passes the same 15
+Mealybug DMG tests; `PpuReference` lists the timing it pins down (register writes landing between
+a cycle's dots, mode 3 ending 3 dots before the last pixel, when a halted or running CPU sees a
+STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`OamDmaPlugin`). Gambatte's
+expectations differ from SameBoy's on some late window, object-disable and mode-0 interrupt cases,
+which fail here.
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
 VexiiRiscv: the plugin, fiber, database and pipeline APIs it uses all live in SpinalHDL's own
@@ -391,13 +424,13 @@ and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, PP
 DMA, cartridge with MBC1/MBC5) with system cosim.
 
 Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mooneye's CPU,
-interrupt, timer, serial and OAM DMA acceptance tests, all of Mooneye's PPU tests, Blargg's OAM
-corruption bug tests, and dmg-acid2 pixel for pixel (see *Hardware test ROMs*).
+interrupt, timer, serial and OAM DMA acceptance tests, Mooneye's PPU tests but one, Blargg's OAM
+corruption bug tests, dmg-acid2 pixel for pixel, and 1829 ROMs of the c-sp collection, 15 of
+Mealybug's 24 DMG tests among them (see *Hardware test ROMs*).
 
 NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
 127 of 133 blargg CPU/PPU/APU/MMC3 test ROMs, with sound checked against hardware recordings, and
 the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM/MMC3) cosimulated against it on those
 ROMs, audio included.
 
-Next: the APU, MBC2, DMA bus conflicts and STOP on the Game Boy; on the NES, simulation
-speed.
+Next: the APU, MBC2, MBC3 and STOP on the Game Boy; on the NES, simulation speed.

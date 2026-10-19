@@ -126,10 +126,11 @@ class CartridgePlugin(val spec: CartridgeSpec) extends FiberPlugin with DirectRe
     if (spec.ramBytes == 0) ramSlave.rdata := 0xFF
   }
 
-  /** Copies a ROM image into the simulated cartridge. */
+  /** Copies a ROM image into the simulated cartridge, and after the boot ROM its logo into VRAM. */
   def load(image: Array[Byte]): Unit = {
     require(image.length <= spec.romBytes, s"${image.length}-byte image, ${spec.romBytes}-byte ROM")
     val rom = logic.rom
     for (i <- 0 until spec.romBytes) rom.setBigInt(i, if (i < image.length) image(i) & 0xFF else 0xFF)
+    for (p <- host.get[PostBootPlugin]) p.simLoadVram(a => if (a < image.length) image(a) & 0xFF else 0xFF)
   }
 }

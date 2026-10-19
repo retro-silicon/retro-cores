@@ -1,74 +1,93 @@
 package retro.gb
 
-/** Dot-level model of the DMG PPU for `GbReference`, written from the Pan Docs pixel FIFO
-  * description; `PpuPlugin` is its RTL. Each M-cycle is four dots; `tick` runs them.
+/** Dot-level model of the DMG PPU for `GbReference`; `PpuPlugin` is its RTL. Each M-cycle is four
+  * dots; `tick` runs them.
   *
   * A line is 456 dots: OAM scan (80 dots, two OAM entries per M-cycle, up to ten objects), pixel
-  * transfer, then HBlank. Lines 144-153 are VBlank. In the transfer the background fetcher (tile
-  * number, low byte, high byte, two dots each) fills an 8-pixel FIFO whenever it is empty, and
-  * one pixel leaves the FIFO per dot. The first tile is fetched in 4 dots and its 8 pixels are
-  * dropped (they lie left of the screen, where objects with X < 8 start), as are SCX mod 8 more,
-  * so the transfer lasts 172 dots plus:
-  *  - SCX mod 8, the dropped pixels;
-  *  - 6 for the window: reaching WX - 7 empties the FIFO and restarts the fetcher on the window;
-  *  - for each object reached, 6 dots of object fetch, after the background fetcher has finished
-  *    the tile it is on (up to 5 more dots). The object's pixels mix into an object FIFO where it
-  *    is transparent, so an object fetched earlier (lower X, or earlier in OAM) wins.
-  * This reproduces Pan Docs' object penalty formula and all 105 cases of Mooneye's
-  * intr_2_mode0_timing_sprites.
+  * transfer, then HBlank. Lines 144-153 are VBlank. The pixel transfer is a port of SameBoy's DMG
+  * mode 3 (display.c), which Mealybug's mid-scanline register write tests are checked against:
+  * a background FIFO filled by a fetcher (tile number, low byte, high byte, two dots each, then a
+  * push once the FIFO is empty), an object FIFO, and a state machine (`sbStep`) that, per dot,
+  * checks for the window, fetches the objects at the current X, then shifts out a pixel and steps
+  * the fetcher. The first pixels are dropped left of the screen, SCX mod 8 more as the low bits
+  * of SCX match, and objects with X < 8 are fetched there.
   *
-  * Timing seen by the CPU, as Mooneye's PPU tests pin it down:
-  *  - STAT reads the mode after the M-cycle's third dot, so a transfer of L dots reads as mode 3
-  *    for ceil((L - 3) / 4) M-cycles from M-cycle 20 of the line;
-  *  - the STAT interrupt sees the transfer as it was before the M-cycle's dots, so its mode 0
-  *    request comes ceil(L / 4) M-cycles after M-cycle 20 (hblank_ly_scx_timing);
-  *  - LY reads the next line in the last M-cycle of a line;
+  * Timing seen by the CPU (Mooneye's PPU tests, Mealybug, SameBoy):
+  *  - STAT reads the mode after the M-cycle's third dot, and the STAT interrupt sees the
+  *    transfer state after its second dot (before the dots in the transfer's first M-cycle);
+  *    mode 3 ends for both 3 dots before the transfer's last pixel (`ended`);
+  *  - a write to a PPU register lands during the dots (`writeDot`): SCX before the first,
+  *    SCY, LCDC and the palettes before the second (the palettes show old | new and LCDC
+  *    old | new BG_EN for one dot first), WY and WX before the third; STAT and LYC after them;
+  *  - a halted CPU sees a STAT interrupt raised after the M-cycle's first dot an M-cycle late
+  *    (`statLate`), and a running CPU sees line 0's mode 2 interrupt an M-cycle late
+  *    (`statRunLate`, Mealybug's line_0_fix);
+  *  - LY reads the next line in the last M-cycle of a line, and 0 from the second M-cycle of
+  *    line 153, where LY = LYC also drops for one M-cycle;
   *  - the LY = LYC flag is only updated while the LCD is on, and stays on the STAT interrupt line
   *    while it is off (stat_lyc_onoff); it drops in a line's last M-cycle;
   *  - the first line after the LCD is turned on has no mode 2: it reads as mode 0 until the
   *    transfer, and OAM is not locked (lcdon_timing);
   *  - entering VBlank also raises a mode 2 STAT interrupt (vblank_stat_intr);
   *  - VRAM and OAM are locked against the CPU as `vramReadLocked` and the others describe.
-  *
-  * Not modelled: LY reading 0 early in line 153, and register writes landing mid-dot. */
+  * After the boot ROM the PPU is 98 M-cycles into line 153. */
 class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   var lcdc = if (postBoot) Gb.PostBoot.lcdc else 0
   var statSelect, scy, scx, lyc, bgp, obp0, obp1, wy, wx = 0
   /** M-cycle within the line (0-113) and the line. */
-  var x, ly = 0
+  var x = if (postBoot) Gb.PostBoot.ppuX else 0
+  var ly = if (postBoot) Gb.PostBoot.ppuLy else 0
   var mode = 0
   /** LY = LYC, compared only while the LCD is on: turning it off freezes the flag. */
   var coincidence = false
   /** The first line after the LCD is turned on, which has no OAM scan: it reads as mode 0. */
   private var firstLine = false
+  /** A STAT interrupt a halted CPU sees an M-cycle late, and one a running CPU does. */
+  var statLate, statRunLate = false
+  /** LY as read and compared: line 153 reads 0 after its first M-cycle. */
+  def lyNow = if (ly == Gb.frameLines - 1 && x >= 1) 0 else ly
   /** The mode the STAT interrupt sees. */
   var irqMode = 0
   private var statLine = false
 
   // Objects found by the OAM scan.
-  val objY, objX, objTile, objAttr = Array.fill(10)(0)
+  val objY, objX, objIndex = Array.fill(10)(0)
   var objCount = 0
-  private var fetched = 0
+  /** Objects fetched or passed in this line's transfer. */
+  private var objDone = 0
   // Window
-  private var wyHit, winUsed = false
-  var winLine = 0
+  private var wyHit = false
   // Pixel transfer
   private var transfer = false
   /** Dots the current or last pixel transfer has taken. */
   var transferDots = 0
-  private var pos8, discard = 0
-  private var fStep, fTileX, fTile, fLo, fHi = 0
-  private var fWindow, winActive = false
-  private var bgLo, bgHi, bgCount = 0
-  private var oLo, oHi, oPal, oPrio = 0
-  private var sActive = false
-  private var sStep, sSlot, sLo = 0
 
   /** The last frame drawn, shades 0 (white) to 3, row-major 160 x 144. */
   val frame = Array.fill(160 * 144)(0)
   var frames = 0L
   /** Called with each completed frame, as VBlank starts. */
   var onFrame: Array[Int] => Unit = _ => ()
+  /** Called with each pixel drawn (line, x, dot): dots count from 1, four per M-cycle tick, for
+    * comparing dot timing against other emulators. */
+  var onPixel: (Int, Int, Long) => Unit = null
+  private var dots = 0L
+  private var dotNow = 0L
+  /** Dots since reset, up to the end of the last tick: when this M-cycle's write lands. */
+  def time = dots
+
+  /** The dot of a write's M-cycle before which a register write lands, or 5 for after the
+    * M-cycle's dots. Outside the pixel transfer's lines everything lands after the dots. */
+  def writeDot(a: Int, d: Int): Int = a match {
+    case Gb.SCX => 1
+    case Gb.WY | Gb.WX => 3
+    case Gb.STAT | Gb.LYC => 5
+    case Gb.LCDC if ((lcdc ^ d) & 0x80) != 0 => 5
+    case _ => 2
+  }
+  private var scheduled: Option[(Int, Int)] = None
+  /** A CPU write to a PPU register in this M-cycle; it lands in `tick` (`writeDot`). */
+  def schedule(a: Int, d: Int): Unit = scheduled = Some(a -> d)
+  private def applyScheduled(): Unit = for ((a, d) <- scheduled) { scheduled = None; write(a, d); if (a == Gb.WX) wxJustChanged = true }
 
   def on = (lcdc & 0x80) != 0
 
@@ -88,7 +107,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     case Gb.STAT => 0x80 | statSelect << 3 | (if (coincidence) 4 else 0) | mode
     case Gb.SCY => scy
     case Gb.SCX => scx
-    case Gb.LY => if (on && x == Gb.lineCycles - 1) (if (ly == Gb.frameLines - 1) 0 else ly + 1) else ly
+    case Gb.LY => if (on && x == Gb.lineCycles - 1) (if (ly == Gb.frameLines - 1) 0 else ly + 1) else lyNow
     case Gb.LYC => lyc
     case Gb.BGP => bgp
     case Gb.OBP0 => obp0
@@ -113,16 +132,21 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
 
   private def lineStart(): Unit = {
     firstLine = false
-    if (ly == 0) { wyHit = false; winLine = 0 }
-    else if (winUsed) winLine = (winLine + 1) & 0xFF
-    winUsed = false
+    if (ly == 0) { wyHit = false; winY = -1 }
     objCount = 0
-    fetched = 0
     transfer = false
+    pixActive = false
   }
 
   /** One M-cycle. Returns the VBlank and STAT interrupt requests. */
   def tick(): (Boolean, Boolean) = {
+    val r = tickDots()
+    applyScheduled()
+    r
+  }
+
+  private def tickDots(): (Boolean, Boolean) = {
+    dots += 4
     val vblank = on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1
     if (vblank) { frames += 1; onFrame(frame) }
     if (!on) { x = 0; ly = 0; lineStart(); firstLine = true }
@@ -131,29 +155,59 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
 
     mode = 0
     irqMode = 0
+    // The STAT interrupt's mode before this M-cycle's dots, for a halted CPU.
+    var irqModeBefore = -1
     if (on && ly >= Gb.visibleLines) { mode = 1; irqMode = 1 }
     else if (on) {
-      if (ly == wy) wyHit = true
+      if (ly == wy && (lcdc & 0x20) != 0) wyHit = true
       val scanMode = if (firstLine) 0 else 2
       if (x < Gb.oamEnd) {
         scan(2 * x); scan(2 * x + 1)
         mode = scanMode; irqMode = scanMode
       } else {
-        irqMode = if (x == Gb.oamEnd) scanMode else if (transfer) 3 else 0
         if (x == Gb.oamEnd) startTransfer()
+        val transferBefore = transfer
+        irqModeBefore = if (x == Gb.oamEnd) scanMode else if (transfer) 3 else 0
+        val active = Array.fill(8)(false)
         for (i <- 1 to 4) {
-          if (transfer) dot()
-          if (i == 3) mode = if (transfer) 3 else 0
+          dotNow = dots - 4 + i
+          for ((a, d) <- scheduled if i >= writeDot(a, d)) {
+            if (a == Gb.LCDC && (lcdc & 2) != 0 && (d & 2) == 0 && duringObjFetch) abortObj = true
+            applyScheduled()
+          }
+          for ((a, d) <- scheduled if i == writeDot(a, d) - 1) glitch(a, d)
+          if (pixActive) sbDot()
+          wxJustChanged = false
+          active(i) = pixActive
         }
+        // Mode 3 ends 3 dots before the transfer does: look 3 dots past this M-cycle.
+        if (pixActive) {
+          val saved = snapshot()
+          dry = true
+          for (i <- 5 to 7) { if (pixActive) sbDot(); active(i) = pixActive }
+          dry = false
+          restore(saved)
+        }
+        def transferAfter(i: Int) = transferBefore && active(i + 3)
+        irqMode = if (x == Gb.oamEnd) scanMode else if (transferAfter(2)) 3 else 0
+        mode = if (transferAfter(3)) 3 else 0
+        transfer = transferAfter(4)
       }
     }
-    // The LY = LYC flag drops in the line's last M-cycle, where LY already reads the next line.
-    if (on) coincidence = ly == lyc && x != Gb.lineCycles - 1
+    // The LY = LYC flag drops in the line's last M-cycle, where LY already reads the next line,
+    // and in line 153's second M-cycle, where LY changes to 0.
+    if (on) coincidence = lyNow == lyc && x != Gb.lineCycles - 1 && !(ly == Gb.frameLines - 1 && x == 1)
     // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
     val vblankMode2 = ly == Gb.visibleLines && x == 0
-    val line = ((statSelect & 8) != 0 && coincidence) || on && (((statSelect & 4) != 0 && (irqMode == 2 || vblankMode2)) ||
-      ((statSelect & 2) != 0 && irqMode == 1) || ((statSelect & 1) != 0 && irqMode == 0))
+    def statFor(m: Int) = ((statSelect & 8) != 0 && coincidence) || on && (((statSelect & 4) != 0 && (m == 2 || vblankMode2)) ||
+      ((statSelect & 2) != 0 && m == 1) || ((statSelect & 1) != 0 && m == 0))
+    val line = statFor(irqMode)
     val stat = line && !statLine
+    // A halted CPU sees the STAT line as it was before this M-cycle's dots.
+    statLate = stat && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore)
+    // Line 0's mode 2 interrupt rises a dot later than other lines': a running CPU sees it an
+    // M-cycle later (Mealybug's line_0_fix), a halted one in time.
+    statRunLate = stat && ly == 0 && x == 0 && !firstLine && irqMode == 2
     statLine = line
     (vblank, stat)
   }
@@ -163,8 +217,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private def scan(e: Int): Unit = {
     val y = oam(4 * e)
     if (objCount < 10 && ly + 16 >= y && ly + 16 < y + objHeight) {
-      objY(objCount) = y; objX(objCount) = oam(4 * e + 1)
-      objTile(objCount) = oam(4 * e + 2); objAttr(objCount) = oam(4 * e + 3)
+      objY(objCount) = y; objX(objCount) = oam(4 * e + 1); objIndex(objCount) = e
       objCount += 1
     }
   }
@@ -172,93 +225,205 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private def startTransfer(): Unit = {
     transfer = true
     transferDots = 0
-    pos8 = 0; discard = scx & 7
-    fStep = 2; fTileX = 0x1F; fTile = 0; fWindow = false; winActive = false
-    bgCount = 0; oLo = 0; oHi = 0; oPal = 0; oPrio = 0
-    sActive = false
+    bgSize = 8; java.util.Arrays.fill(bgF, 0)
+    obSize = 0
+    lcdX = 0; pos = -16; pixActive = true
+    fSt = 0; sbSt = 0; sbWait = 7
+    insertBg = false; noInsertGlitch = false; wxTriggered = false; abortObj = false; duringObjFetch = false
+    objDone = 0
   }
 
-  /** VRAM index of a background or window tile's row byte. */
-  private def tileData(tile: Int, row: Int, high: Int) =
-    (if ((lcdc & 0x10) == 0 && (tile & 0x80) == 0) 0x1000 else 0) + tile * 16 + row * 2 + high
+  // ---- The pixel transfer: SameBoy's DMG FIFO and fetcher --------------------------------------
+  private var winY = -1
+  private var pixActive = false
+  /** The `sbStep` state, and dots to wait before the next step. */
+  private var sbSt, sbWait = 0
+  private var pos = -16
+  private var lcdX = 0
+  // FIFOs: index 0 leaves first.
+  private val bgF = new Array[Int](8); private var bgSize = 0
+  private val obPix, obPal, obPrio = new Array[Int](8); private var obSize = 0
+  private var fSt, tileIdxAddr, curTile, tileDataAddr, data0, data1 = 0
+  private var wxTriggered, winFetching, insertBg, noInsertGlitch, wxJustChanged, duringObjFetch, abortObj = false
+  private var winTileX = 0
+  private var oTile, oFlags, sbObjLo, fetchSlot = 0
+  private var lastShade = 0
+  /** Looking ahead (`tickDots`): no pixels go out. */
+  private var dry = false
 
-  private def bgRow = if (fWindow) winLine else (ly + scy) & 0xFF
-
-  private def objRow(s: Int, high: Int) = {
-    val r = (ly + 16 - objY(s)) & 0xF
-    val row = if ((objAttr(s) & 0x40) != 0) objHeight - 1 - r else r
-    val tile = if (objHeight == 16) objTile(s) & 0xFE else objTile(s)
-    val b = vram(tile * 16 + (row & 0xF) * 2 + high)
-    if ((objAttr(s) & 0x20) != 0) Integer.reverse(b) >>> 24 else b
+  /** The value a palette or LCDC write shows for the dot before it lands. */
+  private def glitch(a: Int, d: Int): Unit = a match {
+    case Gb.BGP | Gb.OBP0 | Gb.OBP1 => write(a, read(a) | d)
+    case Gb.LCDC if ((lcdc ^ d) & 0x80) == 0 =>
+      var old = lcdc
+      if ((pos == 0 || duringObjFetch) && (d & 2) == 0) {
+        if ((old & 2) != 0 && duringObjFetch) abortObj = true
+        old &= ~2
+      }
+      if ((old & 0x20) != 0 && (d & 0x20) == 0 && winFetching) noInsertGlitch = true
+      lcdc = old | (d & 1)
+    case _ =>
   }
 
-  private def dot(): Unit = {
-    transferDots += 1
-    if (sActive) {
-      sStep += 1
-      if (sStep == 4) sLo = objRow(sSlot, 0)
-      if (sStep == 6) {
-        val hi = objRow(sSlot, 1)
-        val pal = (objAttr(sSlot) >> 4) & 1
-        val prio = (objAttr(sSlot) >> 7) & 1
-        for (b <- 0 until 8) {
-          val m = 1 << b
-          if (((oLo | oHi) & m) == 0) {
-            oLo = oLo & ~m | sLo & m
-            oHi = oHi & ~m | hi & m
-            oPal = oPal & ~m | (if (pal != 0) m else 0)
-            oPrio = oPrio & ~m | (if (prio != 0) m else 0)
-          }
-        }
-        fetched |= 1 << sSlot
-        sActive = false
-      }
-      return
+  private def bgPop(): Int = { val v = bgF(0); shift(bgF); bgSize -= 1; v }
+  private def shift(a: Array[Int]): Unit = { for (k <- 0 until 7) a(k) = a(k + 1); a(7) = 0 }
+  private def xMatch = if (pos + 8 < 0) 0 else pos + 8
+  /** The next object to fetch at the current X, in OAM order, or -1. */
+  private def pendingObj = if ((lcdc & 2) == 0) -1 else (0 until objCount).find(i => (objDone & (1 << i)) == 0 && objX(i) == xMatch).getOrElse(-1)
+  private def fetcherY = if (wxTriggered) winY & 0xFF else (ly + scy) & 0xFF
+
+  private def advance(): Unit = fSt match {
+    case 0 =>
+      if ((lcdc & 0x20) == 0) wxTriggered = false
+      val map = if (!wxTriggered && (lcdc & 8) != 0 || wxTriggered && (lcdc & 0x40) != 0) 0x1C00 else 0x1800
+      val y = fetcherY
+      val x = if (wxTriggered) winTileX else if (pos < -8) scx >> 3 else ((scx + pos + 8) >> 3) & 0x1F
+      tileIdxAddr = map + x + (y >> 3) * 32
+      fSt = 1
+    case 1 => curTile = vram(tileIdxAddr); fSt = 2
+    case 2 | 4 =>
+      val base = if ((lcdc & 0x10) != 0) curTile * 16 else curTile.toByte * 16 + 0x1000
+      tileDataAddr = base + (fetcherY & 7) * 2 + (if (fSt == 4) 1 else 0)
+      fSt += 1
+    case 3 => data0 = vram(tileDataAddr); fSt = 4
+    case 5 =>
+      data1 = vram(tileDataAddr)
+      if (wxTriggered) winTileX = (winTileX + 1) & 0x1F
+      push()
+    case _ => push()
+  }
+
+  private def push(): Unit = {
+    fSt = 6
+    if (bgSize > 0) return
+    if (wyHit && (lcdc & 0x20) == 0 && !noInsertGlitch) {
+      val logical = if (pos + 7 > 167) 0 else pos + 7
+      if (wx == logical) { bgF(0) = 0; bgSize = 1; return }
     }
-    // Reaching WX - 7 restarts the fetcher on the window; this dot is its first step.
-    if (!winActive && (lcdc & 0x20) != 0 && wyHit && discard == 0 && pos8 == wx + 1) {
-      winActive = true; winUsed = true; fWindow = true
-      fTileX = 0; fStep = 1; bgCount = 0
-      return
+    for (b <- 0 until 8) bgF(b) = (if ((data1 << b & 0x80) != 0) 2 else 0) | (if ((data0 << b & 0x80) != 0) 1 else 0)
+    bgSize = 8
+    fSt = 0
+  }
+
+  private def render(): Unit = {
+    if ((lcdc & 2) != 0 && (0 until objCount).exists(i => (objDone & (1 << i)) == 0 && objX(i) == 0)) return
+    if (bgSize == 0) return
+    val bg = if (insertBg) { insertBg = false; 0 } else bgPop()
+    var draw = false; var op, opal, oprio = 0
+    if (obSize > 0) {
+      op = obPix(0); opal = obPal(0); oprio = obPrio(0)
+      shift(obPix); shift(obPal); shift(obPrio); obSize -= 1
+      draw = op != 0 && (lcdc & 2) != 0
     }
-    // Background fetcher. A push also counts as the next fetch's first step.
-    fStep match {
-      case 6 =>
-        if (bgCount == 0) {
-          bgLo = fLo; bgHi = fHi; bgCount = 8
-          fTileX = (fTileX + 1) & 0x1F
-          fStep = 1
-        }
-      case s =>
-        if (s == 1) {
-          val base = if ((lcdc & (if (fWindow) 0x40 else 0x08)) != 0) 0x1C00 else 0x1800
-          val col = if (fWindow) fTileX else ((scx >> 3) + fTileX) & 0x1F
-          fTile = vram(base + (bgRow >> 3) * 32 + col)
-        }
-        if (s == 3) fLo = vram(tileData(fTile, bgRow & 7, 0))
-        if (s == 5) fHi = vram(tileData(fTile, bgRow & 7, 1))
-        fStep = s + 1
+    if (pos >= -16 && pos < -8) {
+      if ((pos & 7) == (scx & 7)) pos = -8
+      else if (winFetching && (pos & 7) == 6 && (scx & 7) == 7) pos = -8
+      else if (pos == -9) { pos = -16; return }
     }
-    // An object starting here stops the pixels until the fetcher has its tile, then is fetched.
-    if ((lcdc & 2) != 0 && discard == 0) {
-      val hit = (0 until objCount).find(i => (fetched & (1 << i)) == 0 && objX(i) == pos8)
-      for (i <- hit) {
-        if (bgCount > 0 && fStep == 6) { sActive = true; sStep = 1; sSlot = i }
-        return
-      }
-    }
-    if (bgCount == 0) return
-    val bg = (if ((bgHi & 0x80) != 0) 2 else 0) | (if ((bgLo & 0x80) != 0) 1 else 0)
-    bgLo = (bgLo << 1) & 0xFF; bgHi = (bgHi << 1) & 0xFF; bgCount -= 1
-    if (discard > 0) { discard -= 1; return }
-    val obj = (if ((oHi & 0x80) != 0) 2 else 0) | (if ((oLo & 0x80) != 0) 1 else 0)
-    val pal = (oPal >> 7) & 1; val prio = (oPrio >> 7) & 1
-    oLo = (oLo << 1) & 0xFF; oHi = (oHi << 1) & 0xFF; oPal = (oPal << 1) & 0xFF; oPrio = (oPrio << 1) & 0xFF
+    winFetching = false
+    if (pos < 0 || pos >= 160) { pos += 1; return }
     val c = if ((lcdc & 1) != 0) bg else 0
-    if (pos8 >= 8) frame(ly * 160 + pos8 - 8) =
-      if ((lcdc & 2) != 0 && obj != 0 && !(prio != 0 && c != 0)) ((if (pal != 0) obp1 else obp0) >> (2 * obj)) & 3
-      else (bgp >> (2 * c)) & 3
-    pos8 += 1
-    if (pos8 == 168) transfer = false
+    if (draw && c != 0 && oprio != 0) draw = false
+    val shade = if (draw) ((if (opal != 0) obp1 else obp0) >> (2 * op)) & 3 else (bgp >> (2 * c)) & 3
+    if (lcdX < 160 && !dry) {
+      frame(ly * 160 + lcdX) = shade
+      if (onPixel != null) onPixel(ly, lcdX, dotNow)
+    }
+    lastShade = shade
+    pos += 1; lcdX += 1
   }
+
+  private def sbDot(): Unit = {
+    transferDots += 1
+    if (abortObj) { abortObj = false; if (sbSt >= 1 && sbSt <= 6) { sbSt = 7; sbWait = 0 } }
+    if (sbWait > 0) sbWait -= 1
+    else {
+      sbWait = -1
+      while (pixActive && sbWait < 0) sbStep()
+    }
+  }
+
+  /** One run of SameBoy's mode 3 loop up to its next sleep, which sets `sbWait`. */
+  private def sbStep(): Unit = sbSt match {
+    case 0 =>
+      if (!wxTriggered && wyHit && (lcdc & 0x20) != 0) {
+        val act = if (wx == 0) pos == -7 || pos == -16 && (scx & 7) != 0 || pos >= -15 && pos <= -8
+          else if (wx < 166) wx == ((pos + 7) & 0xFF) || wx == ((pos + 6) & 0xFF) && !wxJustChanged && { if (lcdX > 0) lcdX -= 1; true }
+          else false
+        if (act) {
+          winY += 1; winTileX = 0; bgSize = 0
+          wxTriggered = true; fSt = 0; winFetching = true
+          if (wx == 0 && (scx & 7) != 0) { sbSt = 8; sbWait = 0; return }
+        } else if (wx == 166 && wx == ((pos + 7) & 0xFF)) winY += 1
+      }
+      sbSt = 9
+    case 8 => sbSt = 9 // after the WX = 0 delay
+    case 9 =>
+      if (wx == ((pos + 7) & 0xFF) && wxTriggered && !winFetching && fSt == 0 && bgSize == 8) insertBg = true
+      for (i <- 0 until objCount if objX(i) < xMatch) objDone |= 1 << i
+      duringObjFetch = true
+      sbSt = if (pendingObj >= 0) 1 else 7
+    case 1 =>
+      // Finish the background tile before the object; state 2 is entered in the same dot.
+      sbSt = if (fSt < 5 || bgSize == 0) 1 else 3
+      advance(); sbWait = 0
+    case 3 =>
+      advance()
+      fetchSlot = pendingObj
+      val e = objIndex(fetchSlot)
+      oTile = oam(4 * e + 2); oFlags = oam(4 * e + 3)
+      sbSt = 4; sbWait = 1
+    case 4 =>
+      sbObjLo = vram(objLine(fetchSlot)); sbSt = 5; sbWait = 1
+    case 5 =>
+      duringObjFetch = false
+      overlay(sbObjLo, vram(objLine(fetchSlot) + 1))
+      objDone |= 1 << fetchSlot
+      sbSt = 6; sbWait = 0
+    case 6 => sbSt = if (pendingObj >= 0) 1 else 7
+    case 7 =>
+      duringObjFetch = false
+      render()
+      advance()
+      if (pos == 160) {
+        pixActive = false
+        while (lcdX < 160) { if (!dry) frame(ly * 160 + lcdX) = lastShade; lcdX += 1 }
+        wxTriggered = false
+      } else { sbSt = 0; sbWait = 0 }
+  }
+
+  private def objLine(i: Int): Int = {
+    val h16 = (lcdc & 4) != 0
+    var y = (ly - objY(i)) & (if (h16) 0xF else 7)
+    if ((oFlags & 0x40) != 0) y ^= (if (h16) 0xF else 7)
+    (if (h16) oTile & 0xFE else oTile) * 16 + y * 2
+  }
+
+  private def overlay(lo: Int, hi: Int): Unit = {
+    while (obSize < 8) { obPix(obSize) = 0; obPal(obSize) = 0; obPrio(obSize) = 0; obSize += 1 }
+    val flip = (oFlags & 0x20) != 0
+    for (b <- 0 until 8) {
+      val p = (if ((hi << b & 0x80) != 0) 2 else 0) | (if ((lo << b & 0x80) != 0) 1 else 0)
+      val k = if (flip) 7 - b else b
+      if (p != 0 && obPix(k) == 0) { obPix(k) = p; obPal(k) = (oFlags >> 4) & 1; obPrio(k) = (oFlags >> 7) & 1 }
+    }
+  }
+
+  // The transfer state the look-ahead changes.
+  private def snapshot() = (transferDots, winY, pixActive, sbSt, sbWait, pos, lcdX, bgF.clone, bgSize,
+    (obPix.clone, obPal.clone, obPrio.clone, obSize), (fSt, tileIdxAddr, curTile, tileDataAddr, data0, data1),
+    (wxTriggered, winFetching, insertBg, noInsertGlitch, wxJustChanged, duringObjFetch, abortObj),
+    (winTileX, objDone, oTile, oFlags, sbObjLo, lastShade, fetchSlot))
+  private def restore(s: ReturnType): Unit = {
+    transferDots = s._1; winY = s._2; pixActive = s._3; sbSt = s._4; sbWait = s._5; pos = s._6; lcdX = s._7
+    Array.copy(s._8, 0, bgF, 0, 8); bgSize = s._9
+    Array.copy(s._10._1, 0, obPix, 0, 8); Array.copy(s._10._2, 0, obPal, 0, 8); Array.copy(s._10._3, 0, obPrio, 0, 8)
+    obSize = s._10._4
+    fSt = s._11._1; tileIdxAddr = s._11._2; curTile = s._11._3; tileDataAddr = s._11._4; data0 = s._11._5; data1 = s._11._6
+    wxTriggered = s._12._1; winFetching = s._12._2; insertBg = s._12._3; noInsertGlitch = s._12._4
+    wxJustChanged = s._12._5; duringObjFetch = s._12._6; abortObj = s._12._7
+    winTileX = s._13._1; objDone = s._13._2; oTile = s._13._3; oFlags = s._13._4; sbObjLo = s._13._5; lastShade = s._13._6; fetchSlot = s._13._7
+  }
+  private type ReturnType = (Int, Int, Boolean, Int, Int, Int, Int, Array[Int], Int, (Array[Int], Array[Int], Array[Int], Int),
+    (Int, Int, Int, Int, Int, Int), (Boolean, Boolean, Boolean, Boolean, Boolean, Boolean, Boolean), (Int, Int, Int, Int, Int, Int, Int))
 }

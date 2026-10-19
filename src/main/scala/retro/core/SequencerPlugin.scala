@@ -2,6 +2,7 @@ package retro.core
 
 import spinal.core._
 import spinal.core.fiber._
+import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.logic.{DecodingSpec, Masked}
 import spinal.lib.misc.plugin._
@@ -161,7 +162,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     }
 
     // ---- Generated decoder ---------------------------------------------------------------
-    val ir = Reg(Bits(opcodeWidth bits)) init resetOpcode
+    val ir = (Reg(Bits(opcodeWidth bits)) init resetOpcode).simPublic()
     val step = Reg(UInt(stepWidth bits)) init 0
 
     val spec = new DecodingSpec(HardType(Bits(wordWidth bits)))
@@ -177,11 +178,20 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     def slice(f: Field) = word(f.offset, f.width bits).asUInt
 
     // ---- Datapath --------------------------------------------------------------------------
+    // The sources some microcode puts on the bus. Only those feed its address and data, so
+    // values that depend on the bus access (interrupt requests a write can raise) do not loop.
+    val busSources = ops.values.flatMap(_.cycles.map(_.bus)).flatMap {
+      case BusOp.Idle => Nil
+      case BusOp.Read(a) => Seq(a)
+      case BusOp.Write(a, d) => Seq(a, d)
+      case BusOp.Fetch(a) => Seq(a)
+      case BusOp.Prefix(a, _) => Seq(a)
+    }.toSet
     def select(sel: UInt, width: Int, busSide: Boolean = false): UInt = {
       val r = UInt(width bits)
       r := 0
       switch(sel) {
-        for ((source, i) <- sourceList.zipWithIndex if !(busSide && rdataSources(source))) is(i + 1) { r := sources(source).resized }
+        for ((source, i) <- sourceList.zipWithIndex if !busSide || busSources(source) && !rdataSources(source)) is(i + 1) { r := sources(source).resized }
         if (sourceList.size + 1 < (1 << selWidth)) default {}
       }
       r

@@ -98,7 +98,8 @@ object Interrupts {
   val ACK = CtrlKey("INT_ACK", 1)
   val PENDING = Cond("INT.pending")
   val NOT_PENDING = Cond("!INT.pending")
-  /** An interrupt is pending while IME is off: HALT exits without incrementing PC. */
+  /** An interrupt is pending as HALT starts: HALT exits without incrementing PC, so with IME off
+    * the next byte runs twice (the HALT bug) and with IME on the dispatch returns to the HALT. */
   val HALT_BUG = Cond("INT.haltbug")
   /** Set on HALT's waiting fetch: while nothing is pending, IR reloads `Sm83.HALTED` instead
     * of the fetched opcode, so the CPU keeps fetching at PC without executing anything. */
@@ -241,6 +242,10 @@ object Sm83 {
     def cpuRequests: Bits
     /** Pulses the index being serviced, so the controller clears that IF bit. */
     def cpuAck: Flow[UInt]
+    /** Requests the interrupt check does not see until the next M-cycle: raised too late in this
+      * one for a halted CPU, and for a running one. */
+    def cpuLateHalted: Bits
+    def cpuLateRunning: Bits
   }
 
   /** IME, EI/DI/RETI and interrupt dispatch. `requests` is IE & IF (bit 0 VBlank ... bit 4
@@ -264,25 +269,30 @@ object Sm83 {
       seq.addKey(Interrupts.HALT_WAIT)
       val imeOp = seq.ctrl(Interrupts.IME_OP)
 
-      val requests = Bits(5 bits)
+      val requests, lateHalted, lateRunning = Bits(5 bits)
       val ack = Flow(UInt(3 bits))
       controller match {
-        case Some(c) => requests := c.cpuRequests; c.cpuAck := ack
-        case None => in(requests); master(ack)
+        case Some(c) =>
+          requests := c.cpuRequests; c.cpuAck := ack
+          lateHalted := c.cpuLateHalted; lateRunning := c.cpuLateRunning
+        case None => in(requests); master(ack); lateHalted := 0; lateRunning := 0
       }
       val ime = RegInit(False).simPublic()
       val imeNext = RegInit(False).simPublic()
 
       val pending = requests =/= 0
+      // The fetch's interrupt check leaves out requests raised too late in the M-cycle for it.
+      val halted = seq.ctrl(Interrupts.HALT_WAIT) === 1
+      val fetchPending = (requests & ~(halted ? lateHalted | lateRunning)) =/= 0
       val enabled = ime || imeNext
       val effective = imeOp === Interrupts.RETI || (enabled && imeOp =/= Interrupts.DI)
-      val dispatch = effective && pending
+      val dispatch = effective && fetchPending
       val index = OHToUInt(OHMasking.first(requests))
 
-      seq.addFetchOverride(seq.ctrl(Interrupts.HALT_WAIT) === 1 && !pending, U(HALTED, 10 bits))
+      seq.addFetchOverride(halted && !fetchPending, U(HALTED, 10 bits))
       seq.addFetchOverride(dispatch, U(DISPATCH, 10 bits))
       val pc = host[RegFileService].read(PC)
-      seq.addSource(Interrupts.HALT_PC, pending ? (pc + 1) | pc)
+      seq.addSource(Interrupts.HALT_PC, fetchPending ? (pc + 1) | pc)
       when(seq.fetchFire) {
         ime := effective && !dispatch
         imeNext := imeOp === Interrupts.EI && !dispatch
@@ -293,7 +303,7 @@ object Sm83 {
       seq.addSource(Interrupts.VECTOR, pending ? (U(0x40, 16 bits) + (index @@ U"000").resized) | U(0, 16 bits))
       seq.addCond(Interrupts.PENDING, pending)
       seq.addCond(Interrupts.NOT_PENDING, !pending)
-      seq.addCond(Interrupts.HALT_BUG, pending && !enabled)
+      seq.addCond(Interrupts.HALT_BUG, pending)
       retainer.release()
     }
   }
@@ -445,7 +455,8 @@ object Sm83 {
     // HALT waits for a pending interrupt by fetching at PC every M-cycle until one is pending
     // (HALTED is the opcode that waits), so the wake-up fetch dispatches in the same cycle as a
     // running CPU would (Mooneye di_timing, halt_ime1_timing2). Entered with one already
-    // pending and IME off, the next fetch does not increment PC (the HALT bug).
+    // pending, the next fetch does not increment PC: the HALT bug with IME off, and with IME on
+    // the dispatch returns to the HALT (AGE ei-halt).
     val haltWait = MCycleSpec.fetch(PC).assign(PC -> Interrupts.HALT_PC).set(Interrupts.HALT_WAIT, 1)
     op("HALT", 0x76, idle.branchIf(Interrupts.HALT_BUG, 2), haltWait, MCycleSpec.fetch(PC))
     op("HALTED", HALTED, haltWait)

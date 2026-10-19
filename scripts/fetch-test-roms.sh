@@ -1,7 +1,11 @@
 #!/bin/sh
 # Downloads the freely distributable Game Boy test ROMs into ./roms (gitignored):
 # Blargg's CPU tests (gbdev.gg8.se mirror of the originals), the Mooneye Test Suite (MIT) and
-# dmg-acid2 (MIT) with its reference image.
+# dmg-acid2 (MIT) with its reference image; and from c-sp/game-boy-test-roms (MIT) the DMG-relevant
+# suites with their reference screenshots: Mealybug Tearoom Tests, AGE, Bully, Scribbltests and
+# Strikethrough (MIT), Gambatte (GPLv2), GBMicrotest (MIT), wilbertpol's Mooneye fork (GPLv3),
+# little-things-gb (zlib), SameSuite (X11), rtc3test (public domain), MBC3 Tester and TurtleTests
+# (no license stated).
 # `sbt "testOnly retro.gb.GameBoyRomSim"` runs them; without ./roms that suite is skipped.
 set -eu
 cd "$(dirname "$0")/.."
@@ -18,4 +22,11 @@ unzip -qo "$tmp/mts.zip" -d "$tmp" && rm -rf roms/mooneye && mv "$tmp/$mts" roms
 mkdir -p roms/dmg-acid2
 curl -fsSL -o roms/dmg-acid2/dmg-acid2.gb https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb
 curl -fsSL -o roms/dmg-acid2/reference-dmg.png https://raw.githubusercontent.com/mattcurrie/dmg-acid2/master/img/reference-dmg.png
+v=7.0
+curl -fsSL -o "$tmp/c-sp.zip" "https://github.com/c-sp/game-boy-test-roms/releases/download/v$v/game-boy-test-roms-v$v.zip"
+unzip -qo "$tmp/c-sp.zip" -d "$tmp/c-sp" && rm -rf roms/c-sp && mkdir -p roms/c-sp
+for s in mealybug-tearoom-tests age-test-roms bully gambatte gbmicrotest little-things-gb mbc3-tester \
+    mooneye-test-suite-wilbertpol rtc3test same-suite scribbltests strikethrough turtle-tests; do
+  mv "$tmp/c-sp/$s" roms/c-sp/
+done
 find roms -name '*.gb' | wc -l

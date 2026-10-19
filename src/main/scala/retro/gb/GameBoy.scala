@@ -50,6 +50,27 @@ object Gb {
       H -> 0x01, L -> 0x4D, SPH -> 0xFF, SPL -> 0xFE, PC -> 0x0100)
     val counter = 0xABC8
     val lcdc = 0x91
+    /** Where the PPU is: M-cycle 98 of line 153. */
+    val ppuX = 98
+    val ppuLy = 153
+
+    /** The VRAM the boot ROM leaves: the cartridge header's logo (0x104-0x133) as tiles 1-24,
+      * each bit doubled, the (R) tile as tile 25, and the map rows at 0x9904 and 0x9924 that
+      * show them. `rom` reads the cartridge. */
+    def vram(rom: Int => Int): Array[Int] = {
+      val v = Array.fill(0x2000)(0)
+      var at = 0x10
+      for (i <- 0 until 48; nibble <- Seq(4, 0)) {
+        val n = (rom(0x104 + i) >> nibble) & 0xF
+        val doubled = (0 until 4).map(b => ((n >> b) & 1) * (3 << (2 * b))).sum
+        v(at) = doubled; v(at + 2) = doubled
+        at += 4
+      }
+      for ((b, i) <- Seq(0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C).zipWithIndex) v(0x190 + 2 * i) = b
+      for (i <- 0 until 12) { v(0x1904 + i) = 1 + i; v(0x1924 + i) = 13 + i }
+      v(0x1910) = 0x19
+      v
+    }
   }
 
   def timerTap(counter: Int, tac: Int): Boolean =
@@ -63,18 +84,28 @@ object Gb {
 class InterruptControllerPlugin extends FiberPlugin with IrqService with Sm83.InterruptController {
   val irqLock = Retainer()
   private val lines = ArrayBuffer[(IrqLine, Bool)]()
+  private val lateLines = ArrayBuffer[(IrqLine, Boolean, Bool)]()
   def request(line: IrqLine): Bool = {
     val b = Bool().setCompositeName(this, s"irq_${line.name}")
     lines += line -> b
     b
   }
+  /** A request raised this M-cycle that the CPU's interrupt check sees only in the next one,
+    * when it is halted (`halted`) or when it runs. Retain `irqLock` before calling it. */
+  def late(line: IrqLine, halted: Boolean): Bool = {
+    val b = Bool().setCompositeName(this, s"irq_${line.name}_late${if (halted) "Halted" else "Running"}")
+    lateLines += ((line, halted, b))
+    b
+  }
 
   val early = during setup new Area {
-    val requests = Bits(5 bits)
+    val requests, lateHalted, lateRunning = Bits(5 bits)
     val ack = Flow(UInt(3 bits))
   }
   def cpuRequests = early.requests
   def cpuAck = early.ack
+  def cpuLateHalted = early.lateHalted
+  def cpuLateRunning = early.lateRunning
 
   val logic = during setup new Area {
     val bus = host[BusService]
@@ -96,12 +127,17 @@ class InterruptControllerPlugin extends FiberPlugin with IrqService with Sm83.In
     val acked = early.ack.valid ? UIntToOh(early.ack.payload, 5) | B(0, 5 bits)
     flags := written & ~acked
     early.requests := ticked & enable(4 downto 0)
+    def lateOf(halted: Boolean) = (0 until 5).map(i => lateLines.filter(l => l._1.index == i && l._2 == halted).map(_._3).foldLeft(False: Bool)(_ || _)).asBits()
+    early.lateHalted := lateOf(true)
+    early.lateRunning := lateOf(false)
   }
 }
 
 /** Plugins that need a bus slave and maybe interrupt lines, wired the same way. */
 abstract class GbPeripheral(mapping: AddressMapping, irqs: IrqLine*) extends FiberPlugin {
   def body(slave: BusSlave, irq: Seq[Bool]): Area
+  /** Called before the interrupt controller builds, for other uses of it. */
+  def withController(ctrl: IrqService): Unit = {}
 
   val logic = during setup new Area {
     val bus = host[BusService]
@@ -110,6 +146,7 @@ abstract class GbPeripheral(mapping: AddressMapping, irqs: IrqLine*) extends Fib
     awaitBuild()
     val slave = bus.newSlave(mapping)
     val lines = irqs.map(ctrl.request)
+    withController(ctrl)
     retainers.foreach(_.release())
     val impl = body(slave, lines)
   }
@@ -256,6 +293,14 @@ class PostBootPlugin extends FiberPlugin {
     val rf = host[RegFileService]
     for ((r, v) <- Gb.PostBoot.regs) rf.setReset(r, v)
   }
+
+  /** For sims: fills VRAM as the boot ROM leaves it for the cartridge `rom` reads
+    * (`Gb.PostBoot.vram`). `CartridgePlugin.load` calls it. */
+  def simLoadVram(rom: Int => Int): Unit = {
+    import spinal.core.sim._
+    val mem = host.list[RamPlugin].find(_.ramName == "vram").get.logic.mem
+    for ((v, i) <- Gb.PostBoot.vram(rom).zipWithIndex) mem.setBigInt(i, v)
+  }
 }
 
 /** The Game Boy: the SM83 plugins plus the SoC plugins, in one host. Whatever no plugin maps
@@ -272,7 +317,7 @@ object GameBoy {
     new InterruptControllerPlugin,
     new TimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
     new SerialPlugin,
-    new PpuPlugin(if (postBoot) Gb.PostBoot.lcdc else 0),
+    if (postBoot) new PpuPlugin(Gb.PostBoot.lcdc, Gb.PostBoot.ppuX, Gb.PostBoot.ppuLy) else new PpuPlugin,
     new JoypadPlugin
   ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil) ++ cartridge.map(new CartridgePlugin(_))
 

@@ -34,6 +34,7 @@ class GameBoySim extends AnyFunSuite {
       val mem = cart.clone()
       val buttonLog = ArrayBuffer[Int]()
       val ref = new GbReference(cart.clone())
+      dut.host[PostBootPlugin].simLoadVram(cart)
       val cpu = ref.cpu
       var refReset = false
       val serial = ArrayBuffer[Int]()
@@ -72,9 +73,8 @@ class GameBoySim extends AnyFunSuite {
         }
         if (io.cmd.valid.toBoolean && io.cmd.write.toBoolean && io.cmd.address.toInt >= 0x8000) mem(io.cmd.address.toInt) = io.cmd.data.toInt
         if (tx.valid.toBoolean) serial += tx.payload.toInt
-        val valid = lcd.valid.toInt
+        LcdPixels.capture(lcd, frame)
         val y = lcd.y.toInt
-        if (valid != 0) for (i <- 0 until 4 if (valid >> i & 1) != 0) frame(y * 160 + lcd.x(i).toInt) = lcd.shade(i).toInt
         if (lastY == Gb.visibleLines - 1 && y == Gb.visibleLines) rtlFrames += frame.clone()
         lastY = y
         if (rnd.nextDouble() < buttonRate) { pressed = rnd.nextInt(256); buttons #= pressed }
@@ -90,7 +90,9 @@ class GameBoySim extends AnyFunSuite {
       val frames = rtlFrames.size min refFrames.size
       for (k <- 0 until frames) {
         val differ = GbFrame.differences(rtlFrames(k), refFrames(k))
-        assert(differ == 0, s"frame $k: $differ pixels differ")
+        def firstDiffs = (0 until 160 * 144).filter(i => rtlFrames(k)(i) != refFrames(k)(i)).take(8)
+          .map(i => s"(${i % 160},${i / 160}) rtl ${rtlFrames(k)(i)} ref ${refFrames(k)(i)}").mkString(", ")
+        assert(differ == 0, s"frame $k: $differ pixels differ, first $firstDiffs")
       }
       result = Result(seen.toMap, serial.toList, ref, frames)
       simSuccess()

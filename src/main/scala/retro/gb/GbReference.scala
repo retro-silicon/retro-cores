@@ -19,11 +19,14 @@ import scala.collection.mutable.ArrayBuffer
 class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDma: Boolean = false) extends Sm83Bus {
   /** IE & IF after each M-cycle's tick, for the CPU's interrupt decisions. */
   // The CPU only looks a few M-cycles back, so a ring keeps long runs in bounded memory.
+  private var dmaByte, dmaRaw = 0
+  private def isVram(a: Int) = a >= 0x8000 && a < 0xA000
   private val requestLog = Array.fill(64)(0)
   private var cycles = 0L
   val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => iflag &= ~(1 << i))
 
-  val vram, wram = Array.fill(0x2000)(0)
+  val vram = if (postBoot) Gb.PostBoot.vram(external) else Array.fill(0x2000)(0)
+  val wram = Array.fill(0x2000)(0)
   val oam = Array.fill(0x100)(0)
   val hram = Array.fill(0x80)(0)
   var ie, iflag = 0
@@ -60,7 +63,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     case _ if a >= 0x8000 && a < 0xA000 => if (ppu.vramReadLocked) 0xFF else vram(a & 0x1FFF)
     case _ if a >= 0xC000 && a < 0xFE00 => wram(a & 0x1FFF)
     case _ if a >= 0xFE00 && a < 0xFEA0 => if (dmaCopying || ppu.oamReadLocked) 0xFF else oam(a & 0xFF)
-    case _ if a >= 0xFEA0 && a < 0xFF00 => 0x00
+    case _ if a >= 0xFEA0 && a < 0xFF00 => if (dmaCopying) 0xFF else 0x00
     case _ if a >= 0xFF80 && a < 0xFFFF => hram(a & 0x7F)
     case Gb.IE => ie
     case Gb.IF => 0xE0 | iflag
@@ -76,6 +79,13 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     case _ if a >= 0xFF00 => 0xFF
     case _ => external(a)
   }
+
+  /** Called with every write to the PPU's registers (address, value), for tracing. */
+  var onPpuWrite: (Int, Int) => Unit = null
+  /** Called with every CPU access to I/O registers (write?, address, value), for tracing. */
+  var onIoAccess: (Boolean, Int, Int) => Unit = null
+  /** Called when the STAT interrupt is requested, for tracing. */
+  var onStatIrq: () => Unit = null
 
   private var iduAddress = -1
   override def idu(address: Int): Unit = iduAddress = address & 0xFFFF
@@ -121,10 +131,11 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
       bits -= 1
       if (bits == 0) { active = false; iflag |= 1 << Gb.Irq.SERIAL.index }
     }
-    // PPU
+    // PPU. A write to its registers lands during its dots (`PpuReference.writeDots`).
+    if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
     val (vblank, stat) = ppu.tick()
     if (vblank) iflag |= 1 << Gb.Irq.VBLANK.index
-    if (stat) iflag |= 1 << Gb.Irq.STAT.index
+    if (stat) { iflag |= 1 << Gb.Irq.STAT.index; if (onStatIrq != null) onStatIrq() }
     // OAM DMA
     dmaCopying = dmaStartIn == 1 || dmaActive
     if (dmaCopying) {
@@ -137,6 +148,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
         case _ if externalDma => external(src)
         case _ => 0xFF
       }
+      dmaByte = oam(at); dmaRaw = from << 8 | at
       dmaSource = from; dmaIndex = at + 1; dmaActive = at != 159
     }
     if (dmaStartIn != 0) dmaStartIn -= 1
@@ -146,15 +158,25 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     joypadPrevious = lines
 
     // ---- Access ----------------------------------------------------------------------------
-    requestLog((cycles & 63).toInt) = ie & iflag & 0x1F
+    // Bits 8-12: requests a halted CPU sees an M-cycle late; bits 16-20: ones a running CPU does.
+    requestLog((cycles & 63).toInt) = ie & iflag & 0x1F | (if (ppu.statLate) (1 << Gb.Irq.STAT.index) << 8 else 0) |
+      (if (ppu.statRunLate) (1 << Gb.Irq.STAT.index) << 16 else 0)
     cycles += 1
     val idu = iduAddress
     iduAddress = -1
     val bugAddress = if (a >= 0) a else idu
     if (bugAddress >= 0xFE00 && bugAddress < 0xFF00 && ppu.oamBugRow >= 0 && !dmaCopying)
       oamBug(ppu.oamBugRow, read = a >= 0 && wdata.isEmpty, increase = idu >= 0)
-    val v = if (a >= 0) peek(a) else 0
-    for (_ <- wdata) {
+    // OAM DMA bus conflicts (SameBoy, DMG): while DMA copies, the CPU's accesses to the bus it
+    // reads from (VRAM, or the external bus for everything else below FE00) meet DMA's access:
+    // a read returns the byte DMA reads, and a write replaces the byte being copied into OAM, or
+    // for a source in A000-FDFF ANDs into it (Gambatte's oamdma tests). Neither reaches the bus.
+    val conflict = dmaCopying && a >= 0 && a < 0xFE00 && isVram(a) == isVram(dmaRaw)
+    val v = if (conflict) dmaByte else if (a >= 0) peek(a) else 0
+    if (conflict) for (_ <- wdata)
+      oam(dmaRaw & 0xFF) = if (dmaRaw >= 0xA000 && !isVram(dmaRaw)) dmaByte & d else d
+    if (onIoAccess != null && a >= 0xFF00 && (a < 0xFF80 || a == 0xFFFF)) onIoAccess(wdata.isDefined, a, wdata.getOrElse(v))
+    for (_ <- wdata if !conflict) {
       val (counterTicked, tacTicked) = (counter, tac)
       a match {
         case _ if a < 0x8000 =>
@@ -177,7 +199,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
         case Gb.TMA => tma = d; if (reloading) tima = d
         case Gb.TAC => tac = d & 7
         case Gb.DMA => dmaRegister = d; dmaStartIn = 2
-        case _ if a >= Gb.LCDC && a <= Gb.WX => ppu.write(a, d)
+        case _ if a >= Gb.LCDC && a <= Gb.WX => if (onPpuWrite != null) onPpuWrite(a, d) // landed in the tick
         case _ =>
       }
       // Resetting DIV or changing TAC can drop the selected bit: that is a falling edge too.

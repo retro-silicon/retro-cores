@@ -21,8 +21,12 @@ import spinal.lib.misc.plugin._
   * the CPU's address bus, or stepped by its IDU, while the PPU scans OAM rewrites the row the scan
   * reads (`scanRow`, loaded by the PPU) from the rows before it.
   *
-  * Not modelled: the OAM bug while a DMA copies (no corruption then), bus conflicts (on the DMG a CPU access to the bus the DMA is reading returns the
-  * DMA's byte). */
+  * No OAM bug while a DMA copies.
+  *
+  * Bus conflicts (`conflicts`): while the DMA copies, a CPU access to the bus the DMA reads from
+  * (VRAM, or the external bus for everything else below FE00) goes nowhere: a read returns the
+  * byte being copied, and a write replaces it in OAM, or for a source in A000-FDFF ANDs into it
+  * (Gambatte's oamdma tests). FEA0-FEFF reads FF. */
 class OamDmaPlugin extends FiberPlugin {
   val readLock, writeLock = Handle[Bool]()
   /** The 8-byte OAM row the PPU's scan reads this M-cycle, 0 when it reads none (row 0 is never
@@ -37,6 +41,7 @@ class OamDmaPlugin extends FiberPlugin {
     awaitBuild()
     val oamSlave = bus.newSlave(SizeMapping(0xFE00, 0xA0))
     val dmaSlave = bus.newSlave(SingleMapping(Gb.DMA))
+    val intercept = bus.newIntercept()
     retainer.release()
     val sources = host.list[DirectRead]
 
@@ -80,6 +85,20 @@ class OamDmaPlugin extends FiberPlugin {
   val locking = during build new Area {
     when(readLock.get) { logic.oamSlave.rdata := 0xFF }
     when(writeLock.get) { logic.cpuWrite := False }
+  }
+
+  val conflicts = during build new Area {
+    val cmd = host[BusPlugin].logic.cmd
+    val copying = logic.copying
+    val at = logic.at
+    val data = logic.data
+    def isVram(a: UInt) = a(15 downto 13) === 4
+    val raw = logic.from @@ at
+    val conflict = copying && cmd.valid && cmd.address < 0xFE00 && isVram(cmd.address) === isVram(raw)
+    logic.intercept.hit := conflict || copying && cmd.valid && cmd.address >= 0xFEA0 && cmd.address < 0xFF00
+    logic.intercept.data := conflict ? data | U(0xFF, 8 bits)
+    val anded = raw >= 0xA000 && !isVram(raw)
+    when(conflict && cmd.write) { logic.oam(at) := anded ? (data & cmd.data) | cmd.data }
   }
 
   val bug = during build new Area {

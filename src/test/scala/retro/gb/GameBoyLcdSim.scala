@@ -28,11 +28,7 @@ object GbLcd {
       var lastY = 0
       dut.clockDomain.forkStimulus(10)
       dut.clockDomain.onSamplings {
-        val valid = lcd.valid.toInt
-        if (valid != 0) {
-          val y = lcd.y.toInt
-          for (i <- 0 until 4 if (valid >> i & 1) != 0) frame(y * 160 + lcd.x(i).toInt) = lcd.shade(i).toInt
-        }
+        LcdPixels.capture(lcd, frame)
         val y = lcd.y.toInt
         if (lastY == Gb.visibleLines - 1 && y == Gb.visibleLines) done += 1
         lastY = y

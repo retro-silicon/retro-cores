@@ -59,6 +59,15 @@ trait BusService {
   /** A slave answering the addresses `mapping` hits. Where mappings overlap, the highest
     * priority wins, so a catch-all (open bus) is a low-priority slave over a wide range. */
   def newSlave(mapping: AddressMapping, priority: Int = 0): BusSlave
+  /** Lets a block take over accesses (Game Boy OAM DMA bus conflicts): see `BusIntercept`. */
+  def newIntercept(): BusIntercept
+}
+
+/** While `hit` is high the bus access goes to no slave and a read returns `data`. The owner
+  * decodes the access from `BusPlugin.logic.cmd`. */
+class BusIntercept(c: RetroBusConfig) extends Area {
+  val hit = Bool()
+  val data = UInt(c.dataWidth bits)
 }
 
 /** Owns the bus: arbitrates masters by fixed priority (higher wins) and decodes addresses to
@@ -85,6 +94,12 @@ class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(),
     s
   }
   def slaveList: Seq[BusSlave] = slaves.toSeq
+  private val intercepts = ArrayBuffer[BusIntercept]()
+  def newIntercept(): BusIntercept = {
+    val i = new BusIntercept(busConfig)
+    intercepts += i
+    i
+  }
 
   val logic = during build new Area {
     busLock.await()
@@ -100,18 +115,23 @@ class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(),
     val hits = decoded.map(_.mapping.hit(cmd.address))
     val select = if (decoded.isEmpty) B(0, 0 bits) else OHMasking.first(hits.asBits())
     val unclaimed = if (decoded.isEmpty) True else !hits.orR
+    val intercepted = intercepts.map(_.hit).foldLeft(False: Bool)(_ || _)
     for ((s, i) <- decoded.zipWithIndex) {
-      s.cmd.valid := cmd.valid && select(i)
+      s.cmd.valid := cmd.valid && select(i) && !intercepted
       s.cmd.payload := cmd.payload
     }
     val io = external generate master(RetroBus(busConfig))
     val outside = external generate new Area {
-      io.cmd.valid := cmd.valid && unclaimed
+      io.cmd.valid := cmd.valid && unclaimed && !intercepted
       io.cmd.payload := cmd.payload
     }
     val (missData, missStall) = if (external) (io.rdata, io.stall) else (U(openBus, busConfig.dataWidth bits), False)
-    val rdata = if (decoded.isEmpty) missData else unclaimed ? missData | MuxOH.or(select, decoded.map(_.rdata), bypassIfSingle = true)
-    val stall = if (decoded.isEmpty) missStall else unclaimed ? missStall | (select & decoded.map(_.stall).asBits()).orR
+    val decodedData = if (decoded.isEmpty) missData else unclaimed ? missData | MuxOH.or(select, decoded.map(_.rdata), bypassIfSingle = true)
+    val decodedStall = if (decoded.isEmpty) missStall else unclaimed ? missStall | (select & decoded.map(_.stall).asBits()).orR
+    val rdata = UInt(busConfig.dataWidth bits)
+    rdata := decodedData
+    for (i <- intercepts.reverse) when(i.hit) { rdata := i.data }
+    val stall = decodedStall && !intercepted
 
     for ((m, i) <- ordered.zipWithIndex) {
       m.rdata := rdata

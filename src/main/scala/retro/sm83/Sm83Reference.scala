@@ -38,6 +38,8 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
   var sp, pc = 0
   var ime, imeNext = false
   private var ir = 0
+  /** The opcode (or `Sm83.DISPATCH` / `Sm83.HALTED`) the next `step` executes. */
+  def opcode: Int = ir
   private var cycle = 0L
   private val log = ArrayBuffer[BusAccess]()
 
@@ -125,7 +127,9 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
     val k = cycle
     if (increment && !halt) bus.idu(pc)
     val opcode = read(pc)
-    val reqs = requests(k)
+    val r = requests(k)
+    // Bits 8-12 are requests a halted CPU does not see yet, bits 16-20 ones a running CPU does not.
+    val reqs = if (halt) r & 0x1F & ~(r >> 8) else r & 0x1F & ~(r >> 16)
     if (increment && !(halt && reqs == 0)) pc = (pc + 1) & 0xFFFF
     val effective = imeOp == RETI || ((ime || imeNext) && imeOp != DI)
     val dispatch = effective && reqs != 0
@@ -151,12 +155,15 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
         val k = cycle
         write(sp, pc & 0xFF)
         // The push of the high byte may have changed IE: the vector is chosen now.
-        val reqs = requests(k)
+        val reqs = requests(k) & 0x1F
         pc = if (reqs == 0) 0 else { val i = Integer.numberOfTrailingZeros(reqs); ack(i); 0x40 + 8 * i }
       case 0x00 | 0x10 => // NOP; STOP is not modelled and runs as a NOP, as in the RTL
       case 0x76 =>
         idle()
-        if (requests(cycle - 1) != 0 && !(ime || imeNext)) increment = false else halt = true
+        // Entered with an interrupt pending, HALT does not wait and its fetch does not increment
+        // PC: with IME off the next byte runs twice (the HALT bug), with IME on the dispatch
+        // returns to the HALT itself (AGE ei-halt, halt-m0-interrupt).
+        if ((requests(cycle - 1) & 0x1F) != 0) increment = false else halt = true
       case Sm83.HALTED => halt = true
       case o if (o & 0xC0) == 0x40 => setR((o >> 3) & 7, getR(o & 7))
       case o if (o & 0xC7) == 0x06 => setR((o >> 3) & 7, imm())
