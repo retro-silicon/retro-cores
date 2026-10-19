@@ -66,7 +66,29 @@ same single-step tests and is cosimulated with the RTL on random code with rando
 levels (`R2A03CosimSim`): every instruction must match in cycles, bus accesses and registers.
 Interrupts poll in the second-to-last cycle; the CLI/SEI/PLP delay, RTI taking effect at once,
 NMI edge detection and the taken-branch polling quirk follow the nesdev wiki and are also checked
-by directed tests (`R2A03InterruptSim`).
+by directed tests (`R2A03InterruptSim`). An NMI counts in the cycle its edge is seen, hijacks
+BRK or IRQ until PCL is pushed, and the vector reads do not poll, so a handler's first
+instruction always runs (blargg's cpu_interrupts_v2 pins all of this down).
+
+### NES system model
+
+```sh
+scripts/fetch-nes-test-roms.sh                     # also blargg's CPU and PPU test ROMs into ./roms/nes-test-roms
+sbt "Test/runMain retro.nes.NesRefRom"             # every mapper 0/3 test ROM on the model; frames saved to out/nes/
+sbt "Test/runMain retro.nes.NesRefRom sprite_hit"  # only ROMs whose path contains an argument
+```
+
+`retro.nes.NesReference` is a whole NES around `R2A03Reference`: 2 KB of RAM, a dot-level 2C02
+model (`NesPpuReference`: background pipeline, sprite evaluation with the overflow bug and its
+timing, sprite 0 hit, VBlank/NMI with the read-race suppression, the odd-frame dot, open-bus
+decay), OAM DMA with its halt and alignment cycles, the APU frame counter's IRQ and length
+counters, controller 1, and NROM/CNROM cartridges. Each CPU cycle runs two PPU dots, the APU,
+the CPU access, the third dot, then samples NMI and IRQ. It passes 73 of the 76 blargg ROMs in
+`fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing, sprite_hit, sprite_overflow,
+cpu_interrupts_v2, instr_test, instr_timing, oam_stress, ppu_open_bus and others). The three
+left are the two DMC DMA tests (no DMC yet) and LXA in instr_test 03-immediate, where blargg's
+console and SingleStepTests disagree on the unstable constant (the core follows the latter).
+It is the reference the RTL NES system is cosimulated against.
 
 ### Hardware test ROMs
 

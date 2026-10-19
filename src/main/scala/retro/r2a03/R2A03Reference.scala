@@ -27,9 +27,9 @@ object R2A03Bus {
   *
   * Interrupts: `lines(k)` gives the (NMI, IRQ) request levels, active high, during cycle `k`
   * (counting cycles from reset, the first reset cycle being 0). Polling follows the RTL and the
-  * 6502: each cycle registers a poll (NMI pending, or IRQ with I clear, with I as it is in that
-  * cycle) and a fetch acts on the poll of its second-to-last cycle; branches do not poll in their
-  * operand read. */
+  * 6502: each cycle registers a poll (an NMI edge seen so far, or IRQ with I clear, with I as it
+  * is in that cycle) and a fetch acts on the poll of its second-to-last cycle; branches do not
+  * poll in their operand read. */
 class R2A03Reference(bus: R2A03Bus, lines: Long => (Boolean, Boolean) = _ => (false, false)) {
   def this(mem: Array[Int]) = this(R2A03Bus.memory(mem))
 
@@ -49,22 +49,34 @@ class R2A03Reference(bus: R2A03Bus, lines: Long => (Boolean, Boolean) = _ => (fa
 
   def reset(): Unit = { ir = Ricoh2A03.RESET; p = (p & ~0x10) | 0x20; nmiLast = false; nmiPending = false; nmiVector = false; polled = false; decided = false }
 
-  private def access(addr: Int, write: Boolean, data: Int, select: Boolean = false, hold: Boolean = false): Int = {
+  private def access(addr: Int, write: Boolean, data: Int, select: Boolean = false, hold: Boolean = false, clear: Boolean = false): Int = {
     val address = addr & 0xFFFF
-    val (nmi, irq) = lines(cycle)
     val v = if (write) { bus.write(address, data & 0xFF); data & 0xFF } else bus.read(address)
     log += BusAccess(write, address, v)
-    // End of the cycle: everything below uses the state the cycle started with.
-    val pendingBefore = nmiPending
+    // Sampled after the access: in a system model the bus call is where the rest of the
+    // machine advances through this cycle.
+    val (nmi, irq) = lines(cycle)
+    // End of the cycle: an NMI edge seen in this cycle already counts for its poll and for the
+    // vector choice; I is as the cycle started.
+    val pending = nmiPending || (nmi && !nmiLast)
     decided = polled
-    if (!hold) polled = pendingBefore || (irq && (p & 0x04) == 0)
-    if (select) nmiVector = pendingBefore
-    if (nmi && !nmiLast) nmiPending = true else if (select) nmiPending = false
+    if (clear) polled = false
+    else if (!hold) polled = pending || (irq && (p & 0x04) == 0)
+    if (select) nmiVector = pending
+    nmiPending = pending && !select
     nmiLast = nmi
     cycle += 1
     v
   }
-  private def rd(addr: Int, hold: Boolean = false) = access(addr, write = false, 0, hold = hold)
+  /** A cycle in which the CPU is halted (RDY low, a DMA has the bus): the NMI edge detector
+    * still runs, nothing is polled. The system model calls it for every cycle it steals. */
+  def haltedCycle(): Unit = {
+    val (nmi, _) = lines(cycle)
+    if (nmi && !nmiLast) nmiPending = true
+    nmiLast = nmi
+    cycle += 1
+  }
+  private def rd(addr: Int, hold: Boolean = false, clear: Boolean = false) = access(addr, write = false, 0, hold = hold, clear = clear)
   private def wr(addr: Int, v: Int, select: Boolean = false) = access(addr, write = true, v, select = select)
   private def imm(hold: Boolean = false) = { val v = rd(pc, hold); pc = (pc + 1) & 0xFFFF; v }
   private def stack = 0x100 | s
@@ -130,10 +142,12 @@ class R2A03Reference(bus: R2A03Bus, lines: Long => (Boolean, Boolean) = _ => (fa
   }
 
   private def interrupt(pushed: Int) = {
-    push(pc >> 8); push(pc & 0xFF); push(pushed, select = true)
+    // The vector is chosen as PCL is pushed, and the sequence does not poll: the handler's
+    // first instruction always runs before another interrupt.
+    push(pc >> 8); push(pc & 0xFF, select = true); push(pushed)
     setFlag(2, true)
     val v = if (nmiVector) 0xFFFA else 0xFFFE
-    val lo = rd(v); val hi = rd(v + 1)
+    val lo = rd(v, clear = true); val hi = rd(v + 1, clear = true)
     pc = hi << 8 | lo
   }
   private def sh(base: Int, i: Int, value: Int) = {

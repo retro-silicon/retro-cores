@@ -82,6 +82,9 @@ object Interrupts {
   /** Set on a branch's operand read, which does not poll. A taken branch that stays on its page
     * therefore acts on the poll of its opcode fetch, one cycle earlier than the usual rule. */
   val HOLD_POLL = CtrlKey("INT_HOLD_POLL", 1)
+  /** Discards the poll: the interrupt sequence's vector reads, so a handler's first instruction
+    * always runs. */
+  val CLEAR_POLL = CtrlKey("INT_CLEAR_POLL", 1)
   val VECTOR_LO = Value("vector.lo")
   val VECTOR_HI = Value("vector.hi")
 }
@@ -196,7 +199,8 @@ object Ricoh2A03 {
     * CLI, SEI and PLP change I after their poll, so they take effect one instruction late, while
     * RTI pulls P early enough for its own poll to see it. When it holds, the fetched opcode is replaced by
     * the dispatch sequence (0x100), which reads at PC again, pushes PC and P (B clear) and jumps
-    * through the vector chosen on the cycle P is pushed.
+    * through the vector chosen on the cycle PCL is pushed (an NMI seen by then hijacks BRK or
+    * IRQ). The vector reads discard the poll, so the handler's first instruction always runs.
     *
     * Branches do not poll in their operand read (`HOLD_POLL`), so a taken branch that stays on
     * its page acts on the poll of its opcode fetch, and an interrupt arriving later waits one more
@@ -210,6 +214,7 @@ object Ricoh2A03 {
       awaitBuild()
       seq.addKey(Interrupts.SELECT)
       seq.addKey(Interrupts.HOLD_POLL)
+      seq.addKey(Interrupts.CLEAR_POLL)
 
       val nmi, irq = Bool()
       lines match {
@@ -225,11 +230,15 @@ object Ricoh2A03 {
       val decided = RegInit(False).simPublic()
       val select = seq.cycleDone && seq.ctrl(Interrupts.SELECT) === 1
 
+      // An NMI edge counts in the cycle it is seen: for that cycle's poll and vector choice. While
+      // the bus is stalled (a DMA has it) edges are still caught, and nothing is polled.
+      val pending = nmiPending || (nmi && !nmiLast)
       nmiLast := nmi
-      when(select) { nmiVector := nmiPending }
-      when(nmi && !nmiLast) { nmiPending := True } elsewhen (select) { nmiPending := False }
+      nmiPending := pending
       when(seq.cycleDone) {
-        when(seq.ctrl(Interrupts.HOLD_POLL) === 0) { polled := nmiPending || (irq && !rf.flag(IF)) }
+        when(select) { nmiVector := pending; nmiPending := False }
+        when(seq.ctrl(Interrupts.CLEAR_POLL) === 1) { polled := False }
+          .elsewhen(seq.ctrl(Interrupts.HOLD_POLL) === 0) { polled := pending || (irq && !rf.flag(IF)) }
         decided := polled
       }
 
@@ -484,9 +493,11 @@ object Ricoh2A03 {
         read(PC).assign(PC -> AD), fetch))
 
     // ---- BRK, interrupts, reset, JAM -----------------------------------------------------------
-    def vectored(p: Source, first: MCycleSpec) = Seq(first, write(Agu.STACK, PCH).assign(SP -> Agu.S_DEC), write(Agu.STACK, PCL).assign(SP -> Agu.S_DEC),
-      write(Agu.STACK, p).assign(SP -> Agu.S_DEC, IF -> Isa.ONE).set(Interrupts.SELECT, 1),
-      read(Interrupts.VECTOR_LO).assign(PCL -> RDATA), read(Interrupts.VECTOR_HI).assign(PCH -> RDATA), fetch)
+    def vectored(p: Source, first: MCycleSpec) = Seq(first, write(Agu.STACK, PCH).assign(SP -> Agu.S_DEC),
+      write(Agu.STACK, PCL).assign(SP -> Agu.S_DEC).set(Interrupts.SELECT, 1),
+      write(Agu.STACK, p).assign(SP -> Agu.S_DEC, IF -> Isa.ONE),
+      read(Interrupts.VECTOR_LO).assign(PCL -> RDATA).set(Interrupts.CLEAR_POLL, 1),
+      read(Interrupts.VECTOR_HI).assign(PCH -> RDATA).set(Interrupts.CLEAR_POLL, 1), fetch)
     op("BRK", 0x00, vectored(Isa.P_BRK, read(PC).assign(PC -> Agu.PC_INC)))
     // The fetch that took the interrupt already stepped PC: read that byte again and step back.
     op("INT", DISPATCH, vectored(Isa.P_IRQ, read(Agu.PC_DEC).assign(PC -> Agu.PC_DEC)))
