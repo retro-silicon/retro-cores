@@ -38,13 +38,15 @@ object NesRoms {
       else Done(r(0) == 0, r(0), Iterator.from(4).map(r).takeWhile(_ != 0).map(_.toChar).mkString.trim)
     } else if (stableFrames > 120) {
       // Older ROMs: zero page F8 (1 = passed), or only the screen: "$01" for the 2005 PPU
-      // tests, "Passed"/"Failed" or "PASSED"/"FAILED" for others.
+      // tests, "Passed"/"Failed" or "PASSED"/"FAILED" for others, "All tests complete" when
+      // nes_cpu_test5 found no error.
       val text = screenText(nes)
       val code = """(?m)^\$([0-9A-F]{2})$""".r.findFirstMatchIn(text).map(m => Integer.parseInt(m.group(1), 16))
       if (nes.ram(0xF8) != 0) Done(nes.ram(0xF8) == 1, nes.ram(0xF8), text)
       else if (code.nonEmpty) Done(code.get == 1, code.get, text)
       else if (text.toLowerCase.contains("passed")) Done(true, 0, text)
       else if (text.toLowerCase.contains("failed")) Done(false, 1, text)
+      else if (text.toLowerCase.contains("all tests complete")) Done(true, 0, text)
       else Running
     } else Running
   }

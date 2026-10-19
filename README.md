@@ -102,22 +102,25 @@ console's output filters, and checks that the residual is no louder than in the 
 recordings in the nes-test-roms collection: square 0.8% (hardware 1.2%), triangle 1.5% (1.9%),
 noise 11.6% (10.8%), DMC 0.8% (2.8%).
 
-The model passes 117 of the 119 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
-sprite_hit, sprite_overflow, cpu_interrupts_v2, instr_test, instr_timing, oam_stress,
-ppu_open_bus, sprdma_and_dmc_dma, apu_test, blargg_apu_2005.07.30, apu_mixer, apu_reset,
-cpu_reset, dmc_dma_during_read4 and others; print-only tests are judged by the CRCs their
-source lists).
-Left: LXA in instr_test 03-immediate and the all_instrs ROM that stops there, where blargg's
-console and SingleStepTests disagree on the unstable constant (the core follows the latter).
+The model passes 138 of the 144 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
+sprite_hit, sprite_overflow, cpu_interrupts_v2, instr_test, instr_timing, nes_cpu_test5,
+cpu_dummy_writes, cpu_exec_space, oam_stress, ppu_open_bus, sprdma_and_dmc_dma, apu_test,
+blargg_apu_2005.07.30, apu_mixer, apu_reset, cpu_reset, dmc_dma_during_read4, read_joy3,
+the MMC3 tests and others; print-only tests are judged by the CRCs their source lists). The
+rest of the nes-test-roms collection is demos, visual or interactive tests, PAL tests, or
+needs other mappers; instr_test-v3 and nes_instr_test are older versions of instr_test-v5.
+Left: LXA in instr_test 03-immediate, the all_instrs ROM that stops there and nes_cpu_test5's
+cpu.nes, where blargg's console and SingleStepTests disagree on the unstable constant (the core
+follows the latter).
 A 2007 read in the CPU cycle right after another (an indexed read from 20F7 crossing a page)
 is ignored and reads open bus, as in Mesen: one of the outcomes double_2007_read accepts, which
 on hardware depend on CPU-PPU alignment.
 MMC3 (mapper 4) clocks its scanline counter on PPU A12 rising edges after A12 has been low for
 10 dots, with the Sharp chip's IRQ behavior (a counter reloaded to 0 fires). The cartridge
 sees every PPU bus address the 2C02 drives: unused sprite slots, the garbage nametable fetches
-at dots 257-320, 337 and 339, and 2006/2007 accesses outside rendering. With blargg's
-mmc3_test, mmc3_test_2 and mmc3_irq_tests (18 ROMs) the model passes 132 of 137; the three new
-failures test other chips (MMC6, MMC3 revision A and the alternate MMC3 behavior).
+at dots 257-320, 337 and 339, and 2006/2007 accesses outside rendering. Of blargg's
+mmc3_test, mmc3_test_2 and mmc3_irq_tests (18 ROMs) three fail, which test other chips (MMC6,
+MMC3 revision A and the alternate MMC3 behavior).
 It is the reference the RTL NES system is cosimulated against.
 
 ### NES system (RTL)
@@ -144,8 +147,8 @@ sbt "Test/runMain retro.nes.NesSpeed"              # cycles per second: model, R
 `NesRtl.cosim` runs a test ROM on the RTL and the model in lockstep: every instruction must
 match in cycles (DMA stalls included), bus accesses (so every PPU and APU register read) and
 registers, every frame pixel for pixel, and the APU's mixed output in every cycle, until the
-ROM reports its result. All 137 ROMs run to their result with no difference from the model, so
-the RTL passes the same 132.
+ROM reports its result. All 144 ROMs run to their result with no difference from the model, so
+the RTL passes the same 138.
 
 Simulation speed (`NesSpeed`): the cosim runs about 10 frames per second per core, the RTL alone
 22 and the model 87, so the whole report takes about 18 minutes on four cores (it was 2 frames
@@ -446,7 +449,7 @@ corruption bug tests, dmg-acid2 pixel for pixel, and 1829 ROMs of the c-sp colle
 Mealybug's 24 DMG tests among them (see *Hardware test ROMs*).
 
 NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
-132 of 137 blargg CPU/PPU/APU/MMC3 test ROMs, with sound checked against hardware recordings, and
+138 of 144 blargg CPU/PPU/APU/MMC3 test ROMs, with sound checked against hardware recordings, and
 the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM/MMC3) cosimulated against it on those
 ROMs, audio included.
 
