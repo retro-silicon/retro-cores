@@ -133,6 +133,11 @@ JOBS=2 sbt "Test/runMain retro.nes.NesRomReport"   # fewer at a time
 sbt "Test/runMain retro.nes.NesSpeed"              # cycles per second: model, RTL alone, cosim
 ```
 
+```sh
+sbt "runMain retro.nes.NesVerilog"                 # writes gen/Nes.v (NROM cartridge, no trace taps)
+scripts/synth-nes-ecp5.sh                          # Yosys and nextpnr for an ECP5-85F: size and clock
+```
+
 `retro.nes.Nes(spec)` is the 2A03 plugins plus the NES ones in one host:
 
 | NES plugin | Addresses | What it does |
@@ -149,6 +154,13 @@ match in cycles (DMA stalls included), bus accesses (so every PPU and APU regist
 registers, every frame pixel for pixel, and the APU's mixed output in every cycle, until the
 ROM reports its result. All 144 ROMs run to their result with no difference from the model, so
 the RTL passes the same 138.
+
+On an ECP5-85F (Yosys, nextpnr) the NES with an NROM cartridge uses 41% of the logic cells
+(34.9k; Yosys maps 19.8k LUT4s), 1.3k flip-flops, 2.2k LUT RAM blocks and 2 multipliers, with
+no latches, and closes at 22 MHz against the 1.79 MHz it needs (one clock per CPU cycle). Every memory is read combinationally,
+three PPU dots per clock, so none maps to block RAM; the empty PRG and CHR ROMs are optimized
+away, and a real build would put them in block RAM or external memory. It does not fit a
+25F.
 
 Simulation speed (`NesSpeed`): the cosim runs about 10 frames per second per core, the RTL alone
 22 and the model 87, so the whole report takes about 18 minutes on four cores (it was 2 frames

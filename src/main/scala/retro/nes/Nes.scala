@@ -556,3 +556,9 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
     if (!spec.chrRam) for (i <- c.chr.indices) logic.chr.setBigInt(i, c.chr(i))
   }
 }
+
+/** Synthesis Verilog for an NROM cartridge (32 KB PRG, 8 KB CHR ROM), without trace taps:
+  * {{{ sbt "runMain retro.nes.NesVerilog" }}} writes gen/Nes.v. */
+object NesVerilog extends App {
+  SpinalConfig(targetDirectory = "gen").generateVerilog(Nes(NesCartSpec(0x8000, 0x2000, chrRam = false, mapper = 0, verticalMirroring = true), withTrace = false))
+}
