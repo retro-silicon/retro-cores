@@ -15,7 +15,7 @@ import scala.util.Random
   * every I/O register read, timer and LCD state included) and CPU registers, the serial
   * port must send the same bytes, and the PPU must draw the same frames. */
 class GameBoySim extends AnyFunSuite {
-  lazy val compiled = SimConfig.withVerilator.allOptimisation.compile(GameBoy())
+  lazy val compiled = FastVerilator().compile(GameBoy(romDecoder = true))
   val implemented = Sm83.names.keys.filter(o => o < 0x100 && !Sm83.unused(o)).toIndexedSeq.sorted
 
   case class Result(seen: Map[Int, Int], serial: Seq[Int], ref: GbReference, frames: Int)

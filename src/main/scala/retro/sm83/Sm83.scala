@@ -492,9 +492,10 @@ object Sm83 {
   /** Mnemonics by opcode (CB xx as 0x1xx), for traces. */
   lazy val names: Map[Int, String] = opcodes.map(o => o.opcode -> o.name).toMap
 
-  def plugins(withTrace: Boolean = true): Seq[Hostable] = Seq(
+  /** `romDecoder`: see `SequencerPlugin`. */
+  def plugins(withTrace: Boolean = true, romDecoder: Boolean = false): Seq[Hostable] = Seq(
     new BusPlugin(RetroBusConfig(16, 8)),
-    new SequencerPlugin(opcodeWidth = 10, illegal = illegal),
+    new SequencerPlugin(opcodeWidth = 10, illegal = illegal, romDecoder = romDecoder),
     new RegFilePlugin(Sm83Regs.spec),
     new AluPlugin,
     new ShifterPlugin,

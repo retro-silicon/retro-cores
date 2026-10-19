@@ -320,7 +320,8 @@ class PostBootPlugin extends FiberPlugin {
   * (cartridge ROM 0000-7FFF and cartridge RAM A000-BFFF) is the external bus, unless a
   * `cartridge` is given, in which case a `CartridgePlugin` answers there. */
 object GameBoy {
-  def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None): Seq[Hostable] = Sm83.plugins(withTrace) ++ Seq(
+  def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None,
+              romDecoder: Boolean = false): Seq[Hostable] = Sm83.plugins(withTrace, romDecoder) ++ Seq(
     new RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000, lockable = true), // locked by the PPU
     new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000), // E000-FDFF echoes C000-DDFF
     new OamDmaPlugin,
@@ -334,8 +335,10 @@ object GameBoy {
     new JoypadPlugin
   ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil) ++ cartridge.map(new CartridgePlugin(_))
 
-  def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None): RetroCore =
-    RetroCore(plugins(withTrace, postBoot, cartridge)).setDefinitionName("GameBoy")
+  /** `romDecoder`: see `SequencerPlugin` (faster in Verilator). */
+  def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None,
+            romDecoder: Boolean = false): RetroCore =
+    RetroCore(plugins(withTrace, postBoot, cartridge, romDecoder)).setDefinitionName("GameBoy")
 }
 
 object GameBoyVerilog extends App {

@@ -1,5 +1,6 @@
 package retro.gb
 
+import retro.sim.FastVerilator
 import org.scalatest.funsuite.AnyFunSuite
 import retro.core._
 import spinal.core._
@@ -14,9 +15,9 @@ object GbLcd {
   def run(image: Array[Byte], frames: Int): Array[Int] = {
     val spec = CartridgeSpec.fromHeader(image)
     val frame = Array.fill(160 * 144)(0)
-    val compiled = SimConfig.withVerilator.allOptimisation.addSimulatorFlag("-O3")
+    val compiled = FastVerilator()
       .workspaceName(f"GameBoyLcd_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
-      .compile(GameBoy(withTrace = false, cartridge = Some(spec)))
+      .compile(GameBoy(withTrace = false, cartridge = Some(spec), romDecoder = true))
     compiled.doSimUntilVoid { dut =>
       dut.host[CartridgePlugin].load(image)
       dut.host[JoypadPlugin].buttons #= 0

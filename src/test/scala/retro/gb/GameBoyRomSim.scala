@@ -1,5 +1,6 @@
 package retro.gb
 
+import retro.sim.FastVerilator
 import org.scalatest.funsuite.AnyFunSuite
 import retro.core._
 import retro.sm83._
@@ -26,9 +27,8 @@ object GbRomRunner {
 
   private val compiled = mutable.Map[CartridgeSpec, SimCompiled[RetroCore]]()
   def compile(spec: CartridgeSpec) = compiled.getOrElseUpdate(spec,
-    SimConfig.withVerilator.allOptimisation.withConfig(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz)))
-      .addSimulatorFlag("-O3").workspacePath(sys.env.getOrElse("SIM_WORKSPACE", "simWorkspace")).workspaceName(f"GameBoyRom_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
-      .compile(GameBoy(withTrace = false, cartridge = Some(spec))))
+    FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz))).workspacePath(sys.env.getOrElse("SIM_WORKSPACE", "simWorkspace")).workspaceName(f"GameBoyRom_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
+      .compile(GameBoy(withTrace = false, cartridge = Some(spec), romDecoder = true)))
 
   def run(rom: File, budget: Long): Outcome = {
     val image = Files.readAllBytes(rom.toPath)
