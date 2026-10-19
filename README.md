@@ -90,6 +90,32 @@ left are the two DMC DMA tests (no DMC yet) and LXA in instr_test 03-immediate, 
 console and SingleStepTests disagree on the unstable constant (the core follows the latter).
 It is the reference the RTL NES system is cosimulated against.
 
+### NES system (RTL)
+
+```sh
+sbt "testOnly retro.nes.NesSim"                    # six short ROMs, RTL cosimulated with NesReference
+sbt "Test/runMain retro.nes.NesRomReport"          # every mapper 0/3 test ROM, cosimulated (about 3 frames/s)
+sbt "Test/runMain retro.nes.NesRomReport sprite_hit"
+```
+
+`retro.nes.Nes(spec)` is the 2A03 plugins plus the NES ones in one host:
+
+| NES plugin | Addresses | What it does |
+|---|---|---|
+| `RamPlugin` | 0000-1FFF | 2 KB of RAM, mirrored |
+| `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: three dots per CPU cycle with the access between the second and third, CIRAM, OAM, palette, `ppu_pixels` port |
+| `NesApuPlugin` | 4000-4017 | frame counter and IRQ, length counters, 4015, controller 1 (`joypad1` pins) |
+| `NesOamDmaPlugin` | 4014 | OAM DMA as a second bus master above the CPU: halts it on its next read, halt and alignment cycles, 256 get/put pairs |
+| `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, CNROM bank, mirroring; images loaded by the sim |
+| `NesOpenBusPlugin` | everything else | the data bus latch, for unmapped reads and undriven bits |
+| `NesInterruptsPlugin` | | the CPU's NMI (from the PPU) and IRQ (from the APU) |
+
+`NesRtl.cosim` runs a test ROM on the RTL and the model in lockstep: every instruction must
+match in cycles (DMA stalls included), bus accesses (so every PPU and APU register read) and
+registers, and every frame pixel for pixel, until the ROM reports its result.
+All 74 ROMs (the DMC DMA pair left out) run to their result with no difference from the model,
+so the RTL passes the same 73.
+
 ### Hardware test ROMs
 
 ```sh
@@ -319,10 +345,14 @@ src/main/scala/retro/core/   framework: RetroCore, Bus (masters, slaves, registe
 src/main/scala/retro/sim/    Probe and trace backends
 src/main/scala/retro/sm83/   SM83: registers, ALU, shifter, interrupt and ISA plugins, reference model
 src/main/scala/retro/gb/     Game Boy SoC plugins, the GameBoy composition, system reference model
+src/main/scala/retro/r2a03/  Ricoh 2A03 CPU plugins and reference model
+src/main/scala/retro/nes/    NES plugins (PPU, APU, OAM DMA, cartridge), the Nes composition, system model
 src/main/scala/retro/demo/   toy pipeline exercising the CtrlLink layer
 src/test/scala/retro/toy/    toy CPU testing sequencer, pairs, flags, branches, stalls, DMA
 src/test/scala/retro/sm83/   SM83 cosimulation (hand-written and random code)
 src/test/scala/retro/gb/     Game Boy system cosimulation, known-answer tests of the reference model
+src/test/scala/retro/r2a03/  2A03 single-step tests, nestest, cosim, interrupt tests
+src/test/scala/retro/nes/    NES test ROM runners (model and RTL) and system cosimulation
 docs/EXTENDING.md            adding an instruction, a plugin or a CPU
 ```
 
@@ -336,4 +366,9 @@ Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mo
 interrupt, timer, serial and OAM DMA acceptance tests, all of Mooneye's PPU tests, Blargg's OAM
 corruption bug tests, and dmg-acid2 pixel for pixel (see *Hardware test ROMs*).
 
-Next: the APU, MBC2, DMA bus conflicts, STOP, and the 2A03 (see the guide).
+NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing 73
+of 76 blargg CPU/PPU test ROMs, and the RTL NES (PPU, OAM DMA, APU frame IRQ and length
+counters, NROM/CNROM) cosimulated against it on those ROMs.
+
+Next: the APU, MBC2, DMA bus conflicts and STOP on the Game Boy; on the NES, the DMC and its
+DMA, sound, and MMC1.

@@ -40,8 +40,10 @@ class PrintBackend(names: Map[Int, String] = Map.empty, out: String => Unit = pr
 }
 
 /** Sim side of the introspection chain (whitebox plugin, then this probe, then backends): samples
-  * the `TracePlugin` taps every clock and turns them into cycle and retire events. */
-class Probe(trace: TracePlugin, cd: ClockDomain) {
+  * the `TracePlugin` taps every clock and turns them into cycle and retire events. With
+  * `cycleEvents = false` no `onCycle` is sent and registers are read only when an instruction
+  * retires, which makes long system runs much faster. */
+class Probe(trace: TracePlugin, cd: ClockDomain, cycleEvents: Boolean = true) {
   val backends = ArrayBuffer[TraceBackend]()
   def add(b: TraceBackend): this.type = { backends += b; this }
 
@@ -63,12 +65,14 @@ class Probe(trace: TracePlugin, cd: ClockDomain) {
     val access = if (t.busValid.toBoolean) Some(BusAccess(t.busWrite.toBoolean, t.busAddress.toInt,
       if (t.busWrite.toBoolean) t.busWdata.toInt else t.busRdata.toInt)) else None
     val done = t.done.toBoolean
-    val now = regs()
+    lazy val now = regs()
     if (opcodeLoaded) { current = current.map { case (a, _, s) => (a, t.opcode.toInt, s) }; opcodeLoaded = false }
-    val e = CycleEvent(cycle, t.opcode.toInt, t.step.toInt, done, access, now)
     // Register writes of the previous fetch cycle are visible now.
     for (r <- pendingRetire) { backends.foreach(_.onRetire(r.copy(regs = now))); pendingRetire = None }
-    backends.foreach(_.onCycle(e))
+    if (cycleEvents) {
+      val e = CycleEvent(cycle, t.opcode.toInt, t.step.toInt, done, access, now)
+      backends.foreach(_.onCycle(e))
+    }
 
     if (done) {
       mcycles += 1

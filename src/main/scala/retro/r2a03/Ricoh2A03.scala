@@ -286,7 +286,7 @@ object Ricoh2A03 {
       val ax = rf.read(A) & rf.read(X)
       seq.addSource(Isa.P_BRK, p | 0x30)
       seq.addSource(Isa.P_IRQ, (p & 0xEF) | 0x20)
-      seq.addSource(Isa.RDATA_AS_P, (seq.rdata & 0xCF) | 0x20)
+      seq.addSource(Isa.RDATA_AS_P, (seq.rdata & 0xCF) | 0x20, fromRdata = true)
       seq.addSource(Isa.A_AND_X, ax)
       seq.addSource(Isa.ZERO, U(0, 1 bits))
       seq.addSource(Isa.ONE, U(1, 1 bits))

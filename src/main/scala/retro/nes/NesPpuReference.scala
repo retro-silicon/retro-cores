@@ -26,6 +26,8 @@ class NesPpuReference(cart: NesCartridge) {
   var oddFrame = false
   var frames = 0L
   val frame = Array.fill(256 * 240)(0)
+  /** Called with `frame` each time one completes (at VBlank). */
+  var onFrame: Array[Int] => Unit = _ => ()
   private val back = Array.fill(256 * 240)(0)
   /** Set by a 2002 read in the dot before VBlank starts: the flag is not set this frame. */
   private var suppress = false
@@ -161,28 +163,29 @@ class NesPpuReference(cart: NesCartridge) {
       else { n += 1; m = (m + 1) & 3; at += 2 }
     }
   }
-  /** Fetches the patterns of the sprites found, at dot 257. */
-  private def fetchSprites(): Unit = {
-    val h = spriteHeight
+  /** Dot 257: the sprites found become the ones the next line draws. */
+  private def loadSprites(): Unit = {
     spriteCount = nextCount
     for (i <- 0 until 8) { spriteY(i) = nextY(i); spriteTile(i) = nextTile(i); spriteAttr(i) = nextAttr(i); spriteX(i) = nextX(i) }
-    for (i <- 0 until 8) {
-      val row0 = line - spriteY(i)
-      val flipV = (spriteAttr(i) & 0x80) != 0
-      val tile = spriteTile(i)
-      val addr = if (h == 16) {
-        val row = if (flipV) 15 - row0 else row0
-        ((tile & 1) << 12) | ((tile & 0xFE) << 4) | (if (row >= 8) 16 else 0) | (row & 7)
-      } else {
-        val row = if (flipV) 7 - row0 else row0
-        (if ((ctrl & 8) != 0) 0x1000 else 0) | (tile << 4) | (row & 7)
-      }
-      if (i < spriteCount) {
-        var lo = read(addr); var hi = read(addr + 8)
-        if ((spriteAttr(i) & 0x40) != 0) { lo = reverse(lo); hi = reverse(hi) }
-        spriteLo(i) = lo; spriteHi(i) = hi
-      } else { spriteLo(i) = 0; spriteHi(i) = 0 }
+  }
+  /** Dots 257-320, 8 per sprite: the pattern's low plane is read on the sprite's 5th dot and
+    * the high plane on its 7th. Unused slots get a transparent pattern. */
+  private def fetchSprite(i: Int, high: Boolean): Unit = {
+    val row0 = line - spriteY(i)
+    val flipV = (spriteAttr(i) & 0x80) != 0
+    val tile = spriteTile(i)
+    val addr = if (spriteHeight == 16) {
+      val row = if (flipV) 15 - row0 else row0
+      ((tile & 1) << 12) | ((tile & 0xFE) << 4) | (if (row >= 8) 16 else 0) | (row & 7)
+    } else {
+      val row = if (flipV) 7 - row0 else row0
+      (if ((ctrl & 8) != 0) 0x1000 else 0) | (tile << 4) | (row & 7)
     }
+    val bits = if (i < spriteCount) {
+      val b = read((addr + (if (high) 8 else 0)) & 0x1FFF)
+      if ((spriteAttr(i) & 0x40) != 0) reverse(b) else b
+    } else 0
+    if (high) spriteHi(i) = bits else spriteLo(i) = bits
   }
   private def reverse(b: Int) = Integer.reverse(b) >>> 24
 
@@ -244,9 +247,10 @@ class NesPpuReference(cart: NesCartridge) {
       if (dot == 257) {
         v = (v & ~0x041F) | (t & 0x041F)
         if (!visible) { nextCount = 0; sprite0Next = false }
-        fetchSprites()
+        loadSprites()
         sprite0Line = sprite0Next
       }
+      if (dot >= 257 && dot <= 320 && ((dot - 257) & 5) == 4) fetchSprite((dot - 257) >> 3, ((dot - 257) & 2) != 0)
       if (pre && dot >= 280 && dot <= 304) v = (v & ~0x7BE0) | (t & 0x7BE0)
     } else if (visible && dot >= 1 && dot <= 256) {
       // Rendering off: the backdrop, or the palette entry v points at.
@@ -258,6 +262,7 @@ class NesPpuReference(cart: NesCartridge) {
       suppress = false
       Array.copy(back, 0, frame, 0, back.length)
       frames += 1
+      onFrame(frame)
     }
     if (pre && dot == 1) { vblank = false; sprite0Hit = false; overflow = false }
 

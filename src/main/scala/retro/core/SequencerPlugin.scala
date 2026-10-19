@@ -21,8 +21,10 @@ trait SequencerService {
   /** Retain this before adding ops, sources, sinks, conds or keys from a build phase. */
   def seqLock: Retainer
   def addOp(op: OpSpec): Unit
-  /** Provide the hardware behind a source. Every source an opcode names needs exactly one. */
-  def addSource(source: Source, value: UInt): Unit
+  /** Provide the hardware behind a source. Every source an opcode names needs exactly one.
+    * `fromRdata` marks a value computed from `rdata`: it is kept out of the bus address and
+    * write data multiplexers, which would otherwise close a loop through on-chip slaves. */
+  def addSource(source: Source, value: UInt, fromRdata: Boolean = false): Unit
   def addSink(sink: Sink, port: Flow[UInt]): Unit
   def addCond(cond: Cond, value: Bool): Unit
   /** Declare a control key; the owning plugin calls this once, in build, before releasing. */
@@ -37,8 +39,8 @@ trait SequencerService {
   /** High when the current M-cycle completes (the bus did not hold it). Usable from any build phase. */
   def cycleDone: Bool
   /** The bus read data of the current M-cycle, as hardware, for values computed from it (the 6502
-    * pulls P from the stack as `rdata` with two bits forced). Usable from any build phase. Such a
-    * value must not feed a bus address or write data, for the reason RDATA itself cannot. */
+    * pulls P from the stack as `rdata` with two bits forced). Usable from any build phase. A source
+    * made from it is added with `fromRdata = true`. */
   def rdata: UInt
 }
 
@@ -74,7 +76,12 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     require(!ops.contains(op.opcode), f"opcode 0x${op.opcode}%02X defined twice (${ops(op.opcode).name}, ${op.name})")
     ops(op.opcode) = op
   }
-  def addSource(source: Source, value: UInt) = { require(!sources.contains(source), s"source $source provided twice"); sources(source) = value }
+  private val rdataSources = mutable.Set[Source](SequencerPlugin.RDATA)
+  def addSource(source: Source, value: UInt, fromRdata: Boolean = false) = {
+    require(!sources.contains(source), s"source $source provided twice")
+    sources(source) = value
+    if (fromRdata) rdataSources += source
+  }
   def addSink(sink: Sink, port: Flow[UInt]) = { require(!sinks.contains(sink), s"sink $sink provided twice"); sinks(sink) = port }
   def addCond(cond: Cond, value: Bool) = { require(!conds.contains(cond), s"cond $cond provided twice"); conds(cond) = value }
   def addKey(key: CtrlKey) = {
@@ -127,7 +134,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     // The bus address and write data cannot come from the bus read data of the same cycle: with
     // on-chip slaves that would be a combinational loop through the address decoder.
     def addr(op: String, source: Source): BigInt = {
-      require(source != SequencerPlugin.RDATA, s"$op: the bus address or write data cannot be RDATA")
+      require(!rdataSources(source), s"$op: the bus address or write data cannot be RDATA or a value computed from it")
       src(op, source)
     }
     def encode(op: String, c: MCycleSpec): BigInt = {
@@ -174,7 +181,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
       val r = UInt(width bits)
       r := 0
       switch(sel) {
-        for ((source, i) <- sourceList.zipWithIndex if !(busSide && source == SequencerPlugin.RDATA)) is(i + 1) { r := sources(source).resized }
+        for ((source, i) <- sourceList.zipWithIndex if !(busSide && rdataSources(source))) is(i + 1) { r := sources(source).resized }
         if (sourceList.size + 1 < (1 << selWidth)) default {}
       }
       r

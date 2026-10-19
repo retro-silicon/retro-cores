@@ -166,6 +166,17 @@ What the 2A03 showed about the framework:
 - The single-step harnesses for the SM83 and the 2A03 are near copies; a shared one in `retro.sim`
   would remove that.
 
+What the NES system added:
+
+- A source computed from `rdata` (the 2A03's P pulled from the stack) is declared with
+  `addSource(..., fromRdata = true)`, which keeps it out of the bus address and write data
+  multiplexers. With on-chip slaves, the structural path rdata, address mux, address decoder,
+  rdata is otherwise a combinational loop, even though no opcode selects it.
+- OAM DMA needed no new mechanism: it is a second `BusMaster` with a higher priority, which
+  stalls the CPU by taking the bus, and reads the CPU master's address for its halt cycles.
+- `Probe(..., cycleEvents = false)` skips per-cycle events and reads registers only at
+  retirement; long system cosims need that.
+
 ## SM83 timing notes
 
 The opcode table follows the documented M-cycle counts and bus order. A few behaviours are the
