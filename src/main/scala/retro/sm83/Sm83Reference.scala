@@ -38,6 +38,7 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
   var sp, pc = 0
   var ime, imeNext = false
   private var ir = 0
+  def halted = ir == Sm83.HALTED
   /** The opcode (or `Sm83.DISPATCH` / `Sm83.HALTED`) the next `step` executes. */
   def opcode: Int = ir
   private var cycle = 0L

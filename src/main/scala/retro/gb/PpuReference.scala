@@ -42,12 +42,16 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   var mode = 0
   /** LY = LYC, compared only while the LCD is on: turning it off freezes the flag. */
   var coincidence = false
+  /** The LY = LYC interrupt line: while LY is not compared (the flag reads 0) it holds its value. */
+  private var lycLine = false
   /** The first line after the LCD is turned on, which has no OAM scan: it reads as mode 0. */
   private var firstLine = false
   /** A STAT interrupt a halted CPU sees an M-cycle late, and one a running CPU does. */
   var statLate, statRunLate = false
   /** LY as read and compared: line 153 reads 0 after its first M-cycle. */
   def lyNow = if (ly == Gb.frameLines - 1 && x >= 1) 0 else ly
+  /** Whether LY is compared with LYC this M-cycle: not while LY changes. */
+  private def compared = (x != Gb.lineCycles - 1 || ly == Gb.frameLines - 1) && !(ly == Gb.frameLines - 1 && x == 1)
   /** The mode the STAT interrupt sees. */
   var irqMode = 0
   private var statLine = false
@@ -123,7 +127,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     case Gb.STAT => statSelect = (d >> 3) & 0xF
     case Gb.SCY => scy = d
     case Gb.SCX => scx = d
-    case Gb.LYC => lyc = d
+    case Gb.LYC => lyc = d; if (on && compared) lycLine = lyNow == lyc
     case Gb.BGP => bgp = d
     case Gb.OBP0 => obp0 = d
     case Gb.OBP1 => obp1 = d
@@ -203,15 +207,23 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // The LY = LYC flag drops in the line's last M-cycle, where LY already reads the next line
     // (except at the end of the frame, where LY stays 0), and in line 153's second M-cycle,
     // where LY changes to 0.
-    if (on) coincidence = lyNow == lyc && (x != Gb.lineCycles - 1 || ly == Gb.frameLines - 1) && !(ly == Gb.frameLines - 1 && x == 1)
+    val lycHeld = lycLine
+    if (on) {
+      coincidence = compared && lyNow == lyc
+      if (compared) lycLine = coincidence
+    }
     // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
     val vblankMode2 = ly == Gb.visibleLines && x == 0
-    def statFor(m: Int) = ((statSelect & 8) != 0 && coincidence) || on && (((statSelect & 4) != 0 && (m == 2 || vblankMode2)) ||
+    def statFor(m: Int, lyc: Boolean = lycLine) = ((statSelect & 8) != 0 && lyc) || on && (((statSelect & 4) != 0 && (m == 2 || vblankMode2)) ||
       ((statSelect & 2) != 0 && m == 1) || ((statSelect & 1) != 0 && m == 0))
     val line = statFor(irqMode)
-    val stat = line && !statLine
+    // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written.
+    val start = statLine || (statSelect & 8) != 0 && lycHeld
+    // Entering VBlank, LY = LYC is compared before the mode changes.
+    val mid = if (vblankMode2) statFor(0) else line
+    val stat = !statLine && start || !start && mid || !mid && line
     // A halted CPU sees the STAT line as it was before this M-cycle's dots.
-    statLate = stat && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore)
+    statLate = stat && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
     // Line 0's mode 2 interrupt rises a dot later than other lines': a running CPU sees it an
     // M-cycle later (Mealybug's line_0_fix), a halted one in time.
     statRunLate = stat && ly == 0 && x == 0 && !firstLine && irqMode == 2
@@ -434,3 +446,4 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private type ReturnType = (Int, Int, Boolean, Int, Int, Int, Int, Array[Int], Int, (Array[Int], Array[Int], Array[Int], Int),
     (Int, Int, Int, Int, Int, Int), (Boolean, Boolean, Boolean, Boolean, Boolean, Boolean, Boolean), (Int, Int, Int, Int, Int, Int, Int))
 }
+

@@ -99,6 +99,8 @@ class PpuPlugin(postBoot: Boolean = false)
     val ly = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.ppuLy)).simPublic()
     val statLine = RegInit(False)
     val coincidence = RegInit(False)
+    // The LY = LYC interrupt line: while LY is not compared (the flag reads 0) it holds its value.
+    val lycLine = RegInit(False)
     val firstLine = RegInit(False)
     val on = lcdc(7)
 
@@ -518,22 +520,27 @@ class PpuPlugin(postBoot: Boolean = false)
     // LY = LYC is only compared while the LCD is on, and stays on the interrupt line when off.
     // It drops in the line's last M-cycle, where LY already reads the next line (except at the
     // end of the frame, where LY stays 0), and in line 153's second, where LY changes to 0.
-    val coincidenceTicked = on ? (lyNow === lyc && (xTicked =/= Gb.lineCycles - 1 || lyTicked === Gb.frameLines - 1) &&
-      !(lyTicked === Gb.frameLines - 1 && xTicked === 1)) | coincidence
+    val compared = (xTicked =/= Gb.lineCycles - 1 || lyTicked === Gb.frameLines - 1) && !(lyTicked === Gb.frameLines - 1 && xTicked === 1)
+    val coincidenceTicked = on ? (compared && lyNow === lyc) | coincidence
+    val lycLineTicked = (on && compared) ? (lyNow === lyc) | lycLine
     // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
     val vblankMode2 = lyTicked === Gb.visibleLines && xTicked === 0
-    def lineFor(m: UInt) = (statSelect(3) && coincidenceTicked) || on && ((statSelect(2) && (m === 2 || vblankMode2)) ||
+    def lineFor(m: UInt, lycHigh: Bool = lycLineTicked) = (statSelect(3) && lycHigh) || on && ((statSelect(2) && (m === 2 || vblankMode2)) ||
       (statSelect(1) && m === 1) || (statSelect(0) && m === 0))
     val line = lineFor(irqMode)
     // LY reads the next line in the last M-cycle of a line.
     val lyRead = (on && xTicked === Gb.lineCycles - 1) ? ((lyTicked === Gb.frameLines - 1) ? U(0, 8 bits) | lyTicked + 1) | lyNow
-    val stat = line && !statLine
+    // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written;
+    // entering VBlank, LY = LYC is compared before the mode changes.
+    val start = statLine || statSelect(3) && lycLine
+    val mid = vblankMode2 ? lineFor(0) | line
+    val stat = !statLine && start || !start && mid || !mid && line
     irq(0) := vblank
     irq(1) := stat
     // A halted CPU sees the STAT line as it was before the dots; a running one sees line 0's
     // mode 2 interrupt an M-cycle late.
     if (statLateHalted != null) {
-      statLateHalted := stat && !lineFor(irqModeBefore)
+      statLateHalted := stat && !lineFor(irqModeBefore, lycLineTicked || lycLine)
       statLateRunning := stat && lyTicked === 0 && xTicked === 0 && !firstLineTicked && irqMode === 2
     }
 
@@ -566,6 +573,9 @@ class PpuPlugin(postBoot: Boolean = false)
     ly := lyTicked
     statLine := line
     coincidence := coincidenceTicked
+    lycLine := lycLineTicked
+    // An LYC write compares at once while LY is compared.
+    when(slave.writeFire && slave.cmd.address === Gb.LYC && on && compared) { lycLine := lyNow === slave.cmd.data }
     firstLine := firstLineTicked
     wyHit := wyHitTicked
   }

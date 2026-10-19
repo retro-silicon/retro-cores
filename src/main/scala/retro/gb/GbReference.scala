@@ -23,7 +23,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   private def isVram(a: Int) = a >= 0x8000 && a < 0xA000
   private val requestLog = Array.fill(64)(0)
   private var cycles = 0L
-  val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => iflag &= ~(1 << i))
+  val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => { iflag &= ~(1 << i); if (onAck != null) onAck(i) })
 
   val vram = if (postBoot) Gb.PostBoot.vram(external) else Array.fill(0x2000)(0)
   val wram = Array.fill(0x2000)(0)
@@ -87,6 +87,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   var onIoAccess: (Boolean, Int, Int) => Unit = null
   /** Called when the STAT interrupt is requested, for tracing. */
   var onStatIrq: () => Unit = null
+  var onAck: Int => Unit = null
 
   private var iduAddress = -1
   override def idu(address: Int): Unit = iduAddress = address & 0xFFFF
