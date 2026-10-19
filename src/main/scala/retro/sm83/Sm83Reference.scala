@@ -26,7 +26,7 @@ object Sm83Bus {
   * Interrupts: `requests(k)` must return IE & IF as it was during M-cycle `k` (counting
   * completed M-cycles from reset, the reset fetch being cycle 0). The model decides by itself
   * when to dispatch, which vector to take and how long HALT waits, and calls `ack(index)` at the
-  * end of the fetch cycle that starts a dispatch. */
+  * end of the dispatch cycle that pushes the low byte of PC, where the vector is chosen. */
 class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
   def this(mem: Array[Int], requests: Long => Int) = this(Sm83Bus.memory(mem), requests, _ => ())
 
@@ -34,7 +34,6 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
   var sp, pc = 0
   var ime, imeNext = false
   private var ir = 0
-  private var vector = 0
   private var cycle = 0L
   private val log = ArrayBuffer[BusAccess]()
 
@@ -108,17 +107,18 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
   // How the instruction's final fetch treats IME (key IME_OP in the RTL).
   private val NONE = 0; private val DI = 1; private val EI = 2; private val RETI = 3
 
-  /** The instruction-ending fetch, with the interrupt check. */
-  private def fetch(imeOp: Int = NONE, increment: Boolean = true): Unit = {
+  /** The instruction-ending fetch, with the interrupt check. HALT's fetch (`halt`) keeps the CPU
+    * halted, PC unchanged, while nothing is pending. */
+  private def fetch(imeOp: Int = NONE, increment: Boolean = true, halt: Boolean = false): Unit = {
     val k = cycle
     val opcode = read(pc)
-    if (increment) pc = (pc + 1) & 0xFFFF
     val reqs = requests(k)
+    if (increment && !(halt && reqs == 0)) pc = (pc + 1) & 0xFFFF
     val effective = imeOp == RETI || ((ime || imeNext) && imeOp != DI)
     val dispatch = effective && reqs != 0
     ime = effective && !dispatch
     imeNext = imeOp == EI && !dispatch
-    if (dispatch) { ir = Sm83.DISPATCH; vector = Integer.numberOfTrailingZeros(reqs); ack(vector) } else ir = opcode
+    ir = if (dispatch) Sm83.DISPATCH else if (halt && reqs == 0) Sm83.HALTED else opcode
   }
 
   /** Call once after reset: the reset NOP's fetch of the first opcode (M-cycle 0). */
@@ -130,13 +130,21 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
     val start = cycle
     var imeOp = NONE
     var increment = true
+    var halt = false
     ir match {
-      case Sm83.DISPATCH => idle(); pc = (pc - 1) & 0xFFFF; push16(pc); pc = 0x40 + 8 * vector
+      case Sm83.DISPATCH =>
+        idle(); pc = (pc - 1) & 0xFFFF
+        idle(); sp = (sp - 1) & 0xFFFF; write(sp, pc >> 8); sp = (sp - 1) & 0xFFFF
+        val k = cycle
+        write(sp, pc & 0xFF)
+        // The push of the high byte may have changed IE: the vector is chosen now.
+        val reqs = requests(k)
+        pc = if (reqs == 0) 0 else { val i = Integer.numberOfTrailingZeros(reqs); ack(i); 0x40 + 8 * i }
       case 0x00 | 0x10 => // NOP; STOP is not modelled and runs as a NOP, as in the RTL
       case 0x76 =>
         idle()
-        if (requests(cycle - 1) != 0 && !(ime || imeNext)) increment = false
-        else { while ({ idle(); requests(cycle - 1) == 0 }) {} }
+        if (requests(cycle - 1) != 0 && !(ime || imeNext)) increment = false else halt = true
+      case Sm83.HALTED => halt = true
       case o if (o & 0xC0) == 0x40 => setR((o >> 3) & 7, getR(o & 7))
       case o if (o & 0xC7) == 0x06 => setR((o >> 3) & 7, imm())
       case o if (o & 0xCF) == 0x01 => val lo = imm(); val hi = imm(); setRR(o >> 4, hi << 8 | lo)
@@ -211,7 +219,7 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
         }
       case _ => // unused opcodes run as a NOP, as in the RTL
     }
-    fetch(imeOp, increment)
+    fetch(imeOp, increment, halt)
     (log.toList, (cycle - start).toInt)
   }
 

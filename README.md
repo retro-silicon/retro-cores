@@ -7,8 +7,10 @@ the others.
 
 Status: the framework layer is in place and the SM83 implements the full documented opcode set
 (243 base opcodes plus the 256 CB ops), interrupts, EI/DI/RETI, HALT and the HALT bug. It passes
-cosimulation against a reference model on random code with random interrupts and wait states.
-STOP is not modelled.
+cosimulation against a reference model on random code with random interrupts and wait states,
+and on the Game Boy composition it passes Blargg's `cpu_instrs`, `instr_timing`, `mem_timing`,
+`mem_timing-2` and `halt_bug` and every Mooneye acceptance test for the CPU, interrupts, HALT,
+timer, serial clock and OAM DMA (see *Hardware test ROMs*). STOP is not modelled.
 
 CPUs and SoCs are generated the same way: a Game Boy is the SM83's plugin list plus SoC plugins
 (on-chip RAMs, IF/IE, timer, serial, LCD timing, joypad) in the same host. The whole system passes
@@ -24,6 +26,28 @@ sbt test                               # all Verilator sims: demo, toy CPU, SM83
 sbt "runMain retro.sm83.Sm83Verilog"   # writes gen/Sm83Core.v (the bare CPU)
 sbt "runMain retro.gb.GameBoyVerilog"  # writes gen/GameBoy.v (CPU + SoC, cartridge bus external)
 ```
+
+### Hardware test ROMs
+
+```sh
+scripts/fetch-test-roms.sh                         # Blargg's CPU tests and the Mooneye Test Suite into ./roms
+sbt "testOnly retro.gb.GameBoyRomSim"              # each ROM as a test on the RTL (about 10 minutes)
+sbt "Test/runMain retro.gb.GbRomReport timer/"     # pass/fail table for ROMs whose name matches
+sbt "Test/runMain retro.gb.GbRefRom timer/"        # the same ROMs on the reference model, in seconds
+```
+
+Only freely distributable test ROMs are used: Blargg's tests and the MIT-licensed Mooneye Test
+Suite; `./roms` is gitignored and `GameBoyRomSim` is skipped when it is empty. The ROM runs on
+`GameBoy(cartridge = ...)` with a `CartridgePlugin` built from the ROM header (ROM only, MBC1 or
+MBC5). Blargg's ROMs report over serial or in cartridge RAM, Mooneye's send the Fibonacci
+registers.
+
+Result on the RTL: 100 of the 125 ROMs pass, including all of Blargg's `cpu_instrs`,
+`instr_timing`, `mem_timing`, `mem_timing-2` and `halt_bug`, every Mooneye acceptance test for
+CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, five of the PPU interrupt
+tests, and the MBC1 and MBC5 tests. The other 25 are registered as ignored with the reason: nine
+are for other models (DMG-0, MGB, SGB), seven PPU tests need real mode 3 and LCD-on timing,
+`boot_hwio` needs the APU registers, and MBC2 and the MBC1 multicart are not modelled.
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
 VexiiRiscv: the plugin, fiber, database and pipeline APIs it uses all live in SpinalHDL's own
@@ -146,17 +170,25 @@ What makes that work:
 
 | Game Boy plugin | Addresses | What it does |
 |---|---|---|
-| `RamPlugin` ×4 | 8000, C000 (+echo), FE00, FF80 | VRAM, WRAM, OAM, HRAM |
+| `RamPlugin` ×3 | 8000, C000 (+echo), FF80 | VRAM, WRAM, HRAM |
+| `OamDmaPlugin` | FE00, FF46 | OAM and its DMA, which runs alongside the CPU and reads its source through `DirectRead` ports |
 | `InterruptControllerPlugin` | FF0F, FFFF | IF, IE, `IrqService`, `Sm83.InterruptController` |
 | `TimerPlugin` | FF04-FF07 | DIV/TIMA/TMA/TAC from a 16-bit counter: falling-edge ticks (DIV and TAC write glitches) and the delayed TMA reload |
-| `SerialPlugin` | FF01-FF02 | internally clocked transfers (1024 M-cycles), `serial_tx` pin with each byte sent |
+| `SerialPlugin` | FF01-FF02 | internally clocked transfers, shifting on the 8192 Hz edges of the timer's counter; `serial_tx` pin with each byte sent |
 | `LcdTimingPlugin` | FF40-FF4B | LCDC, STAT, LY, LYC, VBlank and STAT interrupts, fixed mode lengths; no pixels yet |
 | `JoypadPlugin` | FF00 | P1 matrix, `joypad_buttons` pins, joypad interrupt |
 | `OpenBusPlugin` ×2 | FEA0-FEFF, FF00-FFFF | 00 and FF for everything unmapped |
 | `PostBootPlugin` | | post-boot-ROM register state |
+| `CartridgePlugin` | 0000-7FFF, A000-BFFF | optional: ROM, RAM and an MBC1 or MBC5, for sims and FPGA builds with the game in block RAM |
 
 The Game Boy runs with no wait states, and the peripherals tick every clock, so a held bus
 cycle would advance the timer; that matches the hardware, which never stalls the CPU.
+
+Every peripheral follows one timing rule: in each M-cycle it ticks first, then the CPU's access
+sees the ticked state (reads return it combinationally) and a write lands on top of it. The
+CPU's interrupt check sees requests raised by that tick too. Mooneye's `div_timing`,
+`intr_timing` and timer tests, and Blargg's `mem_timing`, pin this down; it is described at
+`retro.gb.Gb`.
 
 ### Introspection
 
@@ -200,12 +232,11 @@ docs/EXTENDING.md            adding an instruction, a plugin or a CPU
 ## Roadmap
 
 Done: scaffold, framework layer, the SM83 instruction set with interrupts, extension guide, CPU
-and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, LCD timing, joypad)
-with system cosim.
+and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, LCD timing, joypad,
+OAM DMA, cartridge with MBC1/MBC5) with system cosim.
 
-Next: run hardware test ROMs (Blargg `cpu_instrs`/`instr_timing`, Mooneye timer and interrupt
-tests) on the Game Boy composition; they need a cartridge model with MBC1 in the sim and a
-download route for the ROM images, which this environment's network blocks. Then OAM DMA (the
-Game Boy CPU keeps running from HRAM during it, so it is not a plain higher-priority master),
-the PPU, STOP, and the 2A03 (see the guide). The reference models encode timings from the Pan
-Docs that have not been validated against real silicon.
+Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mooneye's CPU,
+interrupt, timer, serial and OAM DMA acceptance tests (see *Hardware test ROMs*).
+
+Next: the PPU pixel pipeline (Mooneye's PPU tests and dmg-acid2), the APU, DMA bus conflicts,
+STOP, and the 2A03 (see the guide).

@@ -20,12 +20,24 @@ trait IrqService {
   def request(line: IrqLine): Bool
 }
 
+/** A memory that another on-chip block can read without going through the bus, the way a DMA
+  * engine with its own path to memory does (Game Boy OAM DMA runs alongside the CPU). */
+trait DirectRead {
+  /** The bus addresses `directRead` answers. */
+  def directMappings: Seq[AddressMapping]
+  /** A combinational read port at a bus address. Call it from a build phase. */
+  def directRead(address: UInt): UInt
+}
+
 /** On-chip RAM as a bus slave. It decodes only the low `log2Up(size)` address bits, so `mapping`
   * must be aligned to that and may cover mirrors (Game Boy echo RAM). Reads are combinational,
   * as the M-cycle bus expects; contents start at zero.
   *
   * @param ramName used for the memory's signal name, so sims can find it */
-class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0) extends FiberPlugin {
+class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0) extends FiberPlugin with DirectRead {
+  def directMappings = Seq(mapping)
+  def directRead(address: UInt): UInt = logic.mem.readAsync(address(logic.width - 1 downto 0))
+
   val logic = during setup new Area {
     val bus = host[BusService]
     val retainer = retains(bus.busLock)

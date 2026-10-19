@@ -83,11 +83,20 @@ object Interrupts {
   val IME_OP = CtrlKey("IME_OP", 2)
   val NONE = 0; val DI = 1; val EI = 2; val RETI = 3
 
+  /** The handler address, chosen while the dispatch pushes the low byte of PC: the highest
+    * priority request then, or 0x0000 if the push of the high byte cleared it from IE. */
   val VECTOR = Value("INT.vector")
+  /** Set on the M-cycle that picks `VECTOR`: clears that request's IF bit. */
+  val ACK = CtrlKey("INT_ACK", 1)
   val PENDING = Cond("INT.pending")
   val NOT_PENDING = Cond("!INT.pending")
   /** An interrupt is pending while IME is off: HALT exits without incrementing PC. */
   val HALT_BUG = Cond("INT.haltbug")
+  /** Set on HALT's waiting fetch: while nothing is pending, IR reloads `Sm83.HALTED` instead
+    * of the fetched opcode, so the CPU keeps fetching at PC without executing anything. */
+  val HALT_WAIT = CtrlKey("HALT_WAIT", 1)
+  /** PC after HALT's waiting fetch: PC + 1 once an interrupt is pending, else PC. */
+  val HALT_PC = Value("INT.haltPC")
 }
 
 /** Small values the opcode table needs that belong to no other unit. */
@@ -108,10 +117,12 @@ object Isa {
   * The full documented opcode set is implemented, CB-prefixed ops included, with interrupts,
   * EI/DI/RETI, HALT and the HALT bug. STOP and the eleven unused opcodes behave as a 1 M-cycle
   * NOP (the real chip enters low-power mode or locks up). Opcode space is 10 bits wide:
-  * 0x000-0x0FF base opcodes, 0x100-0x1FF CB xx, 0x200 the interrupt dispatch sequence. */
+  * 0x000-0x0FF base opcodes, 0x100-0x1FF CB xx, 0x200 the interrupt dispatch sequence, 0x201 a
+  * halted M-cycle. */
 object Sm83 {
   val CB_PAGE = 0x100
   val DISPATCH = 0x200
+  val HALTED = 0x201
 
   private def operand(rf: RegFileService, sel: UInt) = Vec(r8.map(rf.read))(sel)
 
@@ -230,7 +241,9 @@ object Sm83 {
     * same plugin serves a bare CPU and a whole console.
     *
     * Interrupts are taken at an instruction-ending fetch: the fetched opcode is discarded and
-    * IR loads the dispatch opcode (0x200), which pushes PC and jumps to 0x40 + 8 * index.
+    * IR loads the dispatch opcode (0x200), which pushes PC and jumps to the vector. The vector
+    * and the IF bit to clear are decided only while the low byte of PC is pushed, so a push of
+    * the high byte into IE (SP = 0000) can redirect or cancel the dispatch (Mooneye ie_push).
     * EI takes effect after the following instruction; DI and RETI immediately. */
   class InterruptPlugin extends FiberPlugin {
     val logic = during setup new Area {
@@ -239,6 +252,8 @@ object Sm83 {
       val retainer = retains(seq.seqLock)
       awaitBuild()
       seq.addKey(Interrupts.IME_OP)
+      seq.addKey(Interrupts.ACK)
+      seq.addKey(Interrupts.HALT_WAIT)
       val imeOp = seq.ctrl(Interrupts.IME_OP)
 
       val requests = Bits(5 bits)
@@ -249,7 +264,6 @@ object Sm83 {
       }
       val ime = RegInit(False).simPublic()
       val imeNext = RegInit(False)
-      val vector = Reg(UInt(3 bits)) init 0
 
       val pending = requests =/= 0
       val enabled = ime || imeNext
@@ -257,16 +271,18 @@ object Sm83 {
       val dispatch = effective && pending
       val index = OHToUInt(OHMasking.first(requests))
 
+      seq.addFetchOverride(seq.ctrl(Interrupts.HALT_WAIT) === 1 && !pending, U(HALTED, 10 bits))
       seq.addFetchOverride(dispatch, U(DISPATCH, 10 bits))
+      val pc = host[RegFileService].read(PC)
+      seq.addSource(Interrupts.HALT_PC, pending ? (pc + 1) | pc)
       when(seq.fetchFire) {
         ime := effective && !dispatch
         imeNext := imeOp === Interrupts.EI && !dispatch
-        when(dispatch) { vector := index }
       }
-      ack.valid := seq.fetchFire && dispatch
+      ack.valid := seq.cycleDone && seq.ctrl(Interrupts.ACK) === 1 && pending
       ack.payload := index
 
-      seq.addSource(Interrupts.VECTOR, U(0x40, 16 bits) + (vector @@ U"000").resized)
+      seq.addSource(Interrupts.VECTOR, pending ? (U(0x40, 16 bits) + (index @@ U"000").resized) | U(0, 16 bits))
       seq.addCond(Interrupts.PENDING, pending)
       seq.addCond(Interrupts.NOT_PENDING, !pending)
       seq.addCond(Interrupts.HALT_BUG, pending && !enabled)
@@ -410,10 +426,14 @@ object Sm83 {
     // ---- Interrupt control ------------------------------------------------------------------
     op("DI", 0xF3, fetch.set(Interrupts.IME_OP, Interrupts.DI))
     op("EI", 0xFB, fetch.set(Interrupts.IME_OP, Interrupts.EI))
-    // HALT waits for a pending interrupt. Entered with one already pending and IME off, the
-    // next fetch does not increment PC (the HALT bug).
-    op("HALT", 0x76, idle.branchIf(Interrupts.HALT_BUG, 3), idle.branchIf(Interrupts.NOT_PENDING, 1), fetch, MCycleSpec.fetch(PC))
-    op("INT", DISPATCH, idle.assign(PC -> Idu.dec(PC)) +: pushPC(_.assign(PC -> Interrupts.VECTOR)) :+ fetch: _*)
+    // HALT waits for a pending interrupt by fetching at PC every M-cycle until one is pending
+    // (HALTED is the opcode that waits), so the wake-up fetch dispatches in the same cycle as a
+    // running CPU would (Mooneye di_timing, halt_ime1_timing2). Entered with one already
+    // pending and IME off, the next fetch does not increment PC (the HALT bug).
+    val haltWait = MCycleSpec.fetch(PC).assign(PC -> Interrupts.HALT_PC).set(Interrupts.HALT_WAIT, 1)
+    op("HALT", 0x76, idle.branchIf(Interrupts.HALT_BUG, 2), haltWait, MCycleSpec.fetch(PC))
+    op("HALTED", HALTED, haltWait)
+    op("INT", DISPATCH, idle.assign(PC -> Idu.dec(PC)) +: pushPC(_.assign(PC -> Interrupts.VECTOR).set(Interrupts.ACK, 1)) :+ fetch: _*)
 
     // ---- CB page -----------------------------------------------------------------------------
     op("PREFIX CB", 0xCB, MCycleSpec.prefix(PC, 1).assign(PC -> Idu.inc(PC)))

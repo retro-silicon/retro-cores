@@ -34,6 +34,8 @@ trait SequencerService {
   def addFetchOverride(valid: Bool, opcode: UInt): Unit
   /** High in the cycle where an instruction-ending fetch completes. Usable from any build phase. */
   def fetchFire: Bool
+  /** High when the current M-cycle completes (the bus did not hold it). Usable from any build phase. */
+  def cycleDone: Bool
 }
 
 /** The M-cycle sequencer: a plain FSM holding the opcode register (IR) and the M-cycle counter
@@ -56,9 +58,10 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
   private val overrides = ArrayBuffer[(Bool, UInt)]()
 
   val early = during setup new Area {
-    val fetchFire = Bool()
+    val fetchFire, cycleDone = Bool()
   }
   def fetchFire = early.fetchFire
+  def cycleDone = early.cycleDone
   def addFetchOverride(valid: Bool, opcode: UInt) = overrides += valid -> opcode
 
   def addOp(op: OpSpec) = {
@@ -191,6 +194,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     val condTaken = (conds.values.toSeq.asBits() ## False)(condSel)
 
     fetchFire := done && fetch
+    cycleDone := done
     // Later-registered overrides win.
     val fetched = master.rdata.asBits.resize(opcodeWidth)
     val nextOpcode = overrides.foldLeft(fetched) { case (acc, (valid, op)) => valid ? op.asBits.resize(opcodeWidth) | acc }

@@ -9,3 +9,4 @@ gen/
 .idea/
 .metals/
 .bloop/
+roms/

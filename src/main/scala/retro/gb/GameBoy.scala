@@ -11,7 +11,13 @@ import spinal.lib.misc.plugin._
 
 import scala.collection.mutable.ArrayBuffer
 
-/** Game Boy (DMG) constants shared by the RTL plugins and `GbReference`. */
+/** Game Boy (DMG) constants shared by the RTL plugins and `GbReference`.
+  *
+  * Timing convention for every peripheral: in each M-cycle the peripheral ticks first (its four
+  * T-cycles), then the CPU's access sees the ticked state, and a write lands on top of it. In the
+  * RTL a register holds the state at the start of the cycle, so reads return the ticked value
+  * combinationally and the next state is the ticked one with the write applied. Mooneye's
+  * div_timing and Blargg's mem_timing pin this down. */
 object Gb {
   object Irq {
     val VBLANK = IrqLine("VBlank", 0)
@@ -25,15 +31,15 @@ object Gb {
   val P1 = 0xFF00; val SB = 0xFF01; val SC = 0xFF02
   val DIV = 0xFF04; val TIMA = 0xFF05; val TMA = 0xFF06; val TAC = 0xFF07
   val IF = 0xFF0F; val IE = 0xFFFF
-  val LCDC = 0xFF40; val STAT = 0xFF41; val LY = 0xFF44; val LYC = 0xFF45
+  val LCDC = 0xFF40; val STAT = 0xFF41; val LY = 0xFF44; val LYC = 0xFF45; val DMA = 0xFF46
   /** LCD registers that are plain storage until there is a PPU to read them. */
   val lcdPlain = Seq(0xFF42, 0xFF43, 0xFF47, 0xFF48, 0xFF49, 0xFF4A, 0xFF4B) // SCY SCX BGP OBP0 OBP1 WY WX
 
   /** M-cycles per scanline, visible lines, lines per frame; OAM scan and pixel transfer ends. */
   val lineCycles = 114; val visibleLines = 144; val frameLines = 154
   val oamEnd = 20; val transferEnd = 63
-  /** M-cycles for an internally clocked serial byte: 8 bits at 8192 Hz. */
-  val serialCycles = 1024
+  /** The timer counter bit whose falling edges clock the serial port (8192 Hz). */
+  val serialClockBit = 8
 
   /** State the DMG boot ROM leaves behind when it jumps to the cartridge at 0x0100. The timer's
     * internal counter is the value that makes DIV read 0xAB there. */
@@ -41,7 +47,7 @@ object Gb {
     import Sm83Regs._
     val regs: Seq[(Register, BigInt)] = Seq(A -> 0x01, F -> 0xB0, B -> 0x00, C -> 0x13, D -> 0x00, E -> 0xD8,
       H -> 0x01, L -> 0x4D, SPH -> 0xFF, SPL -> 0xFE, PC -> 0x0100)
-    val counter = 0xABCC
+    val counter = 0xABC8
     val lcdc = 0x91
   }
 
@@ -50,9 +56,9 @@ object Gb {
 }
 
 /** IF (0xFF0F) and IE (0xFFFF). Peripherals raise requests through `IrqService`; the CPU's
-  * `Sm83.InterruptPlugin` finds this plugin as its `InterruptController`. In a cycle where a
-  * request, a write to IF and the CPU's acknowledge coincide, the write lands first, then the
-  * request, and the acknowledge clears last. */
+  * `Sm83.InterruptPlugin` finds this plugin as its `InterruptController`. Requests raised by
+  * this M-cycle's tick are visible in the same cycle, to a read of IF and to the CPU's interrupt
+  * check; a write to IF then lands over them, and the CPU's acknowledge clears last. */
 class InterruptControllerPlugin extends FiberPlugin with IrqService with Sm83.InterruptController {
   val irqLock = Retainer()
   private val lines = ArrayBuffer[(IrqLine, Bool)]()
@@ -79,15 +85,16 @@ class InterruptControllerPlugin extends FiberPlugin with IrqService with Sm83.In
 
     val flags = Reg(Bits(5 bits)).init(0).simPublic()
     val enable = Reg(Bits(8 bits)).init(0).simPublic()
-    new RetroBusSlaveFactory(ifSlave, idleBits = 0xFF).read(flags, Gb.IF)
-    new RetroBusSlaveFactory(ieSlave).readAndWrite(enable, Gb.IE)
 
     irqLock.await()
     val raised = (0 until 5).map(i => lines.filter(_._1.index == i).map(_._2).foldLeft(False: Bool)(_ || _)).asBits()
-    val written = ifSlave.writeFire ? ifSlave.cmd.data(4 downto 0).asBits | flags
+    val ticked = flags | raised
+    new RetroBusSlaveFactory(ifSlave, idleBits = 0xFF).read(ticked, Gb.IF)
+    new RetroBusSlaveFactory(ieSlave).readAndWrite(enable, Gb.IE)
+    val written = ifSlave.writeFire ? ifSlave.cmd.data(4 downto 0).asBits | ticked
     val acked = early.ack.valid ? UIntToOh(early.ack.payload, 5) | B(0, 5 bits)
-    flags := (written | raised) & ~acked
-    early.requests := flags & enable(4 downto 0)
+    flags := written & ~acked
+    early.requests := ticked & enable(4 downto 0)
   }
 }
 
@@ -111,83 +118,114 @@ abstract class GbPeripheral(mapping: AddressMapping, irqs: IrqLine*) extends Fib
   * its top byte, and TIMA counts falling edges of the counter bit TAC selects, gated by the TAC
   * enable, so writing DIV or TAC can itself tick TIMA, as on the DMG.
   *
-  * On overflow TIMA reads 0x00 for one M-cycle (A), then loads TMA and requests the interrupt.
-  * Writing TIMA during A cancels both. During the next cycle (B) TIMA writes are ignored and TMA
-  * writes also land in TIMA. */
+  * Like every Game Boy peripheral here, each M-cycle the timer ticks first and the CPU's access
+  * then sees, or writes over, the ticked state (see `Gb`). On overflow TIMA reads 0x00 for one
+  * M-cycle (A); the next tick loads TMA and requests the interrupt (B). Writing TIMA during A
+  * cancels both. During B a TIMA write is ignored and a TMA write also lands in TIMA. */
 class TimerPlugin(resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
+  /** The 16-bit counter, and its value after this M-cycle's tick: other peripherals (serial)
+    * divide their clocks from it. */
+  val counter, tickedCounter = Handle[UInt]()
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val counter = Reg(UInt(16 bits)).init(resetCounter).simPublic()
+    TimerPlugin.this.counter.load(counter)
     val tima = Reg(UInt(8 bits)).init(0).simPublic()
     val tma = Reg(UInt(8 bits)).init(0).simPublic()
     val tac = Reg(UInt(3 bits)).init(0).simPublic()
     val overflowed = RegInit(False)
-    val reloading = RegInit(False)
+
+    def tap(c: UInt, t: UInt) = t(2) && t(1 downto 0).muxListDc(Seq(0 -> c(9), 1 -> c(3), 2 -> c(5), 3 -> c(7)))
+    // The tick: this M-cycle's four T-cycles, before the CPU's access.
+    val ticked = new Area {
+      val counter = UInt(16 bits)
+      val tima = UInt(8 bits)
+      val overflowed, reloading = Bool()
+    }
+    ticked.counter := counter + 4
+    tickedCounter.load(ticked.counter)
+    ticked.tima := tima
+    ticked.overflowed := False
+    ticked.reloading := False
+    irq(0) := False
+    when(overflowed) {
+      ticked.tima := tma
+      ticked.reloading := True
+      irq(0) := True
+    } elsewhen (tap(counter, tac) && !tap(ticked.counter, tac)) {
+      ticked.tima := tima + 1
+      ticked.overflowed := tima === 0xFF
+    }
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
-    regs.read(counter(15 downto 8), Gb.DIV)
-    regs.read(tima, Gb.TIMA)
+    regs.read(ticked.counter(15 downto 8), Gb.DIV)
+    regs.read(ticked.tima, Gb.TIMA)
     regs.read(tma, Gb.TMA)
     regs.read(tac, Gb.TAC)
 
     def writes(a: Int) = slave.writeFire && slave.cmd.address === a
     val data = slave.cmd.data
-    val counterNext = writes(Gb.DIV) ? U(0, 16 bits) | counter + 4
+    val counterNext = writes(Gb.DIV) ? U(0, 16 bits) | ticked.counter
     val tacNext = writes(Gb.TAC) ? data(2 downto 0) | tac
-    val tmaNext = writes(Gb.TMA) ? data | tma
-    def tap(c: UInt, t: UInt) = t(2) && t(1 downto 0).muxListDc(Seq(0 -> c(9), 1 -> c(3), 2 -> c(5), 3 -> c(7)))
-    val fall = tap(counter, tac) && !tap(counterNext, tacNext)
+    // Resetting DIV or changing TAC can drop the selected bit: that is a falling edge too.
+    val glitch = tap(ticked.counter, tac) && !tap(counterNext, tacNext)
 
     counter := counterNext
     tac := tacNext
-    tma := tmaNext
-    overflowed := False
-    reloading := False
-    irq(0) := False
-    def increment() = { tima := tima + 1; when(tima === 0xFF) { overflowed := True } }
-    when(overflowed && !writes(Gb.TIMA)) {
-      tima := tmaNext
-      irq(0) := True
-      reloading := True
-    } elsewhen (reloading) {
-      when(writes(Gb.TMA)) { tima := data } elsewhen (fall) { increment() }
-    } elsewhen (writes(Gb.TIMA)) {
+    tima := ticked.tima
+    overflowed := ticked.overflowed
+    when(writes(Gb.TIMA) && !ticked.reloading) {
       tima := data
-    } elsewhen (fall) {
-      increment()
+      overflowed := False
+    }
+    when(writes(Gb.TMA)) {
+      tma := data
+      when(ticked.reloading) { tima := data }
+    }
+    when(glitch) {
+      tima := ticked.tima + 1
+      overflowed := ticked.tima === 0xFF
     }
   }
 }
 
-/** SB and SC. A transfer with the internal clock takes `Gb.serialCycles` M-cycles; with nothing
-  * on the link the byte shifted in is 0xFF. `tx` is a pin that pulses with each byte sent, which
-  * is how test ROMs report results. */
+/** SB and SC. With the internal clock a transfer shifts one bit out of SB (and a 1 in, nothing
+  * being on the link) on each falling edge of bit 8 of the timer's counter (8192 Hz), so eight
+  * bits take 1024 M-cycles but start aligned to that clock, not to the SC write. `tx` is a pin
+  * that pulses with each byte sent, which is how test ROMs report results. */
 class SerialPlugin extends GbPeripheral(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
   var tx: Flow[UInt] = null
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     tx = master(Flow(UInt(8 bits))).setName("serial_tx")
+    val timer = host[TimerPlugin]
     val sb = Reg(UInt(8 bits)) init 0
     val active = RegInit(False)
     val internalClock = RegInit(False)
-    val remaining = Reg(UInt(log2Up(Gb.serialCycles + 1) bits)) init 0
+    val bits = Reg(UInt(4 bits)) init 0
+
+    // The tick.
+    val shift = active && internalClock && timer.counter.get(Gb.serialClockBit) && !timer.tickedCounter.get(Gb.serialClockBit)
+    val done = shift && bits === 1
+    val sbTicked = shift ? (sb(6 downto 0) @@ U"1") | sb
+    val activeTicked = active && !done
+    irq(0) := done
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
-    regs.read(sb, Gb.SB)
+    regs.read(sbTicked, Gb.SB)
     regs.read(internalClock, Gb.SC, 0)
-    regs.read(active, Gb.SC, 7)
+    regs.read(activeTicked, Gb.SC, 7)
 
     def writes(a: Int) = slave.writeFire && slave.cmd.address === a
     val data = slave.cmd.data
+    sb := sbTicked
+    active := activeTicked
+    when(shift) { bits := bits - 1 }
     tx.valid := False
-    irq(0) := False
-    tx.payload := sb
+    tx.payload := sbTicked
     when(writes(Gb.SC)) {
       active := data(7)
       internalClock := data(0)
-      remaining := 0
-      when(data(7) && data(0)) { remaining := Gb.serialCycles; tx.valid := True }
-    } elsewhen (remaining =/= 0) {
-      remaining := remaining - 1
-      when(remaining === 1) { sb := 0xFF; active := False; irq(0) := True }
+      bits := 8
+      tx.valid := data(7) && data(0)
     }
     when(writes(Gb.SB)) { sb := data }
   }
@@ -204,38 +242,44 @@ class LcdTimingPlugin(resetLcdc: Int = 0) extends GbPeripheral(SizeMapping(0xFF4
     val x = Reg(UInt(7 bits)).init(0).simPublic()
     val ly = Reg(UInt(8 bits)).init(0).simPublic()
     val statLine = RegInit(False)
-
     val on = lcdc(7)
+
+    // The tick.
+    val xTicked = UInt(7 bits)
+    val lyTicked = UInt(8 bits)
+    when(!on) {
+      xTicked := 0
+      lyTicked := 0
+    } elsewhen (x === Gb.lineCycles - 1) {
+      xTicked := 0
+      lyTicked := (ly === Gb.frameLines - 1) ? U(0, 8 bits) | ly + 1
+    } otherwise {
+      xTicked := x + 1
+      lyTicked := ly
+    }
     val mode = UInt(2 bits)
     mode := 0
     when(on) {
-      when(ly >= Gb.visibleLines) { mode := 1 } elsewhen (x < Gb.oamEnd) { mode := 2 } elsewhen (x < Gb.transferEnd) { mode := 3 }
+      when(lyTicked >= Gb.visibleLines) { mode := 1 } elsewhen (xTicked < Gb.oamEnd) { mode := 2 } elsewhen (xTicked < Gb.transferEnd) { mode := 3 }
     }
-    val coincidence = ly === lyc
+    val coincidence = lyTicked === lyc
+    val line = on && ((statSelect(3) && coincidence) || (statSelect(2) && mode === 2) ||
+      (statSelect(1) && mode === 1) || (statSelect(0) && mode === 0))
+    irq(0) := on && ly === Gb.visibleLines - 1 && x === Gb.lineCycles - 1
+    irq(1) := line && !statLine
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
     regs.readAndWrite(lcdc, Gb.LCDC)
     regs.readAndWrite(statSelect, Gb.STAT, 3)
     regs.read(coincidence, Gb.STAT, 2)
     regs.read(mode, Gb.STAT, 0)
-    regs.read(ly, Gb.LY)
+    regs.read(lyTicked, Gb.LY)
     regs.readAndWrite(lyc, Gb.LYC)
     for (a <- Gb.lcdPlain) regs.createReadAndWrite(UInt(8 bits), a) init 0
 
-    when(!on) {
-      x := 0
-      ly := 0
-    } elsewhen (x === Gb.lineCycles - 1) {
-      x := 0
-      ly := (ly === Gb.frameLines - 1) ? U(0, 8 bits) | ly + 1
-    } otherwise {
-      x := x + 1
-    }
-    irq(0) := on && ly === Gb.visibleLines - 1 && x === Gb.lineCycles - 1
-    val line = on && ((statSelect(3) && coincidence) || (statSelect(2) && mode === 2) ||
-      (statSelect(1) && mode === 1) || (statSelect(0) && mode === 0))
+    x := xTicked
+    ly := lyTicked
     statLine := line
-    irq(1) := line && !statLine
   }
 }
 
@@ -266,12 +310,13 @@ class PostBootPlugin extends FiberPlugin {
 }
 
 /** The Game Boy: the SM83 plugins plus the SoC plugins, in one host. Whatever no plugin maps
-  * (cartridge ROM 0000-7FFF and cartridge RAM A000-BFFF) is the external bus. */
+  * (cartridge ROM 0000-7FFF and cartridge RAM A000-BFFF) is the external bus, unless a
+  * `cartridge` is given, in which case a `CartridgePlugin` answers there. */
 object GameBoy {
-  def plugins(withTrace: Boolean = true, postBoot: Boolean = true): Seq[Hostable] = Sm83.plugins(withTrace) ++ Seq(
+  def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None): Seq[Hostable] = Sm83.plugins(withTrace) ++ Seq(
     new RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000),
     new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000), // E000-FDFF echoes C000-DDFF
-    new RamPlugin("oam", SizeMapping(0xFE00, 0xA0), 0xA0),
+    new OamDmaPlugin,
     new RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F),
     new OpenBusPlugin(SizeMapping(0xFEA0, 0x60), value = 0x00),
     new OpenBusPlugin(SizeMapping(0xFF00, 0x100)),
@@ -280,10 +325,10 @@ object GameBoy {
     new SerialPlugin,
     new LcdTimingPlugin(if (postBoot) Gb.PostBoot.lcdc else 0),
     new JoypadPlugin
-  ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil)
+  ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil) ++ cartridge.map(new CartridgePlugin(_))
 
-  def apply(withTrace: Boolean = true, postBoot: Boolean = true): RetroCore =
-    RetroCore(plugins(withTrace, postBoot)).setDefinitionName("GameBoy")
+  def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None): RetroCore =
+    RetroCore(plugins(withTrace, postBoot, cartridge)).setDefinitionName("GameBoy")
 }
 
 object GameBoyVerilog extends App {

@@ -49,7 +49,8 @@ class GameBoySim extends AnyFunSuite {
           val rtlRegs = Sm83Regs.architectural.map(r => r.name -> e.regs(r.name)).toMap
           assert(rtlRegs == cpu.regs, s"$ctx: registers\n  rtl $rtlRegs\n  ref ${cpu.regs}")
           seen(e.opcode) += 1
-          checked += 1
+          // A halted M-cycle retires as HALTED; it does not count towards the instruction budget.
+          if (e.opcode != Sm83.HALTED) checked += 1
         }
       }
       ref.buttonsAt = k => buttonLog(k.toInt)

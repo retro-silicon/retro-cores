@@ -29,7 +29,8 @@ class Sm83CosimSim extends AnyFunSuite {
       val rtlRegs = Sm83Regs.architectural.map(r => r.name -> e.regs(r.name)).toMap
       assert(rtlRegs == ref.regs, s"$ctx: registers\n  rtl $rtlRegs\n  ref ${ref.regs}")
       seen(e.opcode) += 1
-      checked += 1
+      // A halted M-cycle retires as HALTED; it does not count towards the instruction budget.
+      if (e.opcode != Sm83.HALTED) checked += 1
     }
   }
 
