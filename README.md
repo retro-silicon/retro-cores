@@ -50,21 +50,23 @@ raise no interrupts, so dispatch, HALT exit and the EI delay are covered by the 
 ```sh
 scripts/fetch-nes6502-tests.sh                     # SingleStepTests/65x02 nes6502 (MIT) into ./roms/sst-nes6502, about 1.1 GB
 scripts/fetch-nes-test-roms.sh                     # nestest and its Nintendulator log into ./roms/nes
-sbt "testOnly retro.r2a03.*"                       # single-step tests (1000 per opcode), nestest, interrupt checks
+sbt "testOnly retro.r2a03.*"                       # single-step tests (1000 per opcode), nestest, cosim, interrupt checks
 SST_LIMIT=10000 sbt "testOnly retro.r2a03.R2A03SingleStepSim"   # all 2,560,000 tests (about 15 minutes)
 sbt "runMain retro.r2a03.R2A03Verilog"             # writes gen/R2A03Core.v
 ```
 
-`retro.r2a03.Ricoh2A03` is a 6502 without decimal mode on the same framework as the SM83, with no
-change to `retro.core`. All 256 opcodes are implemented, the undocumented ones included (the
+`retro.r2a03.Ricoh2A03` is a 6502 without decimal mode on the same framework as the SM83. All 256 opcodes are implemented, the undocumented ones included (the
 unstable ANE/LXA use the constant EE; SHA/SHX/SHY/TAS corrupt the address high byte on a page
 cross), plus IRQ, NMI (with BRK hijacking), reset and JAM. It passes every one of the 2,560,000
 [SingleStepTests/65x02](https://github.com/SingleStepTests/65x02) `nes6502` tests cycle by cycle
 (read or write, address and data of every cycle, final registers and RAM), and runs nestest in
 automation mode matching all 8,991 lines of the Nintendulator log, cycle counts included.
-Interrupt dispatch, the CLI delay, NMI edge detection and the taken-branch polling quirk are
-checked by directed tests (`R2A03InterruptSim`), following the nesdev wiki. Not yet: a NES SoC
-(PPU, APU, OAM DMA, mappers) and a 2A03 reference model.
+`R2A03Reference`, a cycle-by-cycle model written independently of the opcode table, passes the
+same single-step tests and is cosimulated with the RTL on random code with random IRQ and NMI
+levels (`R2A03CosimSim`): every instruction must match in cycles, bus accesses and registers.
+Interrupts poll in the second-to-last cycle; the CLI/SEI/PLP delay, RTI taking effect at once,
+NMI edge detection and the taken-branch polling quirk follow the nesdev wiki and are also checked
+by directed tests (`R2A03InterruptSim`).
 
 ### Hardware test ROMs
 

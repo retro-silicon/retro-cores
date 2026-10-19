@@ -36,6 +36,10 @@ trait SequencerService {
   def fetchFire: Bool
   /** High when the current M-cycle completes (the bus did not hold it). Usable from any build phase. */
   def cycleDone: Bool
+  /** The bus read data of the current M-cycle, as hardware, for values computed from it (the 6502
+    * pulls P from the stack as `rdata` with two bits forced). Usable from any build phase. Such a
+    * value must not feed a bus address or write data, for the reason RDATA itself cannot. */
+  def rdata: UInt
 }
 
 /** The M-cycle sequencer: a plain FSM holding the opcode register (IR) and the M-cycle counter
@@ -59,9 +63,11 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
 
   val early = during setup new Area {
     val fetchFire, cycleDone = Bool()
+    val rdata = UInt(host[BusService].busConfig.dataWidth bits)
   }
   def fetchFire = early.fetchFire
   def cycleDone = early.cycleDone
+  def rdata = early.rdata
   def addFetchOverride(valid: Bool, opcode: UInt) = overrides += valid -> opcode
 
   def addOp(op: OpSpec) = {
@@ -85,6 +91,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
 
     val master = bus.newMaster(busPriority)
     busRetainer.release()
+    early.rdata := master.rdata
     addSource(SequencerPlugin.RDATA, master.rdata)
 
     seqLock.await()

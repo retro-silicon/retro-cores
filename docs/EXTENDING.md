@@ -140,27 +140,31 @@ steps, with what the 2A03 needed at each one:
    cycle when there is no carry. Dummy reads and writes are ordinary cycles. 6502-style overlap
    (the result is written while the next opcode is fetched) is a transfer on the final `fetch`.
    Sinks are resized, so `PCL -> Agu.PC_REL` takes the low byte of a 16-bit value.
-6. **Interrupts.** A plugin with `addFetchOverride`. The 6502 polls in the second-to-last cycle;
-   a register updated every completed cycle gives exactly that at the fetch. Exceptions are a
-   `CtrlKey` on the cycle concerned (`HOLD_POLL` on a taken branch, `SELECT` where the vector is
-   chosen and an NMI can hijack a BRK).
+6. **Interrupts.** A plugin with `addFetchOverride`. The 6502 polls in the second-to-last cycle:
+   a poll register updated every completed cycle, and a second one behind it, give the fetch the
+   poll of the cycle before the previous one. Exceptions are a `CtrlKey` on the cycle concerned
+   (`HOLD_POLL` on a branch's operand read, `SELECT` where the vector is chosen and an NMI can
+   hijack a BRK). Where the flag changes matters as much: CLI and SEI change I on their dummy
+   read, PLP and RTI as P is read off the stack.
 7. **Tests.** Per-cycle single-instruction tests (SingleStepTests) when they exist, a known
-   program with a reference log (nestest), and directed tests for what neither covers
-   (`R2A03InterruptSim`). Copy `R2A03SingleStepSim`: reset, run to the first fetch, load the
+   program with a reference log (nestest), a reference model written independently of the opcode
+   table (`R2A03Reference`, itself checked against the single-step tests) cosimulated with the RTL
+   on random code with random interrupts (`R2A03CosimSim`), and directed tests for documented
+   corner cases (`R2A03InterruptSim`). Copy `R2A03SingleStepSim`: reset, run to the first fetch, load the
    state, compare every cycle. The probe and backends are CPU-independent.
 8. **Toplevel.** `RetroCore(Seq(bus, sequencer, regfile, units..., isa, trace))`.
 
 What the 2A03 showed about the framework:
 
-- Nothing in `retro.core` had to change: the bus, the sequencer, the register file and the trace
-  plugin carried a second, quite different CPU (every cycle a bus access, no prefix page, a
-  multi-cycle reset, interrupt polling before the fetch).
+- The bus, the sequencer, the register file and the trace plugin carried a second, quite
+  different CPU (every cycle a bus access, no prefix page, a multi-cycle reset, interrupt polling
+  before the fetch). The one addition was `SequencerService.rdata`, the bus read data as hardware,
+  so a plugin can publish a value computed from it: PLP and RTI write P from the byte being read
+  (bits 4 and 5 forced) in the same cycle, which their interrupt timing depends on.
 - `OpSpec` requires the last cycle to be a fetch, so an instruction that never ends (JAM) carries
   an unreachable fetch after its loop.
 - The single-step harnesses for the SM83 and the 2A03 are near copies; a shared one in `retro.sim`
   would remove that.
-- There is no 2A03 reference model yet. The single-step tests and nestest stand in for one on the
-  CPU, but a NES system cosim (like `GameBoySim`) will need a model.
 
 ## SM83 timing notes
 

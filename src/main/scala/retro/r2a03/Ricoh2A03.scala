@@ -79,8 +79,8 @@ object Interrupts {
   /** Set on the cycle that pushes P in BRK and in the dispatch: the vector is chosen then
     * (an NMI arriving before it hijacks a BRK or an IRQ) and a taken NMI is acknowledged. */
   val SELECT = CtrlKey("INT_SELECT", 1)
-  /** Set on a taken branch's PCL cycle: it does not poll, so when the branch stays on its page
-    * the decision at the next fetch is the one polled during the operand read. */
+  /** Set on a branch's operand read, which does not poll. A taken branch that stays on its page
+    * therefore acts on the poll of its opcode fetch, one cycle earlier than the usual rule. */
   val HOLD_POLL = CtrlKey("INT_HOLD_POLL", 1)
   val VECTOR_LO = Value("vector.lo")
   val VECTOR_HI = Value("vector.hi")
@@ -91,8 +91,8 @@ object Isa {
   /** P as BRK and PHP push it (B set), and as IRQ and NMI push it (B clear). */
   val P_BRK = Value("P|30")
   val P_IRQ = Value("P&EF")
-  /** D as P: what PLP and RTI pull (bit 5 forced to 1, B dropped). */
-  val D_AS_P = Value("D->P")
+  /** The byte being read, as P: what PLP and RTI pull (bit 5 forced to 1, B dropped). */
+  val RDATA_AS_P = Value("rdata->P")
   val A_AND_X = Value("A&X")
   val ZERO = Value("0")
   val ONE = Value("1")
@@ -191,14 +191,16 @@ object Ricoh2A03 {
   /** NMI edge detection, IRQ masking and dispatch. With an `InterruptLines` plugin in the host
     * the lines are wired to it; otherwise they are pins.
     *
-    * The 6502 polls interrupts in the second-to-last cycle of an instruction, so the decision
-    * taken at a fetch uses what was registered at the end of the previous cycle; this is what
-    * delays CLI, SEI and PLP by one instruction. When it holds, the fetched opcode is replaced by
+    * The 6502 polls interrupts in the second-to-last cycle of an instruction: every completed
+    * cycle registers a poll, and a fetch acts on the poll of the cycle before the previous one.
+    * CLI, SEI and PLP change I after their poll, so they take effect one instruction late, while
+    * RTI pulls P early enough for its own poll to see it. When it holds, the fetched opcode is replaced by
     * the dispatch sequence (0x100), which reads at PC again, pushes PC and P (B clear) and jumps
     * through the vector chosen on the cycle P is pushed.
     *
-    * A taken branch that stays on its page does not poll in its last cycle (`HOLD_POLL`), so an
-    * interrupt arriving then waits one more instruction. */
+    * Branches do not poll in their operand read (`HOLD_POLL`), so a taken branch that stays on
+    * its page acts on the poll of its opcode fetch, and an interrupt arriving later waits one more
+    * instruction. */
   class InterruptPlugin extends FiberPlugin {
     val logic = during setup new Area {
       val seq = host[SequencerService]
@@ -217,15 +219,21 @@ object Ricoh2A03 {
       val nmiLast = RegInit(False)
       val nmiPending = RegInit(False).simPublic()
       val nmiVector = RegInit(False)
+      // `polled` is what the last completed cycle polled; the fetch acts on `decided`, the poll of
+      // the cycle before it, which is the instruction's second-to-last cycle.
       val polled = RegInit(False).simPublic()
+      val decided = RegInit(False).simPublic()
       val select = seq.cycleDone && seq.ctrl(Interrupts.SELECT) === 1
 
       nmiLast := nmi
       when(select) { nmiVector := nmiPending }
       when(nmi && !nmiLast) { nmiPending := True } elsewhen (select) { nmiPending := False }
-      when(seq.cycleDone && seq.ctrl(Interrupts.HOLD_POLL) === 0) { polled := nmiPending || (irq && !rf.flag(IF)) }
+      when(seq.cycleDone) {
+        when(seq.ctrl(Interrupts.HOLD_POLL) === 0) { polled := nmiPending || (irq && !rf.flag(IF)) }
+        decided := polled
+      }
 
-      seq.addFetchOverride(polled, U(DISPATCH, 9 bits))
+      seq.addFetchOverride(decided, U(DISPATCH, 9 bits))
       // Vectors are picked by the high byte so BRK and dispatch share the table.
       seq.addSource(Interrupts.VECTOR_LO, nmiVector ? U(0xFFFA, 16 bits) | U(0xFFFE, 16 bits))
       seq.addSource(Interrupts.VECTOR_HI, nmiVector ? U(0xFFFB, 16 bits) | U(0xFFFF, 16 bits))
@@ -269,7 +277,7 @@ object Ricoh2A03 {
       val ax = rf.read(A) & rf.read(X)
       seq.addSource(Isa.P_BRK, p | 0x30)
       seq.addSource(Isa.P_IRQ, (p & 0xEF) | 0x20)
-      seq.addSource(Isa.D_AS_P, (d & 0xCF) | 0x20)
+      seq.addSource(Isa.RDATA_AS_P, (seq.rdata & 0xCF) | 0x20)
       seq.addSource(Isa.A_AND_X, ax)
       seq.addSource(Isa.ZERO, U(0, 1 bits))
       seq.addSource(Isa.ONE, U(1, 1 bits))
@@ -443,15 +451,19 @@ object Ricoh2A03 {
     implied("TXS", 0x9A, fetch.assign(SP -> X))
     for ((name, code, o, r) <- Seq(("INX", 0xE8, Alu.INC, X), ("INY", 0xC8, Alu.INC, Y), ("DEX", 0xCA, Alu.DEC, X), ("DEY", 0x88, Alu.DEC, Y)))
       implied(name, code, alu(o, r, NZ)(fetch, r))
-    for ((name, code, f, v) <- Seq(("CLC", 0x18, CF, Isa.ZERO), ("SEC", 0x38, CF, Isa.ONE), ("CLI", 0x58, IF, Isa.ZERO), ("SEI", 0x78, IF, Isa.ONE),
-                                   ("CLV", 0xB8, VF, Isa.ZERO), ("CLD", 0xD8, DF, Isa.ZERO), ("SED", 0xF8, DF, Isa.ONE)))
+    for ((name, code, f, v) <- Seq(("CLC", 0x18, CF, Isa.ZERO), ("SEC", 0x38, CF, Isa.ONE), ("CLV", 0xB8, VF, Isa.ZERO),
+                                   ("CLD", 0xD8, DF, Isa.ZERO), ("SED", 0xF8, DF, Isa.ONE)))
       implied(name, code, fetch.assign(f -> v))
+    // I changes in the cycle after the poll of CLI and SEI, so the next instruction still runs
+    // under the old I and its own poll (in its opcode fetch, for a 2-cycle one) sees the new one.
+    op("CLI", 0x58, Seq(dummy.assign(IF -> Isa.ZERO), fetch))
+    op("SEI", 0x78, Seq(dummy.assign(IF -> Isa.ONE), fetch))
 
     // ---- Stack -------------------------------------------------------------------------------
     op("PHA", 0x48, Seq(dummy, write(Agu.STACK, A).assign(SP -> Agu.S_DEC), fetch))
     op("PHP", 0x08, Seq(dummy, write(Agu.STACK, Isa.P_BRK).assign(SP -> Agu.S_DEC), fetch))
     op("PLA", 0x68, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(D -> RDATA), alu(Alu.PASS, D, NZ)(fetch, A)))
-    op("PLP", 0x28, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(D -> RDATA), fetch.assign(P -> Isa.D_AS_P)))
+    op("PLP", 0x28, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(P -> Isa.RDATA_AS_P), fetch))
 
     // ---- Control flow ------------------------------------------------------------------------
     // JMP and JSR fetch at the new address straight from AD, so PC only ever holds its successor.
@@ -462,13 +474,13 @@ object Ricoh2A03 {
       write(Agu.STACK, PCL).assign(SP -> Agu.S_DEC), read(PC).assign(ADH -> RDATA), toAD))
     op("RTS", 0x60, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(PCL -> RDATA, SP -> Agu.S_INC),
       read(Agu.STACK).assign(PCH -> RDATA), read(PC).assign(PC -> Agu.PC_INC), fetch))
-    op("RTI", 0x40, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(D -> RDATA, SP -> Agu.S_INC),
-      read(Agu.STACK).assign(PCL -> RDATA, SP -> Agu.S_INC), read(Agu.STACK).assign(PCH -> RDATA, P -> Isa.D_AS_P), fetch))
+    op("RTI", 0x40, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(P -> Isa.RDATA_AS_P, SP -> Agu.S_INC),
+      read(Agu.STACK).assign(PCL -> RDATA, SP -> Agu.S_INC), read(Agu.STACK).assign(PCH -> RDATA), fetch))
     // Branches: operand into D; when taken, a dummy read while PCL moves, and one more while PCH
     // is fixed if the target is on another page.
     for ((name, code, fail) <- Seq(("BPL", 0x10, NF.isSet), ("BMI", 0x30, NF.isClear), ("BVC", 0x50, VF.isSet), ("BVS", 0x70, VF.isClear),
                                    ("BCC", 0x90, CF.isSet), ("BCS", 0xB0, CF.isClear), ("BNE", 0xD0, ZF.isSet), ("BEQ", 0xF0, ZF.isClear)))
-      op(s"$name rel", code, Seq(imm(D).branchIf(fail, 3), read(PC).assign(PCL -> Agu.PC_REL, AD -> Agu.PC_REL).set(Interrupts.HOLD_POLL, 1).branchIf(Agu.BRANCH_SAME_PAGE, 3),
+      op(s"$name rel", code, Seq(imm(D).set(Interrupts.HOLD_POLL, 1).branchIf(fail, 3), read(PC).assign(PCL -> Agu.PC_REL, AD -> Agu.PC_REL).branchIf(Agu.BRANCH_SAME_PAGE, 3),
         read(PC).assign(PC -> AD), fetch))
 
     // ---- BRK, interrupts, reset, JAM -----------------------------------------------------------
