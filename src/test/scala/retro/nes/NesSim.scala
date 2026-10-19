@@ -12,7 +12,8 @@ import scala.collection.mutable
 
 /** The `Nes` RTL cosimulated with `NesReference`: every retired instruction must match in
   * cycles (DMA stalls included), ordered bus accesses (so every PPU, APU and controller register
-  * read) and CPU registers, and every frame must match pixel for pixel. */
+  * read) and CPU registers, every frame must match pixel for pixel, and the APU's mixed output
+  * must match in every cycle. */
 object NesRtl {
   private val compiled = mutable.Map[NesCartSpec, SimCompiled[RetroCore]]()
   def compile(spec: NesCartSpec) = compiled.getOrElseUpdate(spec,
@@ -31,10 +32,15 @@ object NesRtl {
     compile(spec).doSimUntilVoid { dut =>
       dut.host[NesCartridgePlugin].load(NesCartridge.load(file))
       val ref = new NesReference(NesCartridge.load(file))
+      val crcs = NesRoms.expectedCrcs(file)
       val io = dut.host[BusPlugin].logic.io
       io.stall #= false
       io.rdata #= 0
       dut.host[NesApuPlugin].buttons #= 0
+      val resetButton = dut.host[NesInterruptsPlugin].logic.get.button
+      resetButton #= false
+      var pressNow = false
+      val button = new NesRoms.ResetButton(() => pressNow = true)
       val ppu = dut.host[NesPpuPlugin]
       val pixelTap = ppu.logic.pixelTap
 
@@ -45,6 +51,8 @@ object NesRtl {
         override def onRetire(e: RetireEvent) = try {
           // The model's first step is the reset sequence, which the probe does not report.
           if (!resetDone) { ref.cpu.step(); resetDone = true }
+          // A reset the button caused: the model takes it at the same instruction boundary.
+          if (e.opcode == Ricoh2A03.RESET) ref.reset()
           val opcode = ref.cpu.opcode
           val (bus, cycles) = ref.cpu.step()
           val ctx = f"instruction #${e.index} at ${e.address}%04X ${e.opcode}%03X ${Ricoh2A03.names.getOrElse(e.opcode, "?")} (frame ${ref.ppu.frames}, line ${ref.ppu.line}, dot ${ref.ppu.dot})"
@@ -69,11 +77,25 @@ object NesRtl {
         val now = ref.ram(0xF8) << 16 | NesRoms.screenText(ref).hashCode & 0xFFFF
         stable = if (now == last) stable + 1 else 0
         last = now
-        verdict = NesRoms.verdict(ref, stable)
+        verdict = NesRoms.verdict(ref, stable, crcs)
+        button.frame(ref)
       }
+      // Audio: one sample per cycle from each side, compared in order.
+      val audio = dut.host[NesApuPlugin].audio
+      val rtlAudio, refAudio = mutable.Queue[Int]()
+      ref.onSample = refAudio += _
+      var samples = 0L
       var cycles = 0L
       dut.clockDomain.onSamplings {
         cycles += 1
+        resetButton #= pressNow
+        pressNow = false
+        rtlAudio += audio.toInt
+        while (rtlAudio.nonEmpty && refAudio.nonEmpty) {
+          val (a, b) = (rtlAudio.dequeue(), refAudio.dequeue())
+          if (a != b && failure.isEmpty) failure = Some(new AssertionError(s"audio sample $samples (frame ${ref.ppu.frames}): rtl $a, ref $b"))
+          samples += 1
+        }
         val tap = pixelTap.toBigInt
         if (tap != 0) for (i <- 0 until 3) {
           val p = (tap >> (23 * i)).toInt & 0x7FFFFF
@@ -98,6 +120,7 @@ object NesRtl {
       dut.clockDomain.forkStimulus(10)
       dut.clockDomain.waitSamplingWhere(failure.nonEmpty || verdict != NesRoms.Running || ref.ppu.frames >= budget)
       for (t <- failure) throw t
+      assert(samples > cycles - 10, s"only $samples audio samples compared in $cycles cycles")
       result = Result(verdict, compared, checked, cycles, ref)
       simSuccess()
     }

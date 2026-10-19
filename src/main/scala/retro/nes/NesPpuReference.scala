@@ -39,17 +39,14 @@ class NesPpuReference(cart: NesCartridge) {
   // ---- PPU address space ---------------------------------------------------------------------
   def read(address: Int): Int = {
     val a = address & 0x3FFF
-    if (a < 0x2000) cart.chr(chrBank(a)) else if (a < 0x3F00) ciram(cart.ciram(a)) else palette(paletteIndex(a))
+    if (a < 0x2000) cart.chr(cart.chrIndex(a)) else if (a < 0x3F00) ciram(cart.ciram(a)) else palette(paletteIndex(a))
   }
   def write(address: Int, value: Int): Unit = {
     val a = address & 0x3FFF
-    if (a < 0x2000) { if (cart.chrRam) cart.chr(a) = value }
+    if (a < 0x2000) { if (cart.chrRam) cart.chr(cart.chrIndex(a)) = value }
     else if (a < 0x3F00) ciram(cart.ciram(a)) = value
     else palette(paletteIndex(a)) = value & 0x3F
   }
-  /** CHR address after the mapper's banking (CNROM selects 8 KB banks). */
-  var chrBankSelect = 0
-  private def chrBank(a: Int) = ((chrBankSelect << 13) | a) & cart.chrMask
   private def paletteIndex(a: Int) = { val i = a & 0x1F; if ((i & 0x13) == 0x10) i & 0x0F else i }
 
   // ---- CPU registers -------------------------------------------------------------------------

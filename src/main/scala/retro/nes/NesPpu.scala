@@ -127,7 +127,7 @@ class NesPpuPlugin extends FiberPlugin {
     /** One dot. `bypass` makes this dot's memory reads see the access's writes. */
     def dot(s: NesPpuState, pal: Vec[UInt], bypass: Boolean): (NesPpuState, Flow[NesPixel]) = {
       def ciramRead(a: UInt): UInt = {
-        val i = cart.ciramIndex(a)
+        val i = cart.ciramIndex(a, afterAccess = bypass)
         val r = ciram.readAsync(i)
         if (bypass) (ciramWrite.enable && ciramWrite.address === i) ? ciramWrite.data | r else r
       }

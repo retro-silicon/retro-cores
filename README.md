@@ -73,28 +73,51 @@ instruction always runs (blargg's cpu_interrupts_v2 pins all of this down).
 ### NES system model
 
 ```sh
-scripts/fetch-nes-test-roms.sh                     # also blargg's CPU and PPU test ROMs into ./roms/nes-test-roms
-sbt "Test/runMain retro.nes.NesRefRom"             # every mapper 0/3 test ROM on the model; frames saved to out/nes/
+scripts/fetch-nes-test-roms.sh                     # also blargg's CPU, PPU and APU test ROMs into ./roms/nes-test-roms
+sbt "Test/runMain retro.nes.NesRefRom"             # every mapper 0/1/3 test ROM on the model; frames saved to out/nes/
 sbt "Test/runMain retro.nes.NesRefRom sprite_hit"  # only ROMs whose path contains an argument
+WAV=1 sbt "Test/runMain retro.nes.NesRefRom apu_mixer"  # also saves the sound to out/nes/*.wav
+sbt "Test/runMain retro.nes.NesMixerCheck"         # apu_mixer's residual tones against hardware recordings
 ```
 
 `retro.nes.NesReference` is a whole NES around `R2A03Reference`: 2 KB of RAM, a dot-level 2C02
 model (`NesPpuReference`: background pipeline, sprite evaluation with the overflow bug and its
 timing, sprite 0 hit, VBlank/NMI with the read-race suppression, the odd-frame dot, open-bus
-decay), OAM DMA with its halt and alignment cycles, the APU frame counter's IRQ and length
-counters, controller 1, and NROM/CNROM cartridges. Each CPU cycle runs two PPU dots, the APU,
-the CPU access, the third dot, then samples NMI and IRQ. It passes 73 of the 76 blargg ROMs in
-`fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing, sprite_hit, sprite_overflow,
-cpu_interrupts_v2, instr_test, instr_timing, oam_stress, ppu_open_bus and others). The three
-left are the two DMC DMA tests (no DMC yet) and LXA in instr_test 03-immediate, where blargg's
-console and SingleStepTests disagree on the unstable constant (the core follows the latter).
+decay), the whole APU (`NesApuChannels.scala`: frame counter and IRQ, length counters, two
+pulses with sweep, triangle, noise, the DMC, and the non-linear mixer), the 2A03's DMA unit,
+controller 1, NROM/MMC1/CNROM cartridges, and the reset button (`reset()`: the CPU's reset
+sequence at the next instruction, 4015 cleared, 4017 rewritten). Each CPU cycle runs two PPU
+dots, the APU, the CPU access, the third dot, then samples NMI and IRQ. The runners press reset
+when a test asks for it (status 81 at 6000).
+
+DMA follows the chip's DMA unit as Mesen models it: OAM DMA and DMC sample fetches halt the CPU
+on its next read, repeat the halted read in the halt, dummy and alignment cycles, read on odd
+cycles and write OAM on even ones, and a DMC fetch steals a read cycle from a running OAM copy.
+Length counter halt flags and loads take effect after the next cycle's APU clock (blargg's
+len_halt_timing and len_reload_timing). The mixer uses the nesdev wiki's exact formulas, the
+triangle, noise and DMC through one table indexed by their weighted sum: the common
+`3 t + 2 n + d` table weighs the triangle 9% too heavily, which apu_mixer/triangle hears.
+`NesMixerCheck` runs the four apu_mixer tests, which cancel a tone with the DMC, through the
+console's output filters, and checks that the residual is no louder than in the hardware
+recordings in the nes-test-roms collection: square 0.8% (hardware 1.2%), triangle 1.5% (1.9%),
+noise 11.6% (10.8%), DMC 0.8% (2.8%).
+
+The model passes 116 of the 119 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
+sprite_hit, sprite_overflow, cpu_interrupts_v2, instr_test, instr_timing, oam_stress,
+ppu_open_bus, sprdma_and_dmc_dma, apu_test, blargg_apu_2005.07.30, apu_mixer, apu_reset,
+cpu_reset, dmc_dma_during_read4 and others; print-only tests are judged by the CRCs their
+source lists).
+Left: LXA in instr_test 03-immediate and the all_instrs ROM that stops there, where blargg's
+console and SingleStepTests disagree on the unstable constant (the core follows the latter);
+and dmc_dma_during_read4/double_2007_read, which depends on how the PPU takes two 2007 reads
+in consecutive cycles.
 It is the reference the RTL NES system is cosimulated against.
 
 ### NES system (RTL)
 
 ```sh
 sbt "testOnly retro.nes.NesSim"                    # six short ROMs, RTL cosimulated with NesReference
-sbt "Test/runMain retro.nes.NesRomReport"          # every mapper 0/3 test ROM, cosimulated (about 3 frames/s)
+sbt "Test/runMain retro.nes.NesRomReport"          # every mapper 0/1/3 test ROM, cosimulated (about 3 frames/s)
 sbt "Test/runMain retro.nes.NesRomReport sprite_hit"
 ```
 
@@ -104,17 +127,16 @@ sbt "Test/runMain retro.nes.NesRomReport sprite_hit"
 |---|---|---|
 | `RamPlugin` | 0000-1FFF | 2 KB of RAM, mirrored |
 | `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: three dots per CPU cycle with the access between the second and third, CIRAM, OAM, palette, `ppu_pixels` port |
-| `NesApuPlugin` | 4000-4017 | frame counter and IRQ, length counters, 4015, controller 1 (`joypad1` pins) |
-| `NesOamDmaPlugin` | 4014 | OAM DMA as a second bus master above the CPU: halts it on its next read, halt and alignment cycles, 256 get/put pairs |
-| `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, CNROM bank, mirroring; images loaded by the sim |
+| `NesApuPlugin` | 4000-4017 | frame counter and IRQ, length counters, pulses, triangle, noise, DMC, mixer (`audio` port, one sample per cycle), 4015, controller 1 (`joypad1` pins), and the DMA unit (OAM DMA and DMC fetches) as a second bus master above the CPU |
+| `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, mirroring, CNROM's bank or MMC1's registers; images loaded by the sim |
 | `NesOpenBusPlugin` | everything else | the data bus latch, for unmapped reads and undriven bits |
-| `NesInterruptsPlugin` | | the CPU's NMI (from the PPU) and IRQ (from the APU) |
+| `NesInterruptsPlugin` | | the CPU's NMI (from the PPU) and IRQ (from the APU), and the reset button (`reset_button` pin, taken at the next opcode fetch) |
 
 `NesRtl.cosim` runs a test ROM on the RTL and the model in lockstep: every instruction must
 match in cycles (DMA stalls included), bus accesses (so every PPU and APU register read) and
-registers, and every frame pixel for pixel, until the ROM reports its result.
-All 74 ROMs (the DMC DMA pair left out) run to their result with no difference from the model,
-so the RTL passes the same 73.
+registers, every frame pixel for pixel, and the APU's mixed output in every cycle, until the
+ROM reports its result. All 119 ROMs run to their result with no difference from the model, so
+the RTL passes the same 116.
 
 ### Hardware test ROMs
 
@@ -346,7 +368,7 @@ src/main/scala/retro/sim/    Probe and trace backends
 src/main/scala/retro/sm83/   SM83: registers, ALU, shifter, interrupt and ISA plugins, reference model
 src/main/scala/retro/gb/     Game Boy SoC plugins, the GameBoy composition, system reference model
 src/main/scala/retro/r2a03/  Ricoh 2A03 CPU plugins and reference model
-src/main/scala/retro/nes/    NES plugins (PPU, APU, OAM DMA, cartridge), the Nes composition, system model
+src/main/scala/retro/nes/    NES plugins (PPU, APU and DMA, cartridge), the Nes composition, system model
 src/main/scala/retro/demo/   toy pipeline exercising the CtrlLink layer
 src/test/scala/retro/toy/    toy CPU testing sequencer, pairs, flags, branches, stalls, DMA
 src/test/scala/retro/sm83/   SM83 cosimulation (hand-written and random code)
@@ -366,9 +388,10 @@ Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mo
 interrupt, timer, serial and OAM DMA acceptance tests, all of Mooneye's PPU tests, Blargg's OAM
 corruption bug tests, and dmg-acid2 pixel for pixel (see *Hardware test ROMs*).
 
-NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing 73
-of 76 blargg CPU/PPU test ROMs, and the RTL NES (PPU, OAM DMA, APU frame IRQ and length
-counters, NROM/CNROM) cosimulated against it on those ROMs.
+NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
+116 of 119 blargg CPU/PPU/APU test ROMs, with sound checked against hardware recordings, and
+the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM) cosimulated against it on those
+ROMs, audio included.
 
-Next: the APU, MBC2, DMA bus conflicts and STOP on the Game Boy; on the NES, the DMC and its
-DMA, sound, and MMC1.
+Next: the APU, MBC2, DMA bus conflicts and STOP on the Game Boy; on the NES, MMC3 and
+simulation speed.

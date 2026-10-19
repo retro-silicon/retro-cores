@@ -8,7 +8,7 @@ import javax.imageio.ImageIO
 object NesRoms {
   val dir = new File("roms/nes-test-roms")
 
-  /** Every mapper 0/3 test ROM under `roms/nes-test-roms`, by path relative to it. */
+  /** Every mapper 0/1/3 test ROM under `roms/nes-test-roms`, by path relative to it. */
   def all: Seq[(String, File)] = {
     def walk(f: File): Seq[File] = if (f.isDirectory) f.listFiles().sortBy(_.getName).toSeq.flatMap(walk) else Seq(f)
     if (!dir.isDirectory) Nil
@@ -16,7 +16,7 @@ object NesRoms {
       .filter { case (_, f) =>
         val h = java.nio.file.Files.readAllBytes(f.toPath).take(8).map(_ & 0xFF)
         val mapper = (h(6) >> 4) | (h(7) & 0xF0)
-        mapper == 0 || mapper == 3
+        mapper == 0 || mapper == 1 || mapper == 3
       }
   }
 
@@ -29,9 +29,11 @@ object NesRoms {
     * from 6004; older ones leave the result in zero page F8 (1 = passed) and print to the
     * screen. `stableFrames` is how long F8 and the screen have been unchanged (some tests idle for 80
     * frames mid-run). */
-  def verdict(nes: NesReference, stableFrames: Int): Verdict = {
+  def verdict(nes: NesReference, stableFrames: Int, crcs: Set[String] = Set()): Verdict = {
     val r = nes.prgRam
-    if (r(1) == 0xDE && r(2) == 0xB0 && r(3) == 0x61) {
+    lazy val lastLine = screenText(nes).linesIterator.toSeq.lastOption.getOrElse("")
+    if (crcs.nonEmpty && stableFrames > 120 && lastLine.matches("[0-9A-F]{8}")) Done(crcs(lastLine), if (crcs(lastLine)) 0 else 1, screenText(nes))
+    else if (r(1) == 0xDE && r(2) == 0xB0 && r(3) == 0x61) {
       if (r(0) >= 0x80) Running
       else Done(r(0) == 0, r(0), Iterator.from(4).map(r).takeWhile(_ != 0).map(_.toChar).mkString.trim)
     } else if (stableFrames > 120) {
@@ -45,6 +47,29 @@ object NesRoms {
       else if (text.toLowerCase.contains("failed")) Done(false, 1, text)
       else Running
     } else Running
+  }
+
+  /** A test asking for the reset button (status 81): blargg's tests want it pressed some time
+    * after the request, once they sit in their wait loop. */
+  def wantsReset(nes: NesReference) = nes.prgRam(0) == 0x81 && nes.prgRam(1) == 0xDE && nes.prgRam(2) == 0xB0
+  /** Presses reset 10 frames into each request; call once per frame. */
+  class ResetButton(press: () => Unit) {
+    private var waited = 0
+    def frame(nes: NesReference): Unit = {
+      waited = if (wantsReset(nes)) waited + 1 else 0
+      if (waited == 10) press()
+    }
+  }
+
+  /** Tests that only print their results (dmc_dma_during_read4) end with a CRC of them; the
+    * header of their source lists the CRCs of the outputs real consoles give. */
+  def expectedCrcs(file: File): Set[String] = {
+    val source = new File(file.getParentFile, s"source/${file.getName.stripSuffix(".nes")}.s")
+    if (!source.isFile) Set()
+    else {
+      val s = scala.io.Source.fromFile(source)
+      try s.getLines().takeWhile(_.startsWith(";")).flatMap("\\b[0-9A-F]{8}\\b".r.findAllIn(_)).toSet finally s.close()
+    }
   }
 
   /** The text on nametable 0, assuming the font maps tiles to ASCII as blargg's tests do. */
@@ -67,6 +92,80 @@ object NesRoms {
   }
 }
 
+/** The APU's output resampled to 44.1 kHz by averaging (a crude low-pass), for WAV files and
+  * loudness checks. */
+class NesAudio {
+  private val out = scala.collection.mutable.ArrayBuffer[Int]()
+  private var sum, n = 0L
+  private var phase = 0.0
+  def add(sample: Int): Unit = {
+    sum += sample; n += 1; phase += 44100.0 / 1789773
+    if (phase >= 1) { phase -= 1; out += (sum / n).toInt; sum = 0; n = 0 }
+  }
+  def save(file: File): Unit = {
+    val mean = if (out.isEmpty) 0L else out.map(_.toLong).sum / out.size
+    val data = out.map(v => math.max(-32768, math.min(32767, (v - mean).toInt)))
+    val b = java.nio.ByteBuffer.allocate(44 + 2 * data.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    b.put("RIFF".getBytes).putInt(36 + 2 * data.size).put("WAVEfmt ".getBytes).putInt(16).putShort(1).putShort(1)
+      .putInt(44100).putInt(88200).putShort(2).putShort(16).put("data".getBytes).putInt(2 * data.size)
+    data.foreach(v => b.putShort(v.toShort))
+    file.getParentFile.mkdirs()
+    java.nio.file.Files.write(file.toPath, b.array())
+  }
+  /** RMS around the mean, per 4410 samples (a tenth of a second). */
+  def loudness: Seq[Double] = rms(out.map(_.toDouble).toSeq)
+  private def rms(x: Seq[Double]) = x.grouped(4410).filter(_.size == 4410).map { g =>
+    val m = g.sum / g.size
+    math.sqrt(g.map(v => (v - m) * (v - m)).sum / g.size)
+  }.toSeq
+  /** The console's output filters (high-pass at 90 and 440 Hz, low-pass at 14 kHz), first order. */
+  def filtered: Seq[Double] = {
+    val fs = 44100.0
+    def highPass(x: Seq[Double], fc: Double) = {
+      val a = 1 / (1 + 2 * math.Pi * fc / fs)
+      var (last, y) = (0.0, 0.0)
+      x.map { v => y = a * (y + v - last); last = v; y }
+    }
+    def lowPass(x: Seq[Double], fc: Double) = {
+      val w = 2 * math.Pi * fc / fs
+      val a = w / (1 + w)
+      var y = 0.0
+      x.map { v => y += a * (v - y); y }
+    }
+    lowPass(highPass(highPass(out.map(_.toDouble).toSeq, 90), 440), 14000)
+  }
+  /** apu_mixer tests beep, play a tone cancelled by the DMC, then beep again: the mean filtered
+    * loudness between the beeps, in percent of the beeps'. */
+  def residual: Double = {
+    val r = rms(filtered)
+    val beep = r.max
+    val loud = r.indices.filter(i => r(i) > 0.3 * beep)
+    val gap = loud.indices.init.find(i => loud(i + 1) - loud(i) > 5).get
+    val between = r.slice(loud(gap) + 2, loud(gap + 1) - 1)
+    100 * between.sum / between.size / beep
+  }
+}
+
+/** blargg's apu_mixer tests on `NesReference`, judged by ear made numeric: the residual tone
+  * between the beeps must be no louder than on a real console, from the recordings in the
+  * nes-test-roms collection (apu_mixer_recordings, analyzed the same way, plus 20%). */
+object NesMixerCheck extends App {
+  val hardware = Seq("square" -> 1.2, "triangle" -> 1.9, "noise" -> 10.8, "dmc" -> 2.8)
+  var ok = true
+  for ((name, limit) <- hardware) {
+    val file = new File(NesRoms.dir, s"apu_mixer/$name.nes")
+    val nes = new NesReference(NesCartridge.load(file))
+    val audio = new NesAudio
+    nes.onSample = audio.add
+    while ((nes.prgRam(0) >= 0x80 || nes.prgRam(1) != 0xDE) && nes.ppu.frames < 3000) nes.runFrames(1)
+    val r = audio.residual
+    val pass = r <= limit * 1.2
+    ok &&= pass
+    println(f"${if (pass) "PASS" else "FAIL"}%-5s apu_mixer/$name: residual $r%.1f%% of the beeps (hardware $limit%.1f%%)")
+  }
+  if (!ok) sys.exit(1)
+}
+
 /** Runs NES test ROMs on `NesReference` alone, in seconds:
   * {{{ sbt "Test/runMain retro.nes.NesRefRom ppu_vbl_nmi/rom_singles sprite_hit" }}}
   * prints PASS / FAIL / timeout for each ROM whose path contains an argument, with the test's
@@ -77,9 +176,13 @@ object NesRefRom extends App {
   var passed, total = 0
   for ((name, file) <- NesRoms.all if args.isEmpty || args.exists(name.contains)) {
     val nes = new NesReference(NesCartridge.load(file), dots)
+    val crcs = NesRoms.expectedCrcs(file)
+    val audio = if (sys.env.contains("WAV")) Some(new NesAudio) else None
+    for (a <- audio) nes.onSample = a.add
     var verdict: NesRoms.Verdict = NesRoms.Running
     var stable = 0
     var lastF8 = -1
+    val button = new NesRoms.ResetButton(() => nes.reset())
     var frames = 0
     while (verdict == NesRoms.Running && frames < budget) {
       nes.runFrames(1)
@@ -87,9 +190,8 @@ object NesRefRom extends App {
       val f8 = nes.ram(0xF8) << 16 | NesRoms.screenText(nes).hashCode & 0xFFFF
       stable = if (f8 == lastF8) stable + 1 else 0
       lastF8 = f8
-      // A reset request (81): press reset after a few frames.
-      if (nes.prgRam(0) == 0x81 && nes.prgRam(1) == 0xDE && stable > 10) { nes.prgRam(0) = 0x80; nes.cpu.reset() }
-      verdict = NesRoms.verdict(nes, stable)
+      button.frame(nes)
+      verdict = NesRoms.verdict(nes, stable, crcs)
     }
     total += 1
     val text = verdict match {
@@ -104,6 +206,10 @@ object NesRefRom extends App {
       case _ => println(NesRoms.screenText(nes).linesIterator.map("    " + _).mkString("\n"))
     }
     NesRoms.save(nes.ppu.frame, new File(s"out/nes/${name.replace('/', '_').stripSuffix(".nes")}.png"))
+    for (a <- audio) {
+      a.save(new File(s"out/nes/${name.replace('/', '_').stripSuffix(".nes")}.wav"))
+      println("    loudness (AC RMS per 1/10 s): " + a.loudness.map(l => f"$l%.0f").mkString(" "))
+    }
   }
   println(s"$passed/$total pass")
 }
