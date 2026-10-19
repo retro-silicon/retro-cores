@@ -53,6 +53,10 @@ object Gb {
     /** Where the PPU is: M-cycle 98 of line 153. */
     val ppuX = 98
     val ppuLy = 153
+    val bgp = 0xFC
+    val obp = 0xFF
+    /** IF: the VBlank request is pending. */
+    val iflag = 0x01
 
     /** The VRAM the boot ROM leaves: the cartridge header's logo (0x104-0x133) as tiles 1-24,
       * each bit doubled, the (R) tile as tile 25, and the map rows at 0x9904 and 0x9924 that
@@ -81,7 +85,7 @@ object Gb {
   * `Sm83.InterruptPlugin` finds this plugin as its `InterruptController`. Requests raised by
   * this M-cycle's tick are visible in the same cycle, to a read of IF and to the CPU's interrupt
   * check; a write to IF then lands over them, and the CPU's acknowledge clears last. */
-class InterruptControllerPlugin extends FiberPlugin with IrqService with Sm83.InterruptController {
+class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with IrqService with Sm83.InterruptController {
   val irqLock = Retainer()
   private val lines = ArrayBuffer[(IrqLine, Bool)]()
   private val lateLines = ArrayBuffer[(IrqLine, Boolean, Bool)]()
@@ -115,7 +119,7 @@ class InterruptControllerPlugin extends FiberPlugin with IrqService with Sm83.In
     val ieSlave = bus.newSlave(SingleMapping(Gb.IE))
     retainer.release()
 
-    val flags = Reg(Bits(5 bits)).init(0).simPublic()
+    val flags = Reg(Bits(5 bits)).init(resetFlags).simPublic()
     val enable = Reg(Bits(8 bits)).init(0).simPublic()
 
     irqLock.await()
@@ -314,10 +318,10 @@ object GameBoy {
     new RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F),
     new OpenBusPlugin(SizeMapping(0xFEA0, 0x60), value = 0x00),
     new OpenBusPlugin(SizeMapping(0xFF00, 0x100)),
-    new InterruptControllerPlugin,
+    new InterruptControllerPlugin(if (postBoot) Gb.PostBoot.iflag else 0),
     new TimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
     new SerialPlugin,
-    if (postBoot) new PpuPlugin(Gb.PostBoot.lcdc, Gb.PostBoot.ppuX, Gb.PostBoot.ppuLy) else new PpuPlugin,
+    new PpuPlugin(postBoot),
     new JoypadPlugin
   ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil) ++ cartridge.map(new CartridgePlugin(_))
 

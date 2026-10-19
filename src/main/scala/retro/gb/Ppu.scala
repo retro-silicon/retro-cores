@@ -70,7 +70,7 @@ case class PpuDot() extends Bundle {
   * does, so three more copies look ahead, without VRAM. A CPU write to a PPU register lands
   * between the dots (`PpuReference.writeDot`). The timing, and what it leaves out, is described
   * at `PpuReference`, the model the system cosim checks this against dot for dot. */
-class PpuPlugin(resetLcdc: Int = 0, resetX: Int = 0, resetLy: Int = 0)
+class PpuPlugin(postBoot: Boolean = false)
     extends GbPeripheral(SizeMapping(Gb.LCDC, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
   var lcd: LcdPixels = null
   /** LCDC, for a sim to tell whether the LCD is on. */
@@ -88,12 +88,15 @@ class PpuPlugin(resetLcdc: Int = 0, resetX: Int = 0, resetLy: Int = 0)
     val vram = host.list[RamPlugin].find(_.ramName == "vram").get
     val dma = host[OamDmaPlugin]
 
-    val lcdc = Reg(UInt(8 bits)).init(resetLcdc).simPublic()
+    def boot(after: Int, before: Int = 0) = if (postBoot) after else before
+    val lcdc = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.lcdc)).simPublic()
     lcdcReg = lcdc
     val statSelect = Reg(UInt(4 bits)) init 0
-    val scy, scx, lyc, bgp, obp0, obp1, wy, wx = Reg(UInt(8 bits)) init 0
-    val x = Reg(UInt(7 bits)).init(resetX).simPublic()
-    val ly = Reg(UInt(8 bits)).init(resetLy).simPublic()
+    val scy, scx, lyc, wy, wx = Reg(UInt(8 bits)) init 0
+    val bgp = Reg(UInt(8 bits)) init boot(Gb.PostBoot.bgp)
+    val obp0, obp1 = Reg(UInt(8 bits)) init boot(Gb.PostBoot.obp)
+    val x = Reg(UInt(7 bits)).init(boot(Gb.PostBoot.ppuX)).simPublic()
+    val ly = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.ppuLy)).simPublic()
     val statLine = RegInit(False)
     val coincidence = RegInit(False)
     val firstLine = RegInit(False)
@@ -497,7 +500,8 @@ class PpuPlugin(resetLcdc: Int = 0, resetX: Int = 0, resetLy: Int = 0)
     irqMode := 0
     when(on) {
       when(lyTicked >= Gb.visibleLines) {
-        mode := 1
+        // The last M-cycle of the frame reads as mode 0.
+        mode := (lyTicked === Gb.frameLines - 1 && xTicked === Gb.lineCycles - 1) ? U(0, 2 bits) | U(1, 2 bits)
         irqMode := 1
       } elsewhen (xTicked < Gb.oamEnd) {
         mode := scanMode
@@ -512,9 +516,9 @@ class PpuPlugin(resetLcdc: Int = 0, resetX: Int = 0, resetLy: Int = 0)
     // LY reads 0 from line 153's second M-cycle.
     val lyNow = (lyTicked === Gb.frameLines - 1 && xTicked >= 1) ? U(0, 8 bits) | lyTicked
     // LY = LYC is only compared while the LCD is on, and stays on the interrupt line when off.
-    // It drops in the line's last M-cycle, where LY already reads the next line, and in line
-    // 153's second, where LY changes to 0.
-    val coincidenceTicked = on ? (lyNow === lyc && xTicked =/= Gb.lineCycles - 1 &&
+    // It drops in the line's last M-cycle, where LY already reads the next line (except at the
+    // end of the frame, where LY stays 0), and in line 153's second, where LY changes to 0.
+    val coincidenceTicked = on ? (lyNow === lyc && (xTicked =/= Gb.lineCycles - 1 || lyTicked === Gb.frameLines - 1) &&
       !(lyTicked === Gb.frameLines - 1 && xTicked === 1)) | coincidence
     // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
     val vblankMode2 = lyTicked === Gb.visibleLines && xTicked === 0

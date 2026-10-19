@@ -97,6 +97,8 @@ object Interrupts {
   /** Set on the M-cycle that picks `VECTOR`: clears that request's IF bit. */
   val ACK = CtrlKey("INT_ACK", 1)
   val PENDING = Cond("INT.pending")
+  /** Always true: an unused opcode's M-cycle branches to itself. */
+  val LOCKED = Cond("INT.locked")
   val NOT_PENDING = Cond("!INT.pending")
   /** An interrupt is pending as HALT starts: HALT exits without incrementing PC, so with IME off
     * the next byte runs twice (the HALT bug) and with IME on the dispatch returns to the HALT. */
@@ -124,14 +126,16 @@ object Isa {
 /** Sharp SM83 (Game Boy CPU), described as data on top of `retro.core`.
   *
   * The full documented opcode set is implemented, CB-prefixed ops included, with interrupts,
-  * EI/DI/RETI, HALT and the HALT bug. STOP and the eleven unused opcodes behave as a 1 M-cycle
-  * NOP (the real chip enters low-power mode or locks up). Opcode space is 10 bits wide:
+  * EI/DI/RETI, HALT and the HALT bug. STOP behaves as a 1 M-cycle NOP (the real chip enters
+  * low-power mode); the eleven unused opcodes lock the CPU up, as on the real chip. Opcode space is 10 bits wide:
   * 0x000-0x0FF base opcodes, 0x100-0x1FF CB xx, 0x200 the interrupt dispatch sequence, 0x201 a
   * halted M-cycle. */
 object Sm83 {
   val CB_PAGE = 0x100
   val DISPATCH = 0x200
   val HALTED = 0x201
+  /** Opcodes the SM83 does not define: they lock it up. */
+  val unused = Set(0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD)
 
   private def operand(rf: RegFileService, sel: UInt) = Vec(r8.map(rf.read))(sel)
 
@@ -302,6 +306,7 @@ object Sm83 {
 
       seq.addSource(Interrupts.VECTOR, pending ? (U(0x40, 16 bits) + (index @@ U"000").resized) | U(0, 16 bits))
       seq.addCond(Interrupts.PENDING, pending)
+      seq.addCond(Interrupts.LOCKED, True)
       seq.addCond(Interrupts.NOT_PENDING, !pending)
       seq.addCond(Interrupts.HALT_BUG, pending)
       retainer.release()
@@ -460,6 +465,7 @@ object Sm83 {
     val haltWait = MCycleSpec.fetch(PC).assign(PC -> Interrupts.HALT_PC).set(Interrupts.HALT_WAIT, 1)
     op("HALT", 0x76, idle.branchIf(Interrupts.HALT_BUG, 2), haltWait, MCycleSpec.fetch(PC))
     op("HALTED", HALTED, haltWait)
+    for (o <- unused) op(f"LOCKUP $o%02X", o, idle.branchIf(Interrupts.LOCKED, 0), fetch) // the fetch is never reached
     op("INT", DISPATCH, idle.assign(PC -> Idu.dec(PC)) +: pushPC(_.assign(PC -> Interrupts.VECTOR).set(Interrupts.ACK, 1)) :+ fetch: _*)
 
     // ---- CB page -----------------------------------------------------------------------------

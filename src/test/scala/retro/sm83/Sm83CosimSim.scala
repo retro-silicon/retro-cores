@@ -14,7 +14,7 @@ import scala.util.Random
   * accesses and architectural registers. */
 class Sm83CosimSim extends AnyFunSuite {
   lazy val compiled = SimConfig.withVerilator.compile(Sm83Core())
-  val implemented = Sm83.names.keys.filter(_ < 0x100).toIndexedSeq.sorted
+  val implemented = Sm83.names.keys.filter(o => o < 0x100 && !Sm83.unused(o)).toIndexedSeq.sorted
 
   /** Checks each RTL retire against the reference as it happens. */
   class CosimBackend(ref: Sm83Reference) extends TraceBackend {

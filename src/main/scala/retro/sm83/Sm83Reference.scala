@@ -237,7 +237,11 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
           case 2 => setR(r, v & ~(1 << y))
           case 3 => setR(r, v | (1 << y))
         }
-      case _ => // unused opcodes run as a NOP, as in the RTL
+      case o if Sm83.unused.contains(o) =>
+        // The CPU locks up: an idle M-cycle forever, no interrupts.
+        idle()
+        return (log.toList, (cycle - start).toInt)
+      case _ =>
     }
     fetch(imeOp, increment, halt)
     (log.toList, (cycle - start).toInt)

@@ -33,7 +33,9 @@ package retro.gb
   * After the boot ROM the PPU is 98 M-cycles into line 153. */
 class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   var lcdc = if (postBoot) Gb.PostBoot.lcdc else 0
-  var statSelect, scy, scx, lyc, bgp, obp0, obp1, wy, wx = 0
+  var statSelect, scy, scx, lyc, wy, wx = 0
+  var bgp = if (postBoot) Gb.PostBoot.bgp else 0
+  var obp0, obp1 = if (postBoot) Gb.PostBoot.obp else 0
   /** M-cycle within the line (0-113) and the line. */
   var x = if (postBoot) Gb.PostBoot.ppuX else 0
   var ly = if (postBoot) Gb.PostBoot.ppuLy else 0
@@ -157,7 +159,11 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     irqMode = 0
     // The STAT interrupt's mode before this M-cycle's dots, for a halted CPU.
     var irqModeBefore = -1
-    if (on && ly >= Gb.visibleLines) { mode = 1; irqMode = 1 }
+    if (on && ly >= Gb.visibleLines) {
+      // The last M-cycle of the frame reads as mode 0.
+      mode = if (ly == Gb.frameLines - 1 && x == Gb.lineCycles - 1) 0 else 1
+      irqMode = 1
+    }
     else if (on) {
       if (ly == wy && (lcdc & 0x20) != 0) wyHit = true
       val scanMode = if (firstLine) 0 else 2
@@ -194,9 +200,10 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
         transfer = transferAfter(4)
       }
     }
-    // The LY = LYC flag drops in the line's last M-cycle, where LY already reads the next line,
-    // and in line 153's second M-cycle, where LY changes to 0.
-    if (on) coincidence = lyNow == lyc && x != Gb.lineCycles - 1 && !(ly == Gb.frameLines - 1 && x == 1)
+    // The LY = LYC flag drops in the line's last M-cycle, where LY already reads the next line
+    // (except at the end of the frame, where LY stays 0), and in line 153's second M-cycle,
+    // where LY changes to 0.
+    if (on) coincidence = lyNow == lyc && (x != Gb.lineCycles - 1 || ly == Gb.frameLines - 1) && !(ly == Gb.frameLines - 1 && x == 1)
     // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
     val vblankMode2 = ly == Gb.visibleLines && x == 0
     def statFor(m: Int) = ((statSelect & 8) != 0 && coincidence) || on && (((statSelect & 4) != 0 && (m == 2 || vblankMode2)) ||

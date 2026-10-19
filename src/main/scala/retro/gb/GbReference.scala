@@ -29,7 +29,8 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   val wram = Array.fill(0x2000)(0)
   val oam = Array.fill(0x100)(0)
   val hram = Array.fill(0x80)(0)
-  var ie, iflag = 0
+  var ie = 0
+  var iflag = if (postBoot) Gb.PostBoot.iflag else 0
   // Timer
   var counter = if (postBoot) Gb.PostBoot.counter else 0
   var tima, tma, tac = 0

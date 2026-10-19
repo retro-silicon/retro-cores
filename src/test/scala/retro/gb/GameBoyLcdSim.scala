@@ -14,7 +14,7 @@ object GbLcd {
   def run(image: Array[Byte], frames: Int): Array[Int] = {
     val spec = CartridgeSpec.fromHeader(image)
     val frame = Array.fill(160 * 144)(0)
-    val compiled = SimConfig.withVerilator.addSimulatorFlag("-O3")
+    val compiled = SimConfig.withVerilator.allOptimisation.addSimulatorFlag("-O3")
       .workspaceName(f"GameBoyLcd_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
       .compile(GameBoy(withTrace = false, cartridge = Some(spec)))
     compiled.doSimUntilVoid { dut =>

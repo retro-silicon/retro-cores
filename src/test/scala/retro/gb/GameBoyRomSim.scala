@@ -26,7 +26,7 @@ object GbRomRunner {
 
   private val compiled = mutable.Map[CartridgeSpec, SimCompiled[RetroCore]]()
   def compile(spec: CartridgeSpec) = compiled.getOrElseUpdate(spec,
-    SimConfig.withVerilator.withConfig(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz)))
+    SimConfig.withVerilator.allOptimisation.withConfig(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz)))
       .addSimulatorFlag("-O3").workspacePath(sys.env.getOrElse("SIM_WORKSPACE", "simWorkspace")).workspaceName(f"GameBoyRom_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
       .compile(GameBoy(withTrace = false, cartridge = Some(spec))))
 
