@@ -184,7 +184,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
     }
     def write(address: Int, value: Int) = cycle({ store(address, value); value })
   }
-  val cpu = new R2A03Reference(bus, _ => (ppu.nmi, frameIrq || dmcIrq))
+  val cpu = new R2A03Reference(bus, _ => (ppu.nmi, frameIrq || dmcIrq || cart.irq))
 
   /** One CPU cycle around `access`. */
   private def cycle(access: => Int): Int = {

@@ -125,7 +125,7 @@ class NesPpuPlugin extends FiberPlugin {
     val paletteWrite = NesPpuWrite(UInt(5 bits), UInt(6 bits))
 
     /** One dot. `bypass` makes this dot's memory reads see the access's writes. */
-    def dot(s: NesPpuState, pal: Vec[UInt], bypass: Boolean): (NesPpuState, Flow[NesPixel]) = {
+    def dot(s: NesPpuState, pal: Vec[UInt], bypass: Boolean): (NesPpuState, Flow[NesPixel], (Bool, Bool)) = {
       def ciramRead(a: UInt): UInt = {
         val i = cart.ciramIndex(a, afterAccess = bypass)
         val r = ciram.readAsync(i)
@@ -218,6 +218,14 @@ class NesPpuPlugin extends FiberPlugin {
                             (s.ctrl(3) ## tile ## high ## row(2 downto 0)).asUInt
       val chrValue = chrRead(spriteFetch ? spPattern | bgPattern)
       val spBits = (si < s.spCount) ? (s.spAttr(si)(6) ? chrValue.reversed | chrValue) | U(0, 8 bits)
+      // The address bus as the cartridge sees it (`NesCartridge.ppuBus`): fetches, sprite
+      // pattern fetches (unused slots fetch tile FF), and the garbage nametable fetches.
+      val busValid, busHigh = CombInit(False)
+      when(renderLine) {
+        when(fetching && !phase(0)) { busValid := True; busHigh := phase(2) && s.ctrl(4) }
+        when(spriteFetch) { busValid := True; busHigh := h16 ? ((si < s.spCount) ? tile(0) | True) | s.ctrl(3) }
+        when((d >= 257 && d <= 320 && !sprite(2) && !sprite(0)) || d === 337 || d === 339) { busValid := True }
+      }
 
       val v1 = (fetching && phase === 7) ? incX(v) | v
       val v2 = (d === 256) ? incY(v1) | v1
@@ -306,11 +314,11 @@ class NesPpuPlugin extends FiberPlugin {
         o.line := pre ? U(0, 9 bits) | (line + 1)
         when(pre) { o.oddFrame := !s.oddFrame }
       } otherwise { o.dot := d + 1 }
-      (o, px)
+      (o, px, (busValid, busHigh))
     }
 
     // ---- The CPU access ----------------------------------------------------------------------
-    def access(s: NesPpuState): NesPpuState = {
+    def access(s: NesPpuState): (NesPpuState, Seq[(Bool, Bool)]) = {
       val o = NesPpuState()
       o := s
       val register = slave.cmd.address(2 downto 0)
@@ -402,16 +410,22 @@ class NesPpuPlugin extends FiberPlugin {
           }
         }
       }
-      o
+      // The bus events the model's `ppuBus` sees: the 2007 access's address (none for palette
+      // reads), then v after a 2006 or 2007 access while not rendering.
+      val renderingNow = (s.mask(3) || s.mask(4)) && (s.line < 240 || s.line === 261)
+      val data7 = register === 7 && (slave.readFire && !toPalette || slave.writeFire)
+      val vChanged = (register === 7 && (slave.readFire || slave.writeFire)) || (register === 6 && slave.writeFire && s.w)
+      (o, Seq((data7, a(12)), (vChanged && !renderingNow, o.v(12))))
     }
 
     // ---- Three dots and the access in between -------------------------------------------------
     val paletteAfter = CombInit(palette)
     when(paletteWrite.enable) { paletteAfter(paletteWrite.address) := paletteWrite.data }
-    val (s1, p1) = dot(state, palette, bypass = false)
-    val (s2, p2) = dot(s1, palette, bypass = false)
-    val s2a = access(s2)
-    val (s3, p3) = dot(s2a, paletteAfter, bypass = true)
+    val (s1, p1, b1) = dot(state, palette, bypass = false)
+    val (s2, p2, b2) = dot(s1, palette, bypass = false)
+    val (s2a, accessBus) = access(s2)
+    val (s3, p3, b3) = dot(s2a, paletteAfter, bypass = true)
+    cart.ppuBus(Seq(b1, b2, b3), accessBus)
     state := s3
     palette := paletteAfter
     pixels(0) := p1; pixels(1) := p2; pixels(2) := p3

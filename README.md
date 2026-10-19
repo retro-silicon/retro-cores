@@ -74,7 +74,7 @@ instruction always runs (blargg's cpu_interrupts_v2 pins all of this down).
 
 ```sh
 scripts/fetch-nes-test-roms.sh                     # also blargg's CPU, PPU and APU test ROMs into ./roms/nes-test-roms
-sbt "Test/runMain retro.nes.NesRefRom"             # every mapper 0/1/3 test ROM on the model; frames saved to out/nes/
+sbt "Test/runMain retro.nes.NesRefRom"             # every mapper 0/1/3/4 test ROM on the model; frames saved to out/nes/
 sbt "Test/runMain retro.nes.NesRefRom sprite_hit"  # only ROMs whose path contains an argument
 WAV=1 sbt "Test/runMain retro.nes.NesRefRom apu_mixer"  # also saves the sound to out/nes/*.wav
 sbt "Test/runMain retro.nes.NesMixerCheck"         # apu_mixer's residual tones against hardware recordings
@@ -85,7 +85,7 @@ model (`NesPpuReference`: background pipeline, sprite evaluation with the overfl
 timing, sprite 0 hit, VBlank/NMI with the read-race suppression, the odd-frame dot, open-bus
 decay), the whole APU (`NesApuChannels.scala`: frame counter and IRQ, length counters, two
 pulses with sweep, triangle, noise, the DMC, and the non-linear mixer), the 2A03's DMA unit,
-controller 1, NROM/MMC1/CNROM cartridges, and the reset button (`reset()`: the CPU's reset
+controller 1, NROM/MMC1/CNROM/MMC3 cartridges, and the reset button (`reset()`: the CPU's reset
 sequence at the next instruction, 4015 cleared, 4017 rewritten). Each CPU cycle runs two PPU
 dots, the APU, the CPU access, the third dot, then samples NMI and IRQ. The runners press reset
 when a test asks for it (status 81 at 6000).
@@ -111,13 +111,19 @@ Left: LXA in instr_test 03-immediate and the all_instrs ROM that stops there, wh
 console and SingleStepTests disagree on the unstable constant (the core follows the latter);
 and dmc_dma_during_read4/double_2007_read, which depends on how the PPU takes two 2007 reads
 in consecutive cycles.
+MMC3 (mapper 4) clocks its scanline counter on PPU A12 rising edges after A12 has been low for
+10 dots, with the Sharp chip's IRQ behavior (a counter reloaded to 0 fires). The cartridge
+sees every PPU bus address the 2C02 drives: unused sprite slots, the garbage nametable fetches
+at dots 257-320, 337 and 339, and 2006/2007 accesses outside rendering. With blargg's
+mmc3_test, mmc3_test_2 and mmc3_irq_tests (14 ROMs) the model passes 127 of 133; the three new
+failures test other chips (MMC6, MMC3 revision A and the alternate MMC3 behavior).
 It is the reference the RTL NES system is cosimulated against.
 
 ### NES system (RTL)
 
 ```sh
 sbt "testOnly retro.nes.NesSim"                    # six short ROMs, RTL cosimulated with NesReference
-sbt "Test/runMain retro.nes.NesRomReport"          # every mapper 0/1/3 test ROM, cosimulated (about 3 frames/s)
+sbt "Test/runMain retro.nes.NesRomReport"          # every mapper 0/1/3/4 test ROM, cosimulated (about 3 frames/s)
 sbt "Test/runMain retro.nes.NesRomReport sprite_hit"
 ```
 
@@ -128,15 +134,15 @@ sbt "Test/runMain retro.nes.NesRomReport sprite_hit"
 | `RamPlugin` | 0000-1FFF | 2 KB of RAM, mirrored |
 | `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: three dots per CPU cycle with the access between the second and third, CIRAM, OAM, palette, `ppu_pixels` port |
 | `NesApuPlugin` | 4000-4017 | frame counter and IRQ, length counters, pulses, triangle, noise, DMC, mixer (`audio` port, one sample per cycle), 4015, controller 1 (`joypad1` pins), and the DMA unit (OAM DMA and DMC fetches) as a second bus master above the CPU |
-| `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, mirroring, CNROM's bank or MMC1's registers; images loaded by the sim |
+| `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, mirroring, CNROM's bank, MMC1's registers or MMC3's banks and scanline IRQ (fed every PPU bus address); images loaded by the sim |
 | `NesOpenBusPlugin` | everything else | the data bus latch, for unmapped reads and undriven bits |
-| `NesInterruptsPlugin` | | the CPU's NMI (from the PPU) and IRQ (from the APU), and the reset button (`reset_button` pin, taken at the next opcode fetch) |
+| `NesInterruptsPlugin` | | the CPU's NMI (from the PPU) and IRQ (from the APU and the cartridge), and the reset button (`reset_button` pin, taken at the next opcode fetch) |
 
 `NesRtl.cosim` runs a test ROM on the RTL and the model in lockstep: every instruction must
 match in cycles (DMA stalls included), bus accesses (so every PPU and APU register read) and
 registers, every frame pixel for pixel, and the APU's mixed output in every cycle, until the
-ROM reports its result. All 119 ROMs run to their result with no difference from the model, so
-the RTL passes the same 116.
+ROM reports its result. All 133 ROMs run to their result with no difference from the model, so
+the RTL passes the same 127.
 
 ### Hardware test ROMs
 
@@ -389,9 +395,9 @@ interrupt, timer, serial and OAM DMA acceptance tests, all of Mooneye's PPU test
 corruption bug tests, and dmg-acid2 pixel for pixel (see *Hardware test ROMs*).
 
 NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
-116 of 119 blargg CPU/PPU/APU test ROMs, with sound checked against hardware recordings, and
-the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM) cosimulated against it on those
+127 of 133 blargg CPU/PPU/APU/MMC3 test ROMs, with sound checked against hardware recordings, and
+the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM/MMC3) cosimulated against it on those
 ROMs, audio included.
 
-Next: the APU, MBC2, DMA bus conflicts and STOP on the Game Boy; on the NES, MMC3 and
-simulation speed.
+Next: the APU, MBC2, DMA bus conflicts and STOP on the Game Boy; on the NES, simulation
+speed.

@@ -342,15 +342,16 @@ class NesApuPlugin extends FiberPlugin {
     audio := mixer.mix(pulse1.output(length(0) =/= 0), pulse2.output(length(1) =/= 0), triangle.output, noise.output(length(3) =/= 0), dmc.level)
     dmc.irq := dmcIrqNext
     // The CPU samples its IRQ line at the end of the cycle: the flags as this cycle leaves them.
-    ints.irq := irqNext || dmcIrqNext
+    ints.irq := irqNext || dmcIrqNext || host[NesCartridgePlugin].logic.get.irq
   }
 }
 
-/** What an iNES cartridge needs in hardware: sizes, mapper (0 NROM, 1 MMC1, 3 CNROM) and
-  * mirroring. */
+/** What an iNES cartridge needs in hardware: sizes, mapper (0 NROM, 1 MMC1, 3 CNROM, 4 MMC3)
+  * and mirroring. */
 case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: Int, verticalMirroring: Boolean) {
-  require(mapper == 0 || mapper == 1 || mapper == 3, s"mapper $mapper is not supported")
+  require(Seq(0, 1, 3, 4).contains(mapper), s"mapper $mapper is not supported")
   require(prgBytes % 0x4000 == 0 && isPow2(chrBytes))
+  require(mapper != 4 || isPow2(prgBytes), "MMC3 PRG must be a power of 2")
 }
 object NesCartSpec {
   def of(c: NesCartridge) = NesCartSpec(c.prg.length, c.chr.length, c.chrRam, c.mapper, c.verticalMirroring)
@@ -405,6 +406,44 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
     }
     chrBank0 := chrBank0After; chrBank1 := chrBank1After; prgBank := prgBankAfter; control := controlAfter
 
+    // MMC3: bank select, R0-R7, mirroring, and the scanline counter's latch and enable. Writes
+    // to C001 (reload) and E000 (acknowledge) act on the counter state in `ppuBus`.
+    val mmc3 = (spec.mapper == 4) generate new Area {
+      val bankSelect = Reg(Bits(8 bits)).init(0)
+      val banks = Vec(Seq(0, 2, 4, 5, 6, 7, 0, 1).map(b => Reg(UInt(8 bits)).init(b)))
+      val horizontal, irqEnabled = RegInit(False)
+      val irqLatch = Reg(UInt(8 bits)).init(0)
+      val bankSelectAfter = CombInit(bankSelect)
+      val banksAfter = CombInit(banks)
+      val horizontalAfter = CombInit(horizontal)
+      val irqLatchAfter = CombInit(irqLatch)
+      val irqEnabledAfter = CombInit(irqEnabled)
+      val reloadWrite, ackWrite = CombInit(False)
+      when(prgSlave.writeFire) {
+        switch(prgSlave.cmd.address(14 downto 13) ## prgSlave.cmd.address(0)) {
+          is(0) { bankSelectAfter := d.asBits }
+          is(1) { banksAfter(bankSelect(2 downto 0).asUInt) := d }
+          is(2) { horizontalAfter := d(0) }
+          is(4) { irqLatchAfter := d }
+          is(5) { reloadWrite := True }
+          is(6) { irqEnabledAfter := False; ackWrite := True }
+          is(7) { irqEnabledAfter := True }
+          default {}
+        }
+      }
+      bankSelect := bankSelectAfter; banks := banksAfter; horizontal := horizontalAfter
+      irqLatch := irqLatchAfter; irqEnabled := irqEnabledAfter
+      /** A12 as last driven, dots since it fell (saturating), the counter, its reload request
+        * and the IRQ, as `NesCartridge` keeps them. */
+      val a12 = RegInit(False)
+      val lowDots = Reg(UInt(4 bits)).init(0)
+      val counter = Reg(UInt(8 bits)).init(0)
+      val reload, irq = RegInit(False)
+    }
+    /** The cartridge's IRQ output as this cycle leaves it (MMC3), set by `ppuBus`. */
+    val irq = Bool()
+    if (spec.mapper != 4) irq := False
+
     val prg = Mem.fill(spec.prgBytes)(UInt(8 bits)).setName("cart_prg").simPublic()
     val pa = prgSlave.cmd.address
     val prgBank16 = UInt(4 bits)
@@ -416,7 +455,18 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
     }
     val banks = spec.prgBytes >> 14
     val prgIndex =
-      if (banks == 1) pa(13 downto 0)
+      if (spec.mapper == 4) {
+        val banks8 = spec.prgBytes >> 13
+        val swap = mmc3.bankSelect(6)
+        val bank = UInt(8 bits)
+        switch(pa(14 downto 13)) {
+          is(0) { bank := swap ? U(banks8 - 2, 8 bits) | mmc3.banks(6) }
+          is(1) { bank := mmc3.banks(7) }
+          is(2) { bank := swap ? mmc3.banks(6) | U(banks8 - 2, 8 bits) }
+          default { bank := U(banks8 - 1, 8 bits) }
+        }
+        bank.resize(log2Up(banks8)) @@ pa(12 downto 0)
+      } else if (banks == 1) pa(13 downto 0)
       else if (isPow2(banks)) prgBank16.resize(log2Up(banks)) @@ pa(13 downto 0)
       else Vec((0 until 16).map(b => U(b % banks, log2Up(banks) bits)))(prgBank16) @@ pa(13 downto 0)
     prgSlave.rdata := prg.readAsync(prgIndex)
@@ -433,12 +483,20 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
       val i = spec.mapper match {
         case 3 => bank0(1 downto 0) @@ a(12 downto 0)
         case 1 => ctrl(4) ? ((a(12) ? bank1 | bank0) @@ a(11 downto 0)) | (bank0(4 downto 1) @@ a(12 downto 0))
+        case 4 =>
+          val (select, regs) = if (after) (mmc3.bankSelectAfter, mmc3.banksAfter) else (mmc3.bankSelect, mmc3.banks)
+          val slot = a(12 downto 10) ^ (select(7) ## B"00").asUInt
+          val bank = slot(2) ? regs((U"1" @@ slot(1 downto 0)) - 2) | (regs(U"00" @@ slot(1)) (7 downto 1) @@ slot(0 downto 0))
+          bank @@ a(9 downto 0)
         case _ => a(12 downto 0)
       }
       i.resize(log2Up(spec.chrBytes))
     }
     def ciramIndex(a: UInt, after: Boolean): UInt = {
-      val mirroring = if (spec.mapper == 1) (if (after) controlAfter else control)(1 downto 0) else B(if (spec.verticalMirroring) 2 else 3, 2 bits)
+      val mirroring =
+        if (spec.mapper == 1) (if (after) controlAfter else control)(1 downto 0)
+        else if (spec.mapper == 4) B"1" ## (if (after) mmc3.horizontalAfter else mmc3.horizontal)
+        else B(if (spec.verticalMirroring) 2 else 3, 2 bits)
       val i = UInt(11 bits)
       switch(mirroring) {
         is(0) { i := U"0" @@ a(9 downto 0) }
@@ -455,6 +513,33 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
   def chrRead(address: UInt, afterAccess: Boolean = false): UInt = logic.chr.readAsync(logic.chrIndex(address, afterAccess))
   /** The PPU's write port, used only with CHR RAM. */
   def chrWrite(address: UInt, data: UInt, enable: Bool): Unit = if (spec.chrRam) logic.chr.write(logic.chrIndex(address), data, enable)
+  /** The PPU's bus as MMC3's scanline counter sees it, from the PPU's build: for each of the
+    * cycle's three dots whether it drove an address and that address's A12, and the same for
+    * the CPU access's two possible events (the 2007 access, then v after it when not
+    * rendering), which come between the second and third dot along with mapper writes. */
+  def ppuBus(dots: Seq[(Bool, Bool)], access: Seq[(Bool, Bool)]): Unit = if (spec.mapper == 4) {
+    val m = logic.mmc3
+    case class S(a12: Bool, low: UInt, counter: UInt, reload: Bool, irq: Bool)
+    def event(s: S, valid: Bool, high: Bool, latch: UInt, enabled: Bool): S = {
+      val clock = valid && high && !s.a12 && s.low >= NesCartridge.a12Filter
+      val next = (s.counter === 0 || s.reload) ? latch | (s.counter - 1)
+      S(valid ? high | s.a12,
+        (valid && !high && s.a12) ? U(0, 4 bits) | s.low,
+        clock ? next | s.counter,
+        !clock && s.reload,
+        s.irq || (clock && next === 0 && enabled))
+    }
+    def dot(s: S, e: (Bool, Bool), latch: UInt, enabled: Bool) =
+      event(s.copy(low = (s.low === 15) ? s.low | (s.low + 1)), e._1, e._2, latch, enabled)
+    val start = S(m.a12, m.lowDots, m.counter, m.reload, m.irq)
+    val s2 = dot(dot(start, dots(0), m.irqLatch, m.irqEnabled), dots(1), m.irqLatch, m.irqEnabled)
+    val written = s2.copy(counter = m.reloadWrite ? U(0, 8 bits) | s2.counter, reload = m.reloadWrite || s2.reload, irq = !m.ackWrite && s2.irq)
+    val accessed = access.foldLeft(written)((s, e) => event(s, e._1, e._2, m.irqLatchAfter, m.irqEnabledAfter))
+    val s3 = dot(accessed, dots(2), m.irqLatchAfter, m.irqEnabledAfter)
+    m.a12 := s3.a12; m.lowDots := s3.low; m.counter := s3.counter; m.reload := s3.reload; m.irq := s3.irq
+    logic.irq := s3.irq
+  }
+
   /** A nametable address (2000-3FFF) to an index into the console's 2 KB of VRAM. With
     * `afterAccess`, a mirroring change written by this cycle's CPU access already applies. */
   def ciramIndex(address: UInt, afterAccess: Boolean = false): UInt = logic.ciramIndex(address, afterAccess)

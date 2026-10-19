@@ -37,12 +37,16 @@ class NesPpuReference(cart: NesCartridge) {
   def nmi = vblank && (ctrl & 0x80) != 0
 
   // ---- PPU address space ---------------------------------------------------------------------
+  /** Dots since power-up, for the cartridge's view of the PPU bus. */
+  var dotCount = 0L
   def read(address: Int): Int = {
     val a = address & 0x3FFF
+    cart.ppuBus(a, dotCount)
     if (a < 0x2000) cart.chr(cart.chrIndex(a)) else if (a < 0x3F00) ciram(cart.ciram(a)) else palette(paletteIndex(a))
   }
   def write(address: Int, value: Int): Unit = {
     val a = address & 0x3FFF
+    cart.ppuBus(a, dotCount)
     if (a < 0x2000) { if (cart.chrRam) cart.chr(cart.chrIndex(a)) = value }
     else if (a < 0x3F00) ciram(cart.ciram(a)) = value
     else palette(paletteIndex(a)) = value & 0x3F
@@ -75,6 +79,7 @@ class NesPpuReference(cart: NesCartridge) {
       val r = if (a >= 0x3F00) { buffer = ciram(cart.ciram(a)); drive(palette(paletteIndex(a)) & (if ((mask & 1) != 0) 0x30 else 0x3F), 0x3F) }
               else { val b = buffer; buffer = read(a); drive(b, 0xFF) }
       incrementV()
+      if (!renderingNow) cart.ppuBus(v, dotCount)
       r
     case _ => decayed
   }
@@ -93,9 +98,9 @@ class NesPpuReference(cart: NesCartridge) {
         w = !w
       case 6 =>
         if (!w) t = (t & 0x00FF) | ((value & 0x3F) << 8)
-        else { t = (t & 0x7F00) | value; v = t }
+        else { t = (t & 0x7F00) | value; v = t; if (!renderingNow) cart.ppuBus(v, dotCount) }
         w = !w
-      case 7 => write(v, value); incrementV()
+      case 7 => write(v, value); incrementV(); if (!renderingNow) cart.ppuBus(v, dotCount)
     }
   }
   private def incrementV() = v = (v + (if ((ctrl & 4) != 0) 32 else 1)) & 0x7FFF
@@ -181,7 +186,7 @@ class NesPpuReference(cart: NesCartridge) {
     val bits = if (i < spriteCount) {
       val b = read((addr + (if (high) 8 else 0)) & 0x1FFF)
       if ((spriteAttr(i) & 0x40) != 0) reverse(b) else b
-    } else 0
+    } else { cart.ppuBus(if (spriteHeight == 16) 0x1FF0 else (ctrl & 8) << 9 | 0xFF0, dotCount); 0 }
     if (high) spriteHi(i) = bits else spriteLo(i) = bits
   }
   private def reverse(b: Int) = Integer.reverse(b) >>> 24
@@ -217,8 +222,10 @@ class NesPpuReference(cart: NesCartridge) {
     back(line * 256 + x) = palette(index) & (if ((mask & 1) != 0) 0x30 else 0x3F)
   }
 
+  private def renderingNow = rendering && (line < 240 || line == 261)
   /** One dot. */
   def tick(): Unit = {
+    dotCount += 1
     val visible = line < 240
     val pre = line == 261
     if (rendering && (visible || pre)) {
@@ -248,6 +255,8 @@ class NesPpuReference(cart: NesCartridge) {
         sprite0Line = sprite0Next
       }
       if (dot >= 257 && dot <= 320 && ((dot - 257) & 5) == 4) fetchSprite((dot - 257) >> 3, ((dot - 257) & 2) != 0)
+      // The garbage nametable fetches of the sprite and end-of-line slots (only the bus matters).
+      if ((dot >= 257 && dot <= 320 && ((dot - 257) & 5) == 0) || dot == 337 || dot == 339) cart.ppuBus(0x2000 | (v & 0xFFF), dotCount)
       if (pre && dot >= 280 && dot <= 304) v = (v & ~0x7BE0) | (t & 0x7BE0)
     } else if (visible && dot >= 1 && dot <= 256) {
       // Rendering off: the backdrop, or the palette entry v points at.
