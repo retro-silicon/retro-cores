@@ -95,7 +95,8 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
     b
   }
   /** A request raised this M-cycle that the CPU's interrupt check sees only in the next one,
-    * when it is halted (`halted`) or when it runs. Retain `irqLock` before calling it. */
+    * when it is halted (`halted`) or when it runs, unless it was already pending. Retain
+    * `irqLock` before calling it. */
   def late(line: IrqLine, halted: Boolean): Bool = {
     val b = Bool().setCompositeName(this, s"irq_${line.name}_late${if (halted) "Halted" else "Running"}")
     lateLines += ((line, halted, b))
@@ -132,8 +133,8 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
     flags := written & ~acked
     early.requests := ticked & enable(4 downto 0)
     def lateOf(halted: Boolean) = (0 until 5).map(i => lateLines.filter(l => l._1.index == i && l._2 == halted).map(_._3).foldLeft(False: Bool)(_ || _)).asBits()
-    early.lateHalted := lateOf(true)
-    early.lateRunning := lateOf(false)
+    early.lateHalted := lateOf(true) & ~flags
+    early.lateRunning := lateOf(false) & ~flags
   }
 }
 
@@ -162,9 +163,15 @@ abstract class GbPeripheral(mapping: AddressMapping, irqs: IrqLine*) extends Fib
   *
   * Like every Game Boy peripheral here, each M-cycle the timer ticks first and the CPU's access
   * then sees, or writes over, the ticked state (see `Gb`). On overflow TIMA reads 0x00 for one
-  * M-cycle (A); the next tick loads TMA and requests the interrupt (B). Writing TIMA during A
-  * cancels both. During B a TIMA write is ignored and a TMA write also lands in TIMA. */
+  * M-cycle (A); the next tick loads TMA and requests the interrupt (B), which a halted CPU sees
+  * an M-cycle later. Writing TIMA during A cancels both. During B a TIMA write is ignored and a TMA write also lands in TIMA. */
 class TimerPlugin(resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
+  private var lateHalted: Bool = null
+  override def withController(ctrl: IrqService): Unit = ctrl match {
+    case c: InterruptControllerPlugin => lateHalted = c.late(Gb.Irq.TIMER, halted = true)
+    case _ =>
+  }
+
   /** The 16-bit counter, and its value after this M-cycle's tick: other peripherals (serial)
     * divide their clocks from it. */
   val counter, tickedCounter = Handle[UInt]()
@@ -197,6 +204,8 @@ class TimerPlugin(resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb.DIV
       ticked.tima := tima + 1
       ticked.overflowed := tima === 0xFF
     }
+    // A halted CPU sees the interrupt an M-cycle later.
+    if (lateHalted != null) lateHalted := ticked.reloading
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
     regs.read(ticked.counter(15 downto 8), Gb.DIV)

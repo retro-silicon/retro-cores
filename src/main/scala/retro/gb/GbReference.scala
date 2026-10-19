@@ -125,6 +125,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     val counterBefore = counter
     counter = (counter + 4) & 0xFFFF
     reloading = false
+    val iflagBefore = iflag
     if (overflowed) { tima = tma; overflowed = false; reloading = true; iflag |= 1 << Gb.Irq.TIMER.index }
     else if (Gb.timerTap(counterBefore, tac) && !Gb.timerTap(counter, tac)) { overflowed = tima == 0xFF; tima = (tima + 1) & 0xFF }
     // Serial
@@ -161,8 +162,11 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
 
     // ---- Access ----------------------------------------------------------------------------
     // Bits 8-12: requests a halted CPU sees an M-cycle late; bits 16-20: ones a running CPU does.
-    requestLog((cycles & 63).toInt) = ie & iflag & 0x1F | (if (ppu.statLate) (1 << Gb.Irq.STAT.index) << 8 else 0) |
-      (if (ppu.statRunLate) (1 << Gb.Irq.STAT.index) << 16 else 0)
+    // A halted CPU sees the timer interrupt an M-cycle after TIMA reloads. A late request already
+    // pending in IF is not late.
+    val lateHalted = (if (reloading) 1 << Gb.Irq.TIMER.index else 0) | (if (ppu.statLate) 1 << Gb.Irq.STAT.index else 0)
+    val lateRunning = if (ppu.statRunLate) 1 << Gb.Irq.STAT.index else 0
+    requestLog((cycles & 63).toInt) = ie & iflag & 0x1F | (lateHalted & ~iflagBefore) << 8 | (lateRunning & ~iflagBefore) << 16
     cycles += 1
     val idu = iduAddress
     iduAddress = -1
