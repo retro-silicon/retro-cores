@@ -27,6 +27,22 @@ sbt "runMain retro.sm83.Sm83Verilog"   # writes gen/Sm83Core.v (the bare CPU)
 sbt "runMain retro.gb.GameBoyVerilog"  # writes gen/GameBoy.v (CPU + SoC, cartridge bus external)
 ```
 
+### Single-instruction tests
+
+```sh
+scripts/fetch-sm83-tests.sh                        # SingleStepTests/sm83 (MIT) into ./roms/sst-sm83, about 190 MB
+sbt "testOnly retro.sm83.Sm83SingleStepSim"        # all 500,000 tests on the reference model and the RTL (about 2 minutes)
+SST_OPS="f1,cb 46" SST_LIMIT=50 sbt "testOnly retro.sm83.Sm83SingleStepSim"  # a few opcodes
+```
+
+[SingleStepTests/sm83](https://github.com/SingleStepTests/sm83) gives 1000 tests per opcode
+(every base and CB opcode): an initial CPU and RAM state, the final state, and the bus of every
+M-cycle (idle, read or write, address and data). Both the RTL and `Sm83Reference` pass all of
+them except HALT and STOP, 498,000 of 500,000: the tests come from ares, which runs HALT as two
+idle M-cycles and STOP as three, while here HALT keeps fetching at PC (the timing the Mooneye
+HALT tests pin down) and STOP is a NOP. Per-opcode reports go to `out/sm83-sst-*.txt`. The tests
+raise no interrupts, so dispatch, HALT exit and the EI delay are covered by the test ROMs below.
+
 ### Hardware test ROMs
 
 ```sh

@@ -263,7 +263,7 @@ object Sm83 {
         case None => in(requests); master(ack)
       }
       val ime = RegInit(False).simPublic()
-      val imeNext = RegInit(False)
+      val imeNext = RegInit(False).simPublic()
 
       val pending = requests =/= 0
       val enabled = ime || imeNext
