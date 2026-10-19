@@ -55,9 +55,9 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
 
   /** What a read returns once the cycle's tick is done. */
   def peek(a: Int): Int = a match {
-    case _ if a >= 0x8000 && a < 0xA000 => vram(a & 0x1FFF)
+    case _ if a >= 0x8000 && a < 0xA000 => if (ppu.vramReadLocked) 0xFF else vram(a & 0x1FFF)
     case _ if a >= 0xC000 && a < 0xFE00 => wram(a & 0x1FFF)
-    case _ if a >= 0xFE00 && a < 0xFEA0 => if (dmaCopying) 0xFF else oam(a & 0xFF)
+    case _ if a >= 0xFE00 && a < 0xFEA0 => if (dmaCopying || ppu.oamReadLocked) 0xFF else oam(a & 0xFF)
     case _ if a >= 0xFEA0 && a < 0xFF00 => 0x00
     case _ if a >= 0xFF80 && a < 0xFFFF => hram(a & 0x7F)
     case Gb.IE => ie
@@ -128,10 +128,10 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
       val (counterTicked, tacTicked) = (counter, tac)
       a match {
         case _ if a < 0x8000 =>
-        case _ if a < 0xA000 => vram(a & 0x1FFF) = d
+        case _ if a < 0xA000 => if (!ppu.vramWriteLocked) vram(a & 0x1FFF) = d
         case _ if a < 0xC000 => external(a) = d
         case _ if a < 0xFE00 => wram(a & 0x1FFF) = d
-        case _ if a < 0xFEA0 => if (!dmaCopying) oam(a & 0xFF) = d
+        case _ if a < 0xFEA0 => if (!dmaCopying && !ppu.oamWriteLocked) oam(a & 0xFF) = d
         case _ if a >= 0xFF80 && a < 0xFFFF => hram(a & 0x7F) = d
         case Gb.IE => ie = d
         case Gb.IF => iflag = d & 0x1F

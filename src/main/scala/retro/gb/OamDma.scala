@@ -14,9 +14,13 @@ import spinal.lib.misc.plugin._
   * M-cycles 2 to 161; while it runs the CPU reads FF from OAM and its OAM writes are lost.
   * Sources E000-FFFF read WRAM at C000-DFFF. Addresses no `DirectRead` claims read FF.
   *
+  * The PPU loads `readLock` and `writeLock`, which block the CPU's OAM accesses in the modes the
+  * PPU uses OAM.
+  *
   * Not modelled: bus conflicts (on the DMG a CPU access to the bus the DMA is reading returns the
-  * DMA's byte), and OAM being locked by the PPU. */
+  * DMA's byte). */
 class OamDmaPlugin extends FiberPlugin {
+  val readLock, writeLock = Handle[Bool]()
   /** A combinational read port into OAM for the PPU, which has its own path to it. */
   def oamRead(index: UInt): UInt = logic.oam.readAsync(index)
 
@@ -52,7 +56,9 @@ class OamDmaPlugin extends FiberPlugin {
     new RetroBusSlaveFactory(dmaSlave).readAndWrite(register, Gb.DMA)
     val oamIndex = oamSlave.cmd.address(7 downto 0)
     oamSlave.rdata := copying ? U(0xFF, 8 bits) | oam.readAsync(oamIndex)
-    oam.write(copying ? at | oamIndex, copying ? data | oamSlave.cmd.data, copying || oamSlave.writeFire)
+    val cpuWrite = Bool()
+    cpuWrite := oamSlave.writeFire
+    oam.write(copying ? at | oamIndex, copying ? data | oamSlave.cmd.data, copying || cpuWrite)
 
     when(startIn =/= 0) { startIn := startIn - 1 }
     when(copying) {
@@ -61,5 +67,11 @@ class OamDmaPlugin extends FiberPlugin {
       active := at =/= 159
     }
     when(dmaSlave.writeFire) { startIn := 2 }
+  }
+
+  /** Apart from `logic`, so the PPU can use `oamRead` before it loads the locks. */
+  val locking = during build new Area {
+    when(readLock.get) { logic.oamSlave.rdata := 0xFF }
+    when(writeLock.get) { logic.cpuWrite := False }
   }
 }

@@ -290,8 +290,11 @@ class PpuPlugin(resetLcdc: Int = 0) extends GbPeripheral(SizeMapping(Gb.LCDC, 0x
       }
     }
     // LY = LYC is only compared while the LCD is on, and stays on the interrupt line when off.
-    val coincidenceTicked = on ? (lyTicked === lyc) | coincidence
-    val line = (statSelect(3) && coincidenceTicked) || on && ((statSelect(2) && irqMode === 2) ||
+    // It drops in the line's last M-cycle, where LY already reads the next line.
+    val coincidenceTicked = on ? (lyTicked === lyc && xTicked =/= Gb.lineCycles - 1) | coincidence
+    // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
+    val vblankMode2 = lyTicked === Gb.visibleLines && xTicked === 0
+    val line = (statSelect(3) && coincidenceTicked) || on && ((statSelect(2) && (irqMode === 2 || vblankMode2)) ||
       (statSelect(1) && irqMode === 1) || (statSelect(0) && irqMode === 0))
     // LY reads the next line in the last M-cycle of a line.
     val lyRead = (on && xTicked === Gb.lineCycles - 1) ? ((lyTicked === Gb.frameLines - 1) ? U(0, 8 bits) | lyTicked + 1) | lyTicked
@@ -301,6 +304,14 @@ class PpuPlugin(resetLcdc: Int = 0) extends GbPeripheral(SizeMapping(Gb.LCDC, 0x
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
     regs.readAndWrite(lcdc, Gb.LCDC)
     regs.readAndWrite(statSelect, Gb.STAT, 3)
+    // The CPU's VRAM and OAM accesses the PPU blocks; see `PpuReference.vramReadLocked`.
+    val lastOfScan = mode === 2 && xTicked === Gb.oamEnd - 1
+    vram.readLock.load(mode === 3 || lastOfScan)
+    vram.writeLock.load(mode === 3)
+    dma.readLock.load(mode >= 2 || on && xTicked === Gb.lineCycles - 1 &&
+      (lyTicked < Gb.visibleLines - 1 || lyTicked === Gb.frameLines - 1))
+    dma.writeLock.load(mode === 3 || mode === 2 && !lastOfScan)
+
     regs.read(coincidenceTicked, Gb.STAT, 2)
     regs.read(mode, Gb.STAT, 0)
     regs.readAndWrite(scy, Gb.SCY)

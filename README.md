@@ -60,13 +60,12 @@ Suite; `./roms` is gitignored and `GameBoyRomSim` is skipped when it is empty. T
 MBC5). Blargg's ROMs report over serial or in cartridge RAM, Mooneye's send the Fibonacci
 registers.
 
-Result on the RTL: 103 of the 125 ROMs pass, including all of Blargg's `cpu_instrs`,
+Result on the RTL: 107 of the 125 ROMs pass, including all of Blargg's `cpu_instrs`,
 `instr_timing`, `mem_timing`, `mem_timing-2` and `halt_bug`, every Mooneye acceptance test for
-CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, eight of the twelve PPU
-tests (among them `intr_2_mode0_timing_sprites` and `hblank_ly_scx_timing`, which pin down mode 3
-lengths), and the MBC1 and MBC5 tests. The other 22 are registered as ignored with the reason:
-nine are for other models (DMG-0, MGB, SGB), four PPU tests need the PPU's VRAM/OAM locking and
-LCD-on line timing, `boot_hwio` needs the APU registers, and MBC2 and the MBC1 multicart are not
+CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, all twelve PPU tests
+(mode 3 lengths with objects and SCX, VRAM/OAM locking, LCD-on timing), and the MBC1 and MBC5
+tests. The other 18 are registered as ignored with the reason: nine are for other models (DMG-0,
+MGB, SGB), `boot_hwio` needs the APU registers, and MBC2 and the MBC1 multicart are not
 modelled.
 
 `GameBoyLcdSim` runs [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (MIT, fetched by the
@@ -228,7 +227,10 @@ collect or an FPGA build to write into a scan-out framebuffer. `PpuReference` is
 pipeline as a Scala model inside `GbReference`; the system cosim checks every STAT read and every
 frame against it, including a test with random tiles, objects, scroll and window. The timing
 rules the Mooneye tests pin down (when STAT and the STAT interrupt see mode changes, LY reading
-the next line early, the LY = LYC flag freezing while the LCD is off) are listed there.
+the next line early, the LY = LYC flag freezing while the LCD is off, the first line after the
+LCD is turned on, when VRAM and OAM are locked against the CPU) are listed there. The PPU locks
+the CPU out through `readLock`/`writeLock` handles on the VRAM `RamPlugin` (`lockable = true`)
+and on `OamDmaPlugin`.
 
 ### Introspection
 
@@ -276,8 +278,7 @@ and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, PP
 DMA, cartridge with MBC1/MBC5) with system cosim.
 
 Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mooneye's CPU,
-interrupt, timer, serial and OAM DMA acceptance tests, most of Mooneye's PPU tests, and
+interrupt, timer, serial and OAM DMA acceptance tests, all of Mooneye's PPU tests, and
 dmg-acid2 pixel for pixel (see *Hardware test ROMs*).
 
-Next: the PPU's VRAM/OAM locking and LCD-on timing (the last four Mooneye PPU tests), the APU,
-DMA bus conflicts, STOP, and the 2A03 (see the guide).
+Next: the APU, MBC2, DMA bus conflicts, STOP, and the 2A03 (see the guide).

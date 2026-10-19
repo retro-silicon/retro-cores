@@ -261,7 +261,7 @@ class PostBootPlugin extends FiberPlugin {
   * `cartridge` is given, in which case a `CartridgePlugin` answers there. */
 object GameBoy {
   def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None): Seq[Hostable] = Sm83.plugins(withTrace) ++ Seq(
-    new RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000),
+    new RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000, lockable = true), // locked by the PPU
     new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000), // E000-FDFF echoes C000-DDFF
     new OamDmaPlugin,
     new RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F),

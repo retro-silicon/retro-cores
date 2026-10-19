@@ -24,12 +24,13 @@ package retro.gb
   *    request comes ceil(L / 4) M-cycles after M-cycle 20 (hblank_ly_scx_timing);
   *  - LY reads the next line in the last M-cycle of a line;
   *  - the LY = LYC flag is only updated while the LCD is on, and stays on the STAT interrupt line
-  *    while it is off (stat_lyc_onoff);
+  *    while it is off (stat_lyc_onoff); it drops in a line's last M-cycle;
   *  - the first line after the LCD is turned on has no mode 2: it reads as mode 0 until the
-  *    transfer.
+  *    transfer, and OAM is not locked (lcdon_timing);
+  *  - entering VBlank also raises a mode 2 STAT interrupt (vblank_stat_intr);
+  *  - VRAM and OAM are locked against the CPU as `vramReadLocked` and the others describe.
   *
-  * Not modelled: the PPU locking VRAM and OAM against the CPU, the shorter first line after the
-  * LCD is turned on, LY reading 0 early in line 153, and register writes landing mid-dot. */
+  * Not modelled: LY reading 0 early in line 153, and register writes landing mid-dot. */
 class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   var lcdc = if (postBoot) Gb.PostBoot.lcdc else 0
   var statSelect, scy, scx, lyc, bgp, obp0, obp1, wy, wx = 0
@@ -70,6 +71,15 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   var onFrame: Array[Int] => Unit = _ => ()
 
   def on = (lcdc & 0x80) != 0
+
+  /** The CPU's accesses the PPU blocks after this M-cycle's tick: VRAM reads in mode 3 and the
+    * last M-cycle of the OAM scan, VRAM writes in mode 3; OAM reads in modes 2 and 3 and from the
+    * last M-cycle of the line before, OAM writes in modes 2 and 3 except the last M-cycle of the
+    * OAM scan (Mooneye lcdon_timing and lcdon_write_timing). */
+  def vramReadLocked = mode == 3 || mode == 2 && x == Gb.oamEnd - 1
+  def vramWriteLocked = mode == 3
+  def oamReadLocked = mode >= 2 || on && x == Gb.lineCycles - 1 && (ly < Gb.visibleLines - 1 || ly == Gb.frameLines - 1)
+  def oamWriteLocked = mode == 3 || mode == 2 && x != Gb.oamEnd - 1
 
   def read(a: Int): Int = a match {
     case Gb.LCDC => lcdc
@@ -135,8 +145,11 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
         }
       }
     }
-    if (on) coincidence = ly == lyc
-    val line = ((statSelect & 8) != 0 && coincidence) || on && (((statSelect & 4) != 0 && irqMode == 2) ||
+    // The LY = LYC flag drops in the line's last M-cycle, where LY already reads the next line.
+    if (on) coincidence = ly == lyc && x != Gb.lineCycles - 1
+    // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
+    val vblankMode2 = ly == Gb.visibleLines && x == 0
+    val line = ((statSelect & 8) != 0 && coincidence) || on && (((statSelect & 4) != 0 && (irqMode == 2 || vblankMode2)) ||
       ((statSelect & 2) != 0 && irqMode == 1) || ((statSelect & 1) != 0 && irqMode == 0))
     val stat = line && !statLine
     statLine = line

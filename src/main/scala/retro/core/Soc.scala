@@ -33,8 +33,13 @@ trait DirectRead {
   * must be aligned to that and may cover mirrors (Game Boy echo RAM). Reads are combinational,
   * as the M-cycle bus expects; contents start at zero.
   *
-  * @param ramName used for the memory's signal name, so sims can find it */
-class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0) extends FiberPlugin with DirectRead {
+  * @param ramName  used for the memory's signal name, so sims can find it
+  * @param lockable another plugin (the Game Boy PPU) loads `readLock` and `writeLock`: while
+  *                 they are high the bus reads FF and writes are lost. `directRead` ports are
+  *                 not affected. */
+class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0,
+                val lockable: Boolean = false) extends FiberPlugin with DirectRead {
+  val readLock, writeLock = Handle[Bool]()
   def directMappings = Seq(mapping)
   def directRead(address: UInt): UInt = logic.mem.readAsync(address(logic.width - 1 downto 0))
 
@@ -51,7 +56,17 @@ class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int,
     mem.simPublic()
     val index = slave.cmd.address(width - 1 downto 0)
     slave.rdata := mem.readAsync(index)
-    mem.write(index, slave.cmd.data, slave.writeFire)
+    val writeEnable = Bool()
+    writeEnable := slave.writeFire
+    mem.write(index, slave.cmd.data, writeEnable)
+  }
+
+  /** Apart from `logic`, so the plugin that loads the locks can use `directRead` first. */
+  val locking = during build new Area {
+    if (lockable) {
+      when(readLock.get) { logic.slave.rdata.setAll() }
+      when(writeLock.get) { logic.writeEnable := False }
+    }
   }
 }
 
