@@ -37,6 +37,8 @@ object Gb {
   /** M-cycles per scanline, visible lines, lines per frame; the M-cycle the OAM scan ends. */
   val lineCycles = 114; val visibleLines = 144; val frameLines = 154
   val oamEnd = 20
+  /** OAM: 40 objects of 4 bytes, FE00-FE9F. */
+  val oamBytes = 160
   /** The timer counter bit whose falling edges clock the serial port (8192 Hz). */
   val serialClockBit = 8
 

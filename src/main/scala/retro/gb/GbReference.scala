@@ -18,8 +18,10 @@ import scala.collection.mutable.ArrayBuffer
   *                    DMA sources outside VRAM and WRAM read FF, as with the external bus */
 class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDma: Boolean = false) extends Sm83Bus {
   /** IE & IF after each M-cycle's tick, for the CPU's interrupt decisions. */
-  private val requestLog = ArrayBuffer[Int]()
-  val cpu = new Sm83Reference(this, k => requestLog(k.toInt), i => iflag &= ~(1 << i))
+  // The CPU only looks a few M-cycles back, so a ring keeps long runs in bounded memory.
+  private val requestLog = Array.fill(64)(0)
+  private var cycles = 0L
+  val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => iflag &= ~(1 << i))
 
   val vram, wram = Array.fill(0x2000)(0)
   val oam = Array.fill(0x100)(0)
@@ -75,12 +77,34 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     case _ => external(a)
   }
 
+  private var iduAddress = -1
+  override def idu(address: Int): Unit = iduAddress = address & 0xFFFF
+
+  /** The DMG OAM corruption bug (Pan Docs, "OAM Corruption Bug"): an address in FE00-FEFF on the
+    * address bus while the PPU scans OAM rewrites the row the scan reads, from the row before it.
+    * 16-bit words of 8-byte rows: `w(r, i)` is word `i` of row `r`. */
+  private def oamBug(row: Int, read: Boolean, increase: Boolean): Unit = {
+    def w(r: Int, i: Int) = oam(8 * r + 2 * i) | oam(8 * r + 2 * i + 1) << 8
+    def setW(r: Int, i: Int, v: Int) = { oam(8 * r + 2 * i) = v & 0xFF; oam(8 * r + 2 * i + 1) = (v >> 8) & 0xFF }
+    def copyRow(from: Int, to: Int) = for (i <- 0 until 8) oam(8 * to + i) = oam(8 * from + i)
+    def copyTail(from: Int, to: Int) = for (i <- 2 until 8) oam(8 * to + i) = oam(8 * from + i)
+    if (row == 0) return
+    if (read && increase && row >= 4 && row < 19) {
+      val (a, b, c, d) = (w(row - 2, 0), w(row - 1, 0), w(row, 0), w(row - 1, 2))
+      setW(row - 1, 0, (b & (a | c | d)) | (a & c & d))
+      copyRow(row - 1, row - 2); copyRow(row - 1, row)
+    }
+    val (a, b, c) = (w(row, 0), w(row - 1, 0), w(row - 1, 2))
+    setW(row, 0, if (read) b | (a & c) else ((a ^ c) & (b ^ c)) ^ c)
+    copyTail(row - 1, row)
+  }
+
   def read(address: Int): Int = cycle(None, address)
   def write(address: Int, value: Int): Unit = cycle(Some(value), address)
   override def idle(): Unit = cycle(None, -1)
 
   private def cycle(wdata: Option[Int], a: Int): Int = {
-    buttons = buttonsAt(requestLog.size)
+    buttons = buttonsAt(cycles)
     def writes(addr: Int) = wdata.isDefined && a == addr
     val d = wdata.getOrElse(0)
 
@@ -122,7 +146,13 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     joypadPrevious = lines
 
     // ---- Access ----------------------------------------------------------------------------
-    requestLog += ie & iflag & 0x1F
+    requestLog((cycles & 63).toInt) = ie & iflag & 0x1F
+    cycles += 1
+    val idu = iduAddress
+    iduAddress = -1
+    val bugAddress = if (a >= 0) a else idu
+    if (bugAddress >= 0xFE00 && bugAddress < 0xFF00 && ppu.oamBugRow >= 0 && !dmaCopying)
+      oamBug(ppu.oamBugRow, read = a >= 0 && wdata.isEmpty, increase = idu >= 0)
     val v = if (a >= 0) peek(a) else 0
     for (_ <- wdata) {
       val (counterTicked, tacTicked) = (counter, tac)

@@ -311,6 +311,8 @@ class PpuPlugin(resetLcdc: Int = 0) extends GbPeripheral(SizeMapping(Gb.LCDC, 0x
     dma.readLock.load(mode >= 2 || on && xTicked === Gb.lineCycles - 1 &&
       (lyTicked < Gb.visibleLines - 1 || lyTicked === Gb.frameLines - 1))
     dma.writeLock.load(mode === 3 || mode === 2 && !lastOfScan)
+    // The OAM row the scan reads, for the OAM corruption bug; see `PpuReference.oamBugRow`.
+    dma.scanRow.load((mode === 2 && xTicked < Gb.oamEnd - 1) ? (xTicked + 1).resize(5) | U(0, 5 bits))
 
     regs.read(coincidenceTicked, Gb.STAT, 2)
     regs.read(mode, Gb.STAT, 0)

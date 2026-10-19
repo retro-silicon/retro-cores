@@ -17,12 +17,19 @@ import spinal.lib.misc.plugin._
   * The PPU loads `readLock` and `writeLock`, which block the CPU's OAM accesses in the modes the
   * PPU uses OAM.
   *
-  * Not modelled: bus conflicts (on the DMG a CPU access to the bus the DMA is reading returns the
+  * The DMG OAM corruption bug (`GbReference.oamBug`, after Pan Docs): an address in FE00-FEFF on
+  * the CPU's address bus, or stepped by its IDU, while the PPU scans OAM rewrites the row the scan
+  * reads (`scanRow`, loaded by the PPU) from the rows before it.
+  *
+  * Not modelled: the OAM bug while a DMA copies (no corruption then), bus conflicts (on the DMG a CPU access to the bus the DMA is reading returns the
   * DMA's byte). */
 class OamDmaPlugin extends FiberPlugin {
   val readLock, writeLock = Handle[Bool]()
+  /** The 8-byte OAM row the PPU's scan reads this M-cycle, 0 when it reads none (row 0 is never
+    * corrupted). */
+  val scanRow = Handle[UInt]()
   /** A combinational read port into OAM for the PPU, which has its own path to it. */
-  def oamRead(index: UInt): UInt = logic.oam.readAsync(index)
+  def oamRead(index: UInt): UInt = logic.oam(index)
 
   val logic = during setup new Area {
     val bus = host[BusService]
@@ -33,8 +40,8 @@ class OamDmaPlugin extends FiberPlugin {
     retainer.release()
     val sources = host.list[DirectRead]
 
-    val oam = Mem.fill(256)(UInt(8 bits)).setName("ram_oam").simPublic()
-    oam.init(Seq.fill(256)(U(0, 8 bits)))
+    // Registers rather than a RAM: the OAM bug rewrites up to three rows in one M-cycle.
+    val oam = Vec.fill(Gb.oamBytes)(Reg(UInt(8 bits)) init 0)
     val register = Reg(UInt(8 bits)).init(0xFF).simPublic()
     val startIn = Reg(UInt(2 bits)) init 0
     val active = RegInit(False).simPublic()
@@ -55,10 +62,10 @@ class OamDmaPlugin extends FiberPlugin {
 
     new RetroBusSlaveFactory(dmaSlave).readAndWrite(register, Gb.DMA)
     val oamIndex = oamSlave.cmd.address(7 downto 0)
-    oamSlave.rdata := copying ? U(0xFF, 8 bits) | oam.readAsync(oamIndex)
+    oamSlave.rdata := copying ? U(0xFF, 8 bits) | oam(oamIndex)
     val cpuWrite = Bool()
     cpuWrite := oamSlave.writeFire
-    oam.write(copying ? at | oamIndex, copying ? data | oamSlave.cmd.data, copying || cpuWrite)
+    when(copying || cpuWrite) { oam(copying ? at | oamIndex) := (copying ? data | oamSlave.cmd.data) }
 
     when(startIn =/= 0) { startIn := startIn - 1 }
     when(copying) {
@@ -73,5 +80,38 @@ class OamDmaPlugin extends FiberPlugin {
   val locking = during build new Area {
     when(readLock.get) { logic.oamSlave.rdata := 0xFF }
     when(writeLock.get) { logic.cpuWrite := False }
+  }
+
+  val bug = during build new Area {
+    val cmd = host[BusPlugin].logic.cmd
+    val isa = host[retro.sm83.Sm83.IsaPlugin]
+    val oam = logic.oam
+    val row = scanRow.get
+    val address = cmd.valid ? cmd.address | isa.iduAddress.get
+    val hit = (cmd.valid || isa.iduActive.get) && address(15 downto 8) === 0xFE && row =/= 0 && !logic.copying
+    val read = cmd.valid && !cmd.write
+    val increase = isa.iduActive.get
+
+    def w(r: Int, i: Int) = oam(8 * r + 2 * i + 1) @@ oam(8 * r + 2 * i)
+    def setRow(r: Int, w0: UInt, from: Int) = {
+      oam(8 * r) := w0(7 downto 0); oam(8 * r + 1) := w0(15 downto 8)
+      if (from != r) for (i <- 2 until 8) oam(8 * r + i) := oam(8 * from + i)
+    }
+    when(hit) {
+      switch(row) {
+        for (r <- 1 until Gb.oamBytes / 8) is(r) {
+          val (a, b, c) = (w(r, 0), w(r - 1, 0), w(r - 1, 2))
+          // Read during an increase (rows 4 to 18): the row before is rewritten and copied to
+          // two rows around it; the read corruption that follows leaves the rows as they are.
+          if (r >= 4 && r < 19) when(read && increase) {
+            val n = (b & (w(r - 2, 0) | c | a)) | (w(r - 2, 0) & a & c)
+            for (t <- Seq(r - 2, r - 1, r)) setRow(t, n, r - 1)
+          } otherwise {
+            setRow(r, read ? (b | (a & c)) | (((a ^ c) & (b ^ c)) ^ c), r - 1)
+          }
+          else setRow(r, read ? (b | (a & c)) | (((a ^ c) & (b ^ c)) ^ c), r - 1)
+        }
+      }
+    }
   }
 }

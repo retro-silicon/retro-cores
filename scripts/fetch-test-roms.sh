@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 mkdir -p roms
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-for t in cpu_instrs instr_timing mem_timing mem_timing-2 halt_bug; do
+for t in cpu_instrs instr_timing mem_timing mem_timing-2 halt_bug oam_bug; do
   curl -fsSL -o "$tmp/$t.zip" "https://gbdev.gg8.se/files/roms/blargg-gb-tests/$t.zip"
   mkdir -p "roms/blargg/$t" && unzip -qo "$tmp/$t.zip" -d "roms/blargg/$t"
 done

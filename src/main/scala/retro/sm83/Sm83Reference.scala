@@ -9,6 +9,10 @@ trait Sm83Bus {
   def read(address: Int): Int
   def write(address: Int, value: Int): Unit
   def idle(): Unit = {}
+  /** Called just before the read, write or idle of an M-cycle in which the IDU (the 16-bit
+    * incrementer on the address side) increments or decrements `address`, in the same M-cycles as
+    * the RTL microcode. The DMG OAM corruption bug depends on it. */
+  def idu(address: Int): Unit = {}
 }
 
 object Sm83Bus {
@@ -39,7 +43,7 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
 
   private def read(addr: Int) = { cycle += 1; val v = bus.read(addr & 0xFFFF); log += BusAccess(false, addr & 0xFFFF, v); v }
   private def write(addr: Int, v: Int) = { cycle += 1; bus.write(addr & 0xFFFF, v & 0xFF); log += BusAccess(true, addr & 0xFFFF, v & 0xFF) }
-  private def imm() = { val v = read(pc); pc = (pc + 1) & 0xFFFF; v }
+  private def imm() = { bus.idu(pc); val v = read(pc); pc = (pc + 1) & 0xFFFF; v }
   private def idle() = { cycle += 1; bus.idle() }
 
   private def hl = h << 8 | l
@@ -67,8 +71,16 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
   }
   private def cond(i: Int) = i match { case 0 => zf == 0; case 1 => zf == 1; case 2 => cf == 0; case 3 => cf == 1 }
 
-  private def push16(v: Int) = { idle(); sp = (sp - 1) & 0xFFFF; write(sp, v >> 8); sp = (sp - 1) & 0xFFFF; write(sp, v & 0xFF) }
-  private def pop16() = { val lo = read(sp); sp = (sp + 1) & 0xFFFF; val hi = read(sp); sp = (sp + 1) & 0xFFFF; hi << 8 | lo }
+  private def push16(v: Int) = {
+    bus.idu(sp); idle(); sp = (sp - 1) & 0xFFFF
+    bus.idu(sp); write(sp, v >> 8); sp = (sp - 1) & 0xFFFF
+    write(sp, v & 0xFF)
+  }
+  private def pop16() = {
+    bus.idu(sp); val lo = read(sp); sp = (sp + 1) & 0xFFFF
+    bus.idu(sp); val hi = read(sp); sp = (sp + 1) & 0xFFFF
+    hi << 8 | lo
+  }
 
   private def alu(op: Int, v: Int): Unit = {
     val carry = if (op == 1 || op == 3) cf else 0
@@ -111,6 +123,7 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
     * halted, PC unchanged, while nothing is pending. */
   private def fetch(imeOp: Int = NONE, increment: Boolean = true, halt: Boolean = false): Unit = {
     val k = cycle
+    if (increment && !halt) bus.idu(pc)
     val opcode = read(pc)
     val reqs = requests(k)
     if (increment && !(halt && reqs == 0)) pc = (pc + 1) & 0xFFFF
@@ -133,8 +146,8 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
     var halt = false
     ir match {
       case Sm83.DISPATCH =>
-        idle(); pc = (pc - 1) & 0xFFFF
-        idle(); sp = (sp - 1) & 0xFFFF; write(sp, pc >> 8); sp = (sp - 1) & 0xFFFF
+        bus.idu(pc); idle(); pc = (pc - 1) & 0xFFFF
+        bus.idu(sp); idle(); sp = (sp - 1) & 0xFFFF; bus.idu(sp); write(sp, pc >> 8); sp = (sp - 1) & 0xFFFF
         val k = cycle
         write(sp, pc & 0xFF)
         // The push of the high byte may have changed IE: the vector is chosen now.
@@ -148,8 +161,8 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
       case o if (o & 0xC0) == 0x40 => setR((o >> 3) & 7, getR(o & 7))
       case o if (o & 0xC7) == 0x06 => setR((o >> 3) & 7, imm())
       case o if (o & 0xCF) == 0x01 => val lo = imm(); val hi = imm(); setRR(o >> 4, hi << 8 | lo)
-      case o if (o & 0xCF) == 0x03 => idle(); setRR(o >> 4, getRR(o >> 4) + 1)
-      case o if (o & 0xCF) == 0x0B => idle(); setRR(o >> 4, getRR(o >> 4) - 1)
+      case o if (o & 0xCF) == 0x03 => bus.idu(getRR(o >> 4)); idle(); setRR(o >> 4, getRR(o >> 4) + 1)
+      case o if (o & 0xCF) == 0x0B => bus.idu(getRR(o >> 4)); idle(); setRR(o >> 4, getRR(o >> 4) - 1)
       case o if (o & 0xCF) == 0x09 =>
         idle(); val v = getRR(o >> 4)
         flags(zf == 1, false, (hl & 0xFFF) + (v & 0xFFF) > 0xFFF, hl + v > 0xFFFF); setHl(hl + v)
@@ -157,17 +170,17 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
       case 0x12 => write(getRR(1), a)
       case 0x0A => a = read(getRR(0))
       case 0x1A => a = read(getRR(1))
-      case 0x22 => write(hl, a); setHl(hl + 1)
-      case 0x32 => write(hl, a); setHl(hl - 1)
-      case 0x2A => a = read(hl); setHl(hl + 1)
-      case 0x3A => a = read(hl); setHl(hl - 1)
+      case 0x22 => bus.idu(hl); write(hl, a); setHl(hl + 1)
+      case 0x32 => bus.idu(hl); write(hl, a); setHl(hl - 1)
+      case 0x2A => bus.idu(hl); a = read(hl); setHl(hl + 1)
+      case 0x3A => bus.idu(hl); a = read(hl); setHl(hl - 1)
       case 0xE0 => val n = imm(); write(0xFF00 | n, a)
       case 0xF0 => val n = imm(); a = read(0xFF00 | n)
       case 0xE2 => write(0xFF00 | c, a)
       case 0xF2 => a = read(0xFF00 | c)
       case 0xEA => val lo = imm(); val hi = imm(); write(hi << 8 | lo, a)
       case 0xFA => val lo = imm(); val hi = imm(); a = read(hi << 8 | lo)
-      case 0x08 => val lo = imm(); val hi = imm(); val nn = hi << 8 | lo; write(nn, sp & 0xFF); write(nn + 1, sp >> 8)
+      case 0x08 => val lo = imm(); val hi = imm(); val nn = hi << 8 | lo; bus.idu(nn); write(nn, sp & 0xFF); write(nn + 1, sp >> 8)
       case 0xF9 => idle(); sp = hl
       case 0xE8 => sp = addSpE(); idle(); idle()
       case 0xF8 => setHl(addSpE()); idle()

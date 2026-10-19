@@ -121,13 +121,17 @@ object GbRomReport extends App {
 }
 
 /** Every ROM `GbRomRunner` finds, as a test. ROMs for other models or for hardware not built
-  * yet are registered as ignored, with the reason in the name. The combined Blargg ROMs are left
-  * to `GbRomReport`: their individual parts run here, in a fraction of the time. */
+  * yet are registered as ignored, with the reason in the name. The combined `cpu_instrs` and
+  * `mem_timing` ROMs are left to `GbRomReport`: their individual parts run here, in a fraction
+  * of the time. */
 class GameBoyRomSim extends AnyFunSuite {
   import GbRomRunner._
 
   def skipReason(name: String): Option[String] = name match {
     case n if n.endsWith("cpu_instrs/cpu_instrs") || n.endsWith("mem_timing/mem_timing") => Some("combined ROM")
+    // Alone it prints every corrupted OAM dump and its text log grows slower to append to, far
+    // past the budget; part 7 of the combined oam_bug ROM checks the same CRC, so that one runs.
+    case n if n.endsWith("7-timing_effect") => Some("slow alone; checked as part 7 of the combined ROM")
     case n if Seq("-S", "-dmg0", "-mgb", "-sgb", "-sgb2").exists(n.endsWith) => Some("another Game Boy model")
     case n if n.contains("boot_hwio") => Some("needs the APU registers")
     case n if n.contains("/mbc2/") => Some("MBC2 not modelled")

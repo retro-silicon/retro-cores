@@ -80,6 +80,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   def vramWriteLocked = mode == 3
   def oamReadLocked = mode >= 2 || on && x == Gb.lineCycles - 1 && (ly < Gb.visibleLines - 1 || ly == Gb.frameLines - 1)
   def oamWriteLocked = mode == 3 || mode == 2 && x != Gb.oamEnd - 1
+  /** The OAM row (8 bytes) the scan reads this M-cycle, for the OAM corruption bug, or -1. */
+  def oamBugRow = if (mode == 2 && x < Gb.oamEnd - 1) x + 1 else -1
 
   def read(a: Int): Int = a match {
     case Gb.LCDC => lcdc

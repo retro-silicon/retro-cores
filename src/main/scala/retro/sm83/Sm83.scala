@@ -2,6 +2,7 @@ package retro.sm83
 
 import retro.core._
 import spinal.core._
+import spinal.core.fiber._
 import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.misc.plugin._
@@ -42,6 +43,13 @@ object Idu {
   val pairs: Seq[Storage] = Seq(BC, DE, HL, SP, WZ, PC)
   val inc: Map[Storage, Value] = pairs.map(p => p -> Value(s"$p+1")).toMap
   val dec: Map[Storage, Value] = pairs.map(p => p -> Value(s"$p-1")).toMap
+  /** The pair the IDU steps in an M-cycle: 0 for none, else 1 + its index in `pairs`. Derived
+    * from the M-cycle's assigns by `mark`; the DMG OAM corruption bug depends on it. */
+  val PAIR = CtrlKey("IDU_PAIR", 3)
+  def mark(c: MCycleSpec): MCycleSpec = {
+    val stepped = pairs.indexWhere(p => c.assigns.exists { case (_, s) => s == inc(p) || s == dec(p) })
+    if (stepped < 0 || c.keys.exists(_._1 == PAIR)) c else c.set(PAIR, stepped + 1)
+  }
 }
 
 /** The 8-bit ALU and the 16-bit adds. */
@@ -292,6 +300,10 @@ object Sm83 {
 
   /** The opcode table, plus the IDU and the small values in `Isa`. */
   class IsaPlugin extends FiberPlugin {
+    /** Whether the IDU steps a pair in this M-cycle, and the pair's value (its input address). */
+    val iduActive = Handle[Bool]()
+    val iduAddress = Handle[UInt]()
+
     val logic = during setup new Area {
       val seq = host[SequencerService]
       val rf = host[RegFileService]
@@ -311,14 +323,18 @@ object Sm83 {
       seq.addSource(Isa.Z_F0, z & 0xF0)
       seq.addSource(Isa.HIGH_Z, U(0xFF, 8 bits) @@ z)
       seq.addSource(Isa.HIGH_C, U(0xFF, 8 bits) @@ rf.read(C))
-      opcodes.foreach(seq.addOp)
+      seq.addKey(Idu.PAIR)
+      opcodes.map(o => o.copy(cycles = o.cycles.map(Idu.mark))).foreach(seq.addOp)
+      val pair = seq.ctrl(Idu.PAIR)
+      iduActive.load(pair =/= 0 && seq.cycleDone)
+      iduAddress.load(pair.muxListDc(Idu.pairs.zipWithIndex.map { case (p, i) => (i + 1) -> rf.read(p) }))
       retainer.release()
     }
   }
 
   import MCycleSpec.{idle, read, write}
   import SequencerPlugin.RDATA
-  val fetch = MCycleSpec.fetch(PC).assign(PC -> Idu.inc(PC))
+  val fetch = Idu.mark(MCycleSpec.fetch(PC).assign(PC -> Idu.inc(PC)))
   val imm = read(PC).assign(PC -> Idu.inc(PC))
   /** What unused opcodes do: fetch the next one, as a NOP. */
   val illegal = fetch

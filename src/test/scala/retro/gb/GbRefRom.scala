@@ -9,6 +9,7 @@ import java.nio.file.Files
   * {{{ sbt "Test/runMain retro.gb.GbRefRom timer/ halt_ime" }}}
   * prints PASS / FAIL / timeout for each ROM whose name contains an argument. */
 object GbRefRom extends App {
+  val budget = sys.env.getOrElse("STEPS", "30000000").toLong
   for ((name, file, _) <- GbRomRunner.roms if args.exists(name.contains)) {
     val image = Files.readAllBytes(file.toPath).map(_ & 0xFF)
     val cart = Array.fill(0x10000)(0xFF)
@@ -18,7 +19,7 @@ object GbRefRom extends App {
     var verdict = "timeout"
     var steps = 0L
     var last: (Seq[Int], Int) = null
-    while (verdict == "timeout" && steps < 30000000L) {
+    while (verdict == "timeout" && steps < budget) {
       gb.cpu.step()
       steps += 1
       if (steps % 1000 == 0) {
@@ -33,6 +34,9 @@ object GbRefRom extends App {
         last = now
       }
     }
-    println(f"$verdict%-8s $name")
+    println(f"$verdict%-8s $name" + (if (verdict == "timeout") f" (PC ${gb.cpu.pc}%04X, LCDC ${gb.ppu.lcdc}%02X, LY ${gb.ppu.ly})" else ""))
+    // Blargg's text output, for the failing subtest's number and printout.
+    if (verdict != "PASS" && cart(0xA001) == 0xDE)
+      println(Iterator.from(0xA004).map(cart).takeWhile(_ != 0).map(_.toChar).mkString.linesIterator.map("    " + _).mkString("\n"))
   }
 }
