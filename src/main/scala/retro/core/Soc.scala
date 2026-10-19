@@ -36,9 +36,11 @@ trait DirectRead {
   * @param ramName  used for the memory's signal name, so sims can find it
   * @param lockable another plugin (the Game Boy PPU) loads `readLock` and `writeLock`: while
   *                 they are high the bus reads FF and writes are lost. `directRead` ports are
-  *                 not affected. */
+  *                 not affected.
+  * @param midCycleRead read the bus port on the falling edge (`MidCycleRead`), so FPGA block RAM
+  *                 holds it; `directRead` ports stay combinational. */
 class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0,
-                val lockable: Boolean = false) extends FiberPlugin with DirectRead {
+                val lockable: Boolean = false, val midCycleRead: Boolean = false) extends FiberPlugin with DirectRead {
   val readLock, writeLock = Handle[Bool]()
   def directMappings = Seq(mapping)
   def directRead(address: UInt): UInt = logic.mem.readAsync(address(logic.width - 1 downto 0))
@@ -55,7 +57,7 @@ class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int,
     mem.init(Seq.fill(1 << width)(U(0, bus.busConfig.dataWidth bits)))
     mem.simPublic()
     val index = slave.cmd.address(width - 1 downto 0)
-    slave.rdata := mem.readAsync(index)
+    slave.rdata := (if (midCycleRead) MidCycleRead(mem, index) else mem.readAsync(index))
     val writeEnable = Bool()
     writeEnable := slave.writeFire
     mem.write(index, slave.cmd.data, writeEnable)

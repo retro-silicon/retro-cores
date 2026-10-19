@@ -27,7 +27,7 @@ object Nes {
     Ricoh2A03.plugins(withTrace, external = false, romDecoder = romDecoder) ++ Seq(
     new NesInterruptsPlugin,
     new NesOpenBusPlugin,
-    new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800), // 0800-1FFF mirror it
+    new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800, midCycleRead = true), // 0800-1FFF mirror it
     new NesPpuPlugin,
     new NesApuPlugin,
     new NesCartridgePlugin(cart))
@@ -475,10 +475,10 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
       } else if (banks == 1) pa(13 downto 0)
       else if (isPow2(banks)) prgBank16.resize(log2Up(banks)) @@ pa(13 downto 0)
       else Vec((0 until 16).map(b => U(b % banks, log2Up(banks) bits)))(prgBank16) @@ pa(13 downto 0)
-    prgSlave.rdata := prg.readAsync(prgIndex)
+    prgSlave.rdata := MidCycleRead(prg, prgIndex)
     val prgRam = Mem.fill(0x2000)(UInt(8 bits)).setName("cart_prg_ram").simPublic()
     prgRam.init(Seq.fill(0x2000)(U(0, 8 bits)))
-    ramSlave.rdata := prgRam.readAsync(ramSlave.cmd.address(12 downto 0))
+    ramSlave.rdata := MidCycleRead(prgRam, ramSlave.cmd.address(12 downto 0))
     prgRam.write(ramSlave.cmd.address(12 downto 0), ramSlave.cmd.data, ramSlave.writeFire)
 
     val chr = Mem.fill(spec.chrBytes)(UInt(8 bits)).setName("cart_chr").simPublic()

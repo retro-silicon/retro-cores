@@ -155,12 +155,13 @@ registers, every frame pixel for pixel, and the APU's mixed output in every cycl
 ROM reports its result. All 144 ROMs run to their result with no difference from the model, so
 the RTL passes the same 138.
 
-On an ECP5-85F (Yosys, nextpnr) the NES with an NROM cartridge uses 41% of the logic cells
-(34.9k; Yosys maps 19.8k LUT4s), 1.3k flip-flops, 2.2k LUT RAM blocks and 2 multipliers, with
-no latches, and closes at 22 MHz against the 1.79 MHz it needs (one clock per CPU cycle). Every memory is read combinationally,
-three PPU dots per clock, so none maps to block RAM; the empty PRG and CHR ROMs are optimized
-away, and a real build would put them in block RAM or external memory. It does not fit a
-25F.
+On an ECP5-85F (Yosys, nextpnr) the NES with an NROM cartridge uses 26% of the logic cells
+(22.0k; Yosys maps 14.6k LUT4s), 1.3k flip-flops, 0.9k LUT RAM blocks, 5 block RAMs and 2
+multipliers, with no latches, and closes at 25 MHz against the 1.79 MHz it needs (one clock per
+CPU cycle). The CPU's RAM, PRG ROM and PRG RAM are read on the falling clock edge
+(`MidCycleRead`), which block RAM can do (the empty PRG ROM is optimized away here; a real build
+gives it block RAM or external memory). The PPU's memories (CIRAM, OAM, CHR) are still read
+combinationally, three dots per clock, so they stay in LUT RAM, one copy per read port.
 
 Simulation speed (`NesSpeed`): the cosim runs about 10 frames per second per core, the RTL alone
 22 and the model 87, so the whole report takes about 18 minutes on four cores (it was 2 frames
