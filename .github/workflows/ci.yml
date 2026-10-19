@@ -25,7 +25,7 @@ jobs:
         run: sbt -batch test
 
       - name: Generate Verilog
-        run: sbt -batch "runMain retro.demo.DemoVerilog" "runMain retro.sm83.Sm83Verilog"
+        run: sbt -batch "runMain retro.demo.DemoVerilog" "runMain retro.sm83.Sm83Verilog" "runMain retro.gb.GameBoyVerilog"
 
       - uses: actions/upload-artifact@v4
         if: always()

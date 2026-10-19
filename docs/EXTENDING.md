@@ -1,18 +1,20 @@
 # Extending retro-cores
 
-This guide shows how to add an instruction, a plugin, or a whole new CPU. The SM83 in
-`src/main/scala/retro/sm83/Sm83.scala` is the worked example throughout.
+This guide shows how to add an instruction, a plugin, a whole new CPU, a peripheral or a
+console. The SM83 in `src/main/scala/retro/sm83/Sm83.scala` and the Game Boy in
+`src/main/scala/retro/gb/GameBoy.scala` are the worked examples.
 
 ## The services
 
 | Service | Plugin | What you get from it |
 |---|---|---|
-| `BusService` | `BusPlugin` | `newMaster(priority)`: a port onto the single external bus |
-| `RegFileService` | `RegFilePlugin(spec)` | `read`, `flag` and `newWrite` on `Register`/`Pair`/`Flag` objects |
+| `BusService` | `BusPlugin` | `newMaster(priority)` and `newSlave(mapping, priority)`: ports onto the bus |
+| `RegFileService` | `RegFilePlugin(spec)` | `read`, `flag`, `newWrite` on `Register`/`Pair`/`Flag` objects; `setReset` |
+| `IrqService` | a console's interrupt controller (`retro.gb.InterruptControllerPlugin`) | `request(line)`: a `Bool` to pulse |
 | `SequencerService` | `SequencerPlugin` | `addOp`, `addSource`, `addSink`, `addCond`, `addKey`/`ctrl`, `addFetchOverride`, `fetchFire` |
 | (whitebox) | `TracePlugin` | `simPublic` taps read by `retro.sim.Probe` |
 
-Each service has a lock (`busLock`, `regFileLock`, `seqLock`). The rule is always the same:
+Each service has a lock (`busLock`, `regFileLock`, `seqLock`, `irqLock`). The rule is always the same:
 **retain the lock in setup, contribute in build, release.** The owner waits for every holder
 before it generates hardware, so plugin order in the list never matters.
 
@@ -145,6 +147,64 @@ model's own choice and have not yet been checked against hardware test ROMs:
   bug).
 - STOP and the unused opcodes run as a 1 M-cycle NOP.
 
+## Adding a peripheral
+
+A peripheral is a plugin like any other. It asks the bus for a slave, declares its registers
+with `RetroBusSlaveFactory` (SpinalHDL's `BusSlaveFactory` API on absolute addresses), and asks
+the interrupt controller for its lines. The Game Boy plugins share this wiring through
+`GbPeripheral`; here is the same thing written out:
+
+```scala
+class DividerPlugin extends FiberPlugin {
+  val logic = during setup new Area {
+    val bus = host[BusService]
+    val irq = host[IrqService]
+    val retainers = Seq(retains(bus.busLock), retains(irq.irqLock))
+    awaitBuild()
+    val slave = bus.newSlave(SingleMapping(0xFF04))      // answers FF04 only
+    val tick = irq.request(Gb.Irq.TIMER)
+    retainers.foreach(_.release())
+
+    val div = Reg(UInt(8 bits)) init 0
+    div := div + 1
+    val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
+    regs.read(div, 0xFF04)
+    regs.onWrite(0xFF04) { div := 0 }                    // factory logic is built last, so it wins
+    tick := div === 0xFF
+  }
+}
+```
+
+- **Timing.** One clock is one M-cycle. A read is answered combinationally in the cycle it is
+  issued; a write lands at the end of it (`slave.writeFire`). The slave may raise `slave.stall`
+  to hold the cycle.
+- **Overlap.** Where mappings overlap the highest priority wins. `OpenBusPlugin` uses priority -1
+  so it only answers what nothing else claims.
+- **Memory.** `RamPlugin(name, mapping, size)` decodes the low `log2Up(size)` address bits, so a
+  wider mapping is a mirror (Game Boy echo RAM).
+- **Pins.** A plugin can create IO from its build phase (`in Bits(8 bits)`); it becomes a pin of
+  the toplevel, like `joypad_buttons` and `serial_tx` on the Game Boy.
+- **CPU interface.** When a CPU-side plugin needs a SoC block, define a trait for it next to the
+  CPU plugin and let the CPU plugin look it up with `host.get`, falling back to pins. That is how
+  `Sm83.InterruptPlugin` finds `Sm83.InterruptController`, so the same CPU plugin list builds a
+  bare core and a console.
+
+## Adding a console
+
+1. Start from the CPU's plugin list (`Sm83.plugins()`).
+2. Add the on-chip memories (`RamPlugin`), unmapped regions (`OpenBusPlugin`), the interrupt
+   controller and the peripherals. Whatever stays unmapped goes to the external bus: for the Game
+   Boy, the cartridge.
+3. Add a reset-state plugin if the console boots into a known state (`PostBootPlugin`).
+4. Write a system reference model: the CPU reference model takes an `Sm83Bus`, so the console
+   model implements `read`, `write` and `idle` (one M-cycle each), answers from its state at the
+   start of the cycle, then applies the write and ticks every peripheral. `GbReference` is the
+   example.
+5. Cosimulate the whole system (`GameBoySim`): every retired instruction must match in M-cycles,
+   bus accesses (so every peripheral register read) and CPU registers. Add known-answer tests
+   for the reference model from the console's documentation (`GbReferenceSpec`), so the cosim is
+   anchored to documented behaviour and not only to RTL/model agreement.
+
 ## Testing conventions
 
 - Framework tests use a toy CPU (`src/test/scala/retro/toy`).
@@ -154,4 +214,7 @@ model's own choice and have not yet been checked against hardware test ROMs:
 - Random code fills memory with implemented opcodes only, so jumps always land on code. It falls
   into loops quickly, so coverage comes from many short runs. Each suite asserts coverage of the
   base opcodes, the CB page and interrupt dispatch.
-- Run with random wait states too. Stalls must never change results, only timing.
+- Run with random wait states too. Stalls must never change results, only timing. (Not for the
+  Game Boy system: its peripherals tick every clock, so a stall changes what they show.)
+- System cosims use random code too, after a prologue that enables every interrupt source, so
+  random writes reach every peripheral register and real peripherals raise the interrupts.

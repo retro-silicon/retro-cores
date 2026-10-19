@@ -114,15 +114,21 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
       require(i >= 0, s"$op: no plugin provides source '$source'")
       i + 1
     }
+    // The bus address and write data cannot come from the bus read data of the same cycle: with
+    // on-chip slaves that would be a combinational loop through the address decoder.
+    def addr(op: String, source: Source): BigInt = {
+      require(source != SequencerPlugin.RDATA, s"$op: the bus address or write data cannot be RDATA")
+      src(op, source)
+    }
     def encode(op: String, c: MCycleSpec): BigInt = {
       var w = BigInt(0)
       def put(f: Field, v: BigInt) = { require(v >= 0 && v < (BigInt(1) << f.width), s"$op: ${f.name}=$v does not fit"); w |= v << f.offset }
       c.bus match {
         case BusOp.Idle =>
-        case BusOp.Read(a) => put(fKind, 1); put(fAddr, src(op, a))
-        case BusOp.Write(a, d) => put(fKind, 2); put(fAddr, src(op, a)); put(fWdata, src(op, d))
-        case BusOp.Fetch(a) => put(fKind, 3); put(fAddr, src(op, a))
-        case BusOp.Prefix(a, page) => put(fKind, 3); put(fAddr, src(op, a)); put(fPrefix, 1); put(fPage, page)
+        case BusOp.Read(a) => put(fKind, 1); put(fAddr, addr(op, a))
+        case BusOp.Write(a, d) => put(fKind, 2); put(fAddr, addr(op, a)); put(fWdata, addr(op, d))
+        case BusOp.Fetch(a) => put(fKind, 3); put(fAddr, addr(op, a))
+        case BusOp.Prefix(a, page) => put(fKind, 3); put(fAddr, addr(op, a)); put(fPrefix, 1); put(fPage, page)
       }
       require(c.assigns.map(_._1).distinct.size == c.assigns.size, s"$op: a sink is assigned twice in one cycle")
       for ((sink, source) <- c.assigns) put(fSinks.getOrElse(sink, sys.error(s"$op: no plugin provides sink '$sink'")), src(op, source))
@@ -154,11 +160,11 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     def slice(f: Field) = word(f.offset, f.width bits).asUInt
 
     // ---- Datapath --------------------------------------------------------------------------
-    def select(sel: UInt, width: Int): UInt = {
+    def select(sel: UInt, width: Int, busSide: Boolean = false): UInt = {
       val r = UInt(width bits)
       r := 0
       switch(sel) {
-        for ((source, i) <- sourceList.zipWithIndex) is(i + 1) { r := sources(source).resized }
+        for ((source, i) <- sourceList.zipWithIndex if !(busSide && source == SequencerPlugin.RDATA)) is(i + 1) { r := sources(source).resized }
         if (sourceList.size + 1 < (1 << selWidth)) default {}
       }
       r
@@ -169,8 +175,8 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     val prefix = kind === 3 && slice(fPrefix).asBool
     master.cmd.valid := kind =/= 0
     master.cmd.write := kind === 2
-    master.cmd.address := select(slice(fAddr), bus.busConfig.addressWidth)
-    master.cmd.data := select(slice(fWdata), bus.busConfig.dataWidth)
+    master.cmd.address := select(slice(fAddr), bus.busConfig.addressWidth, busSide = true)
+    master.cmd.data := select(slice(fWdata), bus.busConfig.dataWidth, busSide = true)
     val done = !master.stall
 
     for ((name, port) <- sinks) {

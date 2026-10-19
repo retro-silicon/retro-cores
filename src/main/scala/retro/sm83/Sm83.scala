@@ -215,8 +215,19 @@ object Sm83 {
     }
   }
 
-  /** IME, EI/DI/RETI and interrupt dispatch. `requests` is IE & IF from the SoC (bit 0 VBlank
-    * ... bit 4 Joypad); `ack` pulses the index being serviced so the SoC can clear its IF bit.
+  /** The SoC side of the interrupt interface, implemented by the plugin holding IE and IF
+    * (`retro.gb.InterruptControllerPlugin`). Both signals must exist from setup on. */
+  trait InterruptController {
+    /** IE & IF, bit 0 VBlank ... bit 4 Joypad. */
+    def cpuRequests: Bits
+    /** Pulses the index being serviced, so the controller clears that IF bit. */
+    def cpuAck: Flow[UInt]
+  }
+
+  /** IME, EI/DI/RETI and interrupt dispatch. `requests` is IE & IF (bit 0 VBlank ... bit 4
+    * Joypad); `ack` pulses the index being serviced so its IF bit can be cleared. When the host
+    * has an `InterruptController` plugin they are wired to it; otherwise they are pins, so the
+    * same plugin serves a bare CPU and a whole console.
     *
     * Interrupts are taken at an instruction-ending fetch: the fetched opcode is discarded and
     * IR loads the dispatch opcode (0x200), which pushes PC and jumps to 0x40 + 8 * index.
@@ -224,13 +235,18 @@ object Sm83 {
   class InterruptPlugin extends FiberPlugin {
     val logic = during setup new Area {
       val seq = host[SequencerService]
+      val controller = host.get[InterruptController]
       val retainer = retains(seq.seqLock)
       awaitBuild()
       seq.addKey(Interrupts.IME_OP)
       val imeOp = seq.ctrl(Interrupts.IME_OP)
 
-      val requests = in Bits (5 bits)
-      val ack = master(Flow(UInt(3 bits)))
+      val requests = Bits(5 bits)
+      val ack = Flow(UInt(3 bits))
+      controller match {
+        case Some(c) => requests := c.cpuRequests; c.cpuAck := ack
+        case None => in(requests); master(ack)
+      }
       val ime = RegInit(False).simPublic()
       val imeNext = RegInit(False)
       val vector = Reg(UInt(3 bits)) init 0

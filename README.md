@@ -8,16 +8,21 @@ the others.
 Status: the framework layer is in place and the SM83 implements the full documented opcode set
 (243 base opcodes plus the 256 CB ops), interrupts, EI/DI/RETI, HALT and the HALT bug. It passes
 cosimulation against a reference model on random code with random interrupts and wait states.
-STOP is not modelled. To add instructions, a CPU or a plugin, see
-[docs/EXTENDING.md](docs/EXTENDING.md).
+STOP is not modelled.
+
+CPUs and SoCs are generated the same way: a Game Boy is the SM83's plugin list plus SoC plugins
+(on-chip RAMs, IF/IE, timer, serial, LCD timing, joypad) in the same host. The whole system passes
+cosimulation against a system reference model. To add instructions, a CPU, a peripheral or a
+console, see [docs/EXTENDING.md](docs/EXTENDING.md).
 
 ## Build and run
 
 Requirements: JDK 17+ (21 tested), sbt 1.10, Verilator 5, a C++ toolchain.
 
 ```sh
-sbt test                               # all Verilator sims: demo, toy CPU, SM83 cosim
-sbt "runMain retro.sm83.Sm83Verilog"   # writes gen/Sm83Core.v
+sbt test                               # all Verilator sims: demo, toy CPU, SM83 and Game Boy cosim
+sbt "runMain retro.sm83.Sm83Verilog"   # writes gen/Sm83Core.v (the bare CPU)
+sbt "runMain retro.gb.GameBoyVerilog"  # writes gen/GameBoy.v (CPU + SoC, cartridge bus external)
 ```
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
@@ -75,7 +80,8 @@ These are the parts VexiiRiscv has no equivalent for:
 
 - **`BusPlugin`**: the single external bus (`RetroBus`: one cmd per M-cycle, `rdata`, and a slave
   `stall` for wait states or RDY). It has fixed-priority masters, so DMA is just a
-  higher-priority master and the CPU stalls on the cycles it loses.
+  higher-priority master and the CPU stalls on the cycles it loses. It also decodes on-chip slaves (see
+  *CPU and SoC in one host*).
 - **`RegFilePlugin(spec)`**: registers, aliased pairs (`HL` = `H ## L`) and flags (`ZF` = `F[7]`)
   described as data. Each one is automatically a source and a sink of the sequencer, and each flag
   gives the branch conditions `isSet` and `isClear`.
@@ -107,6 +113,51 @@ This was decided from the design rather than by building both versions. The opco
 doesn't depend on the choice, so the sequencer can be swapped later without touching the ISA
 plugins.
 
+### CPU and SoC in one host
+
+There is no separate SoC layer. Peripherals are plugins in the same `PluginHost` as the CPU's,
+found by service the same way, so one plugin list generates a bare CPU and another, longer one
+generates a console:
+
+```scala
+val cpu = RetroCore(Sm83.plugins())                     // the SM83 alone, bus and IRQs as pins
+val gb  = RetroCore(Sm83.plugins() ++ Seq(              // the same plugins, plus the SoC
+  new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000),
+  new InterruptControllerPlugin, new TimerPlugin, new SerialPlugin, new LcdTimingPlugin, ...))
+```
+
+What makes that work:
+
+- **The bus is an interconnect.** `BusPlugin` arbitrates masters and also decodes slaves:
+  `newSlave(mapping, priority)` returns a port that sees the accesses that decode to it and
+  answers in the same M-cycle (or stalls it). Addresses no slave claims go to the external
+  `RetroBus` port, so the bare CPU exposes its whole bus and the Game Boy only the cartridge.
+- **Registers are declared with SpinalHDL's `BusSlaveFactory`.** `RetroBusSlaveFactory(slave)`
+  gives a peripheral `read`, `readAndWrite`, `createReadAndWrite`, `onWrite` on absolute
+  addresses, with unused bits reading as 1 where the console does that.
+- **Interrupt lines are a service.** `IrqService.request(Gb.Irq.TIMER)` returns a line to pulse.
+  The Game Boy's `InterruptControllerPlugin` provides it, holds IF and IE, and implements
+  `Sm83.InterruptController`. The CPU's `InterruptPlugin` looks for one: present, it wires to it;
+  absent, `requests` and `ack` become pins.
+- **Reset state is contributed.** `RegFileService.setReset` lets `PostBootPlugin` start the CPU
+  where the DMG boot ROM would leave it (PC=0100, SP=FFFE, AF=01B0...).
+- **Generic blocks live in the core.** `RamPlugin` (on-chip RAM, mirrors by address masking) and
+  `OpenBusPlugin` (a low-priority constant answer for unmapped I/O) serve any console.
+
+| Game Boy plugin | Addresses | What it does |
+|---|---|---|
+| `RamPlugin` ×4 | 8000, C000 (+echo), FE00, FF80 | VRAM, WRAM, OAM, HRAM |
+| `InterruptControllerPlugin` | FF0F, FFFF | IF, IE, `IrqService`, `Sm83.InterruptController` |
+| `TimerPlugin` | FF04-FF07 | DIV/TIMA/TMA/TAC from a 16-bit counter: falling-edge ticks (DIV and TAC write glitches) and the delayed TMA reload |
+| `SerialPlugin` | FF01-FF02 | internally clocked transfers (1024 M-cycles), `serial_tx` pin with each byte sent |
+| `LcdTimingPlugin` | FF40-FF4B | LCDC, STAT, LY, LYC, VBlank and STAT interrupts, fixed mode lengths; no pixels yet |
+| `JoypadPlugin` | FF00 | P1 matrix, `joypad_buttons` pins, joypad interrupt |
+| `OpenBusPlugin` ×2 | FEA0-FEFF, FF00-FFFF | 00 and FF for everything unmapped |
+| `PostBootPlugin` | | post-boot-ROM register state |
+
+The Game Boy runs with no wait states, and the peripherals tick every clock, so a held bus
+cycle would advance the timer; that matches the hardware, which never stalls the CPU.
+
 ### Introspection
 
 `WhiteboxPlugin(payloads*)` taps every stage's `down.isValid` and the listed payloads into named
@@ -133,21 +184,28 @@ reference model, file traces, Konata).
 ## Layout
 
 ```
-src/main/scala/retro/core/   framework: RetroCore, Bus, RegFile, Sequencer, Microcode, Trace,
-                             StagePipelinePlugin, WhiteboxPlugin
+src/main/scala/retro/core/   framework: RetroCore, Bus (masters, slaves, register factory), RegFile,
+                             Sequencer, Microcode, Soc (IrqService, RamPlugin, OpenBusPlugin),
+                             Trace, StagePipelinePlugin, WhiteboxPlugin
 src/main/scala/retro/sim/    Probe and trace backends
 src/main/scala/retro/sm83/   SM83: registers, ALU, shifter, interrupt and ISA plugins, reference model
+src/main/scala/retro/gb/     Game Boy SoC plugins, the GameBoy composition, system reference model
 src/main/scala/retro/demo/   toy pipeline exercising the CtrlLink layer
 src/test/scala/retro/toy/    toy CPU testing sequencer, pairs, flags, branches, stalls, DMA
 src/test/scala/retro/sm83/   SM83 cosimulation (hand-written and random code)
+src/test/scala/retro/gb/     Game Boy system cosimulation, known-answer tests of the reference model
 docs/EXTENDING.md            adding an instruction, a plugin or a CPU
 ```
 
 ## Roadmap
 
-Done: scaffold, framework layer, the SM83 instruction set with interrupts, extension guide.
+Done: scaffold, framework layer, the SM83 instruction set with interrupts, extension guide, CPU
+and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, LCD timing, joypad)
+with system cosim.
 
-Next: an SM83 SoC wrapper (IE/IF registers, timer, OAM DMA as a bus master), STOP, and checking
-HALT-exit and interrupt-dispatch timing against hardware test ROMs. The reference model encodes the
-timings documented in the guide, which have not been validated against real silicon. Then the
-2A03 (see the guide).
+Next: run hardware test ROMs (Blargg `cpu_instrs`/`instr_timing`, Mooneye timer and interrupt
+tests) on the Game Boy composition; they need a cartridge model with MBC1 in the sim and a
+download route for the ROM images, which this environment's network blocks. Then OAM DMA (the
+Game Boy CPU keeps running from HRAM during it, so it is not a plain higher-priority master),
+the PPU, STOP, and the 2A03 (see the guide). The reference models encode timings from the Pan
+Docs that have not been validated against real silicon.

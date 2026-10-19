@@ -42,6 +42,8 @@ trait RegFileService {
   def flag(f: Flag): Bool
   /** A write port onto a register, pair or flag. Ports registered later win within a cycle. */
   def newWrite(s: Storage): Flow[UInt]
+  /** Override a register's reset value (a console's post-boot state). Call it during setup. */
+  def setReset(r: Register, value: BigInt): Unit
 }
 
 /** An 8-bit-style register file described as data: plain registers, aliased pairs and flags.
@@ -51,9 +53,14 @@ trait RegFileService {
 class RegFilePlugin(val spec: RegFileSpec) extends FiberPlugin with RegFileService {
   val regFileLock = Retainer()
   private val writes = ArrayBuffer[(Storage, Flow[UInt])]()
+  private val resets = scala.collection.mutable.LinkedHashMap[Register, BigInt]()
+  def setReset(r: Register, value: BigInt) = {
+    require(spec.regs.contains(r), s"$r is not in the register file")
+    resets(r) = value
+  }
 
   val regs = during setup new Area {
-    val byReg = spec.regs.map(r => r -> Reg(UInt(r.width bits)).init(r.init).setName(s"reg_${r.name}").simPublic()).toMap
+    val byReg = spec.regs.map(r => r -> Reg(UInt(r.width bits)).setName(s"reg_${r.name}").simPublic()).toMap
   }
 
   def read(s: Storage): UInt = s match {
@@ -72,6 +79,8 @@ class RegFilePlugin(val spec: RegFileSpec) extends FiberPlugin with RegFileServi
     val seq = host.get[SequencerService]
     val seqRetainer = seq.map(s => retains(s.seqLock))
     awaitBuild()
+    // Every plugin's setup is over, so every reset override is known.
+    for ((r, reg) <- regs.byReg) reg.init(U(resets.getOrElse[BigInt](r, r.init), r.width bits))
 
     for (s <- seq) {
       for (st <- spec.all) {

@@ -4,14 +4,32 @@ import retro.sim.BusAccess
 
 import scala.collection.mutable.ArrayBuffer
 
+/** What the reference model's CPU is attached to. Each call is one M-cycle. */
+trait Sm83Bus {
+  def read(address: Int): Int
+  def write(address: Int, value: Int): Unit
+  def idle(): Unit = {}
+}
+
+object Sm83Bus {
+  /** Plain memory: the CPU alone, as the bare-core cosim sees it. */
+  def memory(mem: Array[Int]): Sm83Bus = new Sm83Bus {
+    def read(address: Int) = mem(address)
+    def write(address: Int, value: Int) = mem(address) = value
+  }
+}
+
 /** Instruction-level SM83 reference model, written independently of the opcode table in `Sm83`,
   * for cosimulation. It logs every bus access and counts M-cycles, including the overlapped fetch
   * of the next opcode at the end of each instruction, which is how the RTL trace reports them.
   *
-  * Interrupts: `requests(k)` must return IE & IF as the RTL saw it in M-cycle `k` (counting
+  * Interrupts: `requests(k)` must return IE & IF as it was during M-cycle `k` (counting
   * completed M-cycles from reset, the reset fetch being cycle 0). The model decides by itself
-  * when to dispatch, which vector to take and how long HALT waits. */
-class Sm83Reference(val mem: Array[Int], requests: Long => Int) {
+  * when to dispatch, which vector to take and how long HALT waits, and calls `ack(index)` at the
+  * end of the fetch cycle that starts a dispatch. */
+class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
+  def this(mem: Array[Int], requests: Long => Int) = this(Sm83Bus.memory(mem), requests, _ => ())
+
   var a, f, b, c, d, e, h, l = 0
   var sp, pc = 0
   var ime, imeNext = false
@@ -20,10 +38,10 @@ class Sm83Reference(val mem: Array[Int], requests: Long => Int) {
   private var cycle = 0L
   private val log = ArrayBuffer[BusAccess]()
 
-  private def read(addr: Int) = { cycle += 1; val v = mem(addr & 0xFFFF); log += BusAccess(false, addr & 0xFFFF, v); v }
-  private def write(addr: Int, v: Int) = { cycle += 1; mem(addr & 0xFFFF) = v & 0xFF; log += BusAccess(true, addr & 0xFFFF, v & 0xFF) }
+  private def read(addr: Int) = { cycle += 1; val v = bus.read(addr & 0xFFFF); log += BusAccess(false, addr & 0xFFFF, v); v }
+  private def write(addr: Int, v: Int) = { cycle += 1; bus.write(addr & 0xFFFF, v & 0xFF); log += BusAccess(true, addr & 0xFFFF, v & 0xFF) }
   private def imm() = { val v = read(pc); pc = (pc + 1) & 0xFFFF; v }
-  private def idle() = cycle += 1
+  private def idle() = { cycle += 1; bus.idle() }
 
   private def hl = h << 8 | l
   private def setHl(v: Int) = { h = (v >> 8) & 0xFF; l = v & 0xFF }
@@ -100,7 +118,7 @@ class Sm83Reference(val mem: Array[Int], requests: Long => Int) {
     val dispatch = effective && reqs != 0
     ime = effective && !dispatch
     imeNext = imeOp == EI && !dispatch
-    if (dispatch) { ir = Sm83.DISPATCH; vector = Integer.numberOfTrailingZeros(reqs) } else ir = opcode
+    if (dispatch) { ir = Sm83.DISPATCH; vector = Integer.numberOfTrailingZeros(reqs); ack(vector) } else ir = opcode
   }
 
   /** Call once after reset: the reset NOP's fetch of the first opcode (M-cycle 0). */
@@ -195,6 +213,13 @@ class Sm83Reference(val mem: Array[Int], requests: Long => Int) {
     }
     fetch(imeOp, increment)
     (log.toList, (cycle - start).toInt)
+  }
+
+  /** Start from a given register state instead of all zeros (a console's post-boot state). */
+  def load(state: Map[String, Int]): Unit = for ((k, v) <- state) k match {
+    case "A" => a = v; case "F" => f = v; case "B" => b = v; case "C" => c = v; case "D" => d = v; case "E" => e = v
+    case "H" => h = v; case "L" => l = v; case "SPH" => sp = (sp & 0xFF) | v << 8; case "SPL" => sp = (sp & 0xFF00) | v
+    case "PC" => pc = v; case "W" | "Z" =>
   }
 
   def regs: Map[String, BigInt] = Map("A" -> a, "F" -> f, "B" -> b, "C" -> c, "D" -> d, "E" -> e, "H" -> h, "L" -> l,
