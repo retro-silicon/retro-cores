@@ -4,6 +4,8 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib.misc.plugin._
 
+import scala.collection.mutable.ArrayBuffer
+
 /** Whitebox for the sequencer-based CPUs: publishes, as `simPublic` signals, everything a probe
   * needs to rebuild what happened in each M-cycle (opcode, step, bus access, completion) and the
   * register file. Observes only; adding or removing it changes no other logic. */
@@ -26,5 +28,20 @@ class TracePlugin extends FiberPlugin {
     val busWdata = tap("bus_wdata", m.cmd.data)
     val busRdata = tap("bus_rdata", m.rdata)
     val regs = rf.spec.regs.map(r => r.name -> tap(s"reg_${r.name}", rf.regs.byReg(r)))
+    // The same values packed into words of at most 64 bits, so a probe reads a cycle's bus with
+    // one simulator access and a retire's registers with a few (rdata in the low bits; registers
+    // in order from the low bits of each word).
+    val cycle = tap("cycle", busValid ## busWrite ## done ## fetch ## prefix ## busAddress ## busWdata ## busRdata)
+    val regWords: Seq[(Bits, Seq[(String, Int, Int)])] = {
+      val groups = ArrayBuffer(ArrayBuffer[(String, Data)]())
+      for ((n, r) <- regs) {
+        if (groups.last.map(_._2.getBitsWidth).sum + r.getBitsWidth > 64) groups += ArrayBuffer()
+        groups.last += n -> r
+      }
+      for ((g, i) <- groups.toSeq.zipWithIndex) yield {
+        val fields = g.scanLeft(("", 0, 0)) { case ((_, o, w), (n, r)) => (n, o + w, r.getBitsWidth) }.tail.toSeq
+        tap(s"regs_$i", Cat(g.map(_._2))) -> fields
+      }
+    }
   }
 }

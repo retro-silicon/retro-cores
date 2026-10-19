@@ -42,8 +42,9 @@ class PrintBackend(names: Map[Int, String] = Map.empty, out: String => Unit = pr
 /** Sim side of the introspection chain (whitebox plugin, then this probe, then backends): samples
   * the `TracePlugin` taps every clock and turns them into cycle and retire events. With
   * `cycleEvents = false` no `onCycle` is sent and registers are read only when an instruction
-  * retires, which makes long system runs much faster. */
-class Probe(trace: TracePlugin, cd: ClockDomain, cycleEvents: Boolean = true) {
+  * retires, which makes long system runs much faster. With `autoSample = false` the caller
+  * drives the clock and calls `sample()` once per cycle, just before the rising edge. */
+class Probe(trace: TracePlugin, cd: ClockDomain, cycleEvents: Boolean = true, autoSample: Boolean = true) {
   val backends = ArrayBuffer[TraceBackend]()
   def add(b: TraceBackend): this.type = { backends += b; this }
 
@@ -58,13 +59,24 @@ class Probe(trace: TracePlugin, cd: ClockDomain, cycleEvents: Boolean = true) {
   private val bus = ArrayBuffer[BusAccess]()
   private var pendingRetire: Option[RetireEvent] = None
 
-  private def regs() = t.regs.map { case (n, r) => n -> r.toBigInt }.toMap
+  private def regs(): Map[String, BigInt] = t.regWords.flatMap { case (word, fields) =>
+    val w = word.toLong
+    fields.map { case (n, o, width) => n -> BigInt((w >>> o) & ((1L << width) - 1)) }
+  }.toMap
+  private val dw = t.busWdata.getBitsWidth
+  private val aw = t.busAddress.getBitsWidth
+  require(2 * dw + aw + 5 <= 63)
+  private def field(c: Long, offset: Int, width: Int) = ((c >> offset) & ((1L << width) - 1)).toInt
 
   // Values read right after a sampling edge are the ones that edge sampled.
-  cd.onSamplings {
-    val access = if (t.busValid.toBoolean) Some(BusAccess(t.busWrite.toBoolean, t.busAddress.toInt,
-      if (t.busWrite.toBoolean) t.busWdata.toInt else t.busRdata.toInt)) else None
-    val done = t.done.toBoolean
+  if (autoSample) cd.onSamplings(sample())
+  def sample(): Unit = {
+    val c = t.cycle.toLong
+    val flags = 2 * dw + aw
+    def flag(i: Int) = ((c >> (flags + i)) & 1) != 0 // prefix, fetch, done, write, valid
+    val write = flag(3)
+    val access = if (flag(4)) Some(BusAccess(write, field(c, 2 * dw, aw), field(c, if (write) dw else 0, dw))) else None
+    val done = flag(2)
     lazy val now = regs()
     if (opcodeLoaded) { current = current.map { case (a, _, s) => (a, t.opcode.toInt, s) }; opcodeLoaded = false }
     // Register writes of the previous fetch cycle are visible now.
@@ -77,7 +89,7 @@ class Probe(trace: TracePlugin, cd: ClockDomain, cycleEvents: Boolean = true) {
     if (done) {
       mcycles += 1
       access.foreach(bus += _)
-      if (t.fetch.toBoolean) {
+      if (flag(1)) {
         for ((addr, op, start) <- current) {
           pendingRetire = Some(RetireEvent(retired, addr, op, start, mcycles, stalls, bus.toList, Map.empty))
           retired += 1
@@ -85,7 +97,7 @@ class Probe(trace: TracePlugin, cd: ClockDomain, cycleEvents: Boolean = true) {
         current = Some((access.get.address, -1, cycle + 1))
         opcodeLoaded = true
         mcycles = 0; stalls = 0; bus.clear()
-      } else if (t.prefix.toBoolean) opcodeLoaded = true
+      } else if (flag(0)) opcodeLoaded = true
     } else stalls += 1
     cycle += 1
   }

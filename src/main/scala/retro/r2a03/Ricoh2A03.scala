@@ -519,9 +519,11 @@ object Ricoh2A03 {
   /** Mnemonics by opcode, for traces. */
   lazy val names: Map[Int, String] = opcodes.map(o => o.opcode -> o.name).toMap
 
-  def plugins(withTrace: Boolean = true): Seq[Hostable] = Seq(
-    new BusPlugin(RetroBusConfig(16, 8)),
-    new SequencerPlugin(opcodeWidth = 9, resetOpcode = RESET, illegal = illegal),
+  /** `external = false` when the host's slaves claim every address (see `BusPlugin`);
+    * `romDecoder` as in `SequencerPlugin`. */
+  def plugins(withTrace: Boolean = true, external: Boolean = true, romDecoder: Boolean = false): Seq[Hostable] = Seq(
+    new BusPlugin(RetroBusConfig(16, 8), external = external),
+    new SequencerPlugin(opcodeWidth = 9, resetOpcode = RESET, illegal = illegal, romDecoder = romDecoder),
     new RegFilePlugin(R2A03Regs.spec),
     new AluPlugin,
     new InterruptPlugin,

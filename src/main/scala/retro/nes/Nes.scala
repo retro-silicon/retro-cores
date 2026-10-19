@@ -20,8 +20,11 @@ object Nes {
   val lengthTable = Seq(10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
                         12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30)
 
-  /** The 2A03 plugins plus the NES ones, in one host. */
-  def plugins(cart: NesCartSpec, withTrace: Boolean = true): Seq[Hostable] = Ricoh2A03.plugins(withTrace) ++ Seq(
+  /** The 2A03 plugins plus the NES ones, in one host. `NesOpenBusPlugin` claims every address
+    * no other slave does, so the CPU has no external bus port. `romDecoder`: see `SequencerPlugin`
+    * (the simulations use it). */
+  def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false): Seq[Hostable] =
+    Ricoh2A03.plugins(withTrace, external = false, romDecoder = romDecoder) ++ Seq(
     new NesInterruptsPlugin,
     new NesOpenBusPlugin,
     new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800), // 0800-1FFF mirror it
@@ -29,8 +32,8 @@ object Nes {
     new NesApuPlugin,
     new NesCartridgePlugin(cart))
 
-  def apply(cart: NesCartSpec, withTrace: Boolean = true): RetroCore =
-    RetroCore(plugins(cart, withTrace)).setDefinitionName("Nes")
+  def apply(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false): RetroCore =
+    RetroCore(plugins(cart, withTrace, romDecoder)).setDefinitionName("Nes")
 }
 
 /** The CPU's NMI and IRQ inputs: the PPU drives `nmi`, the APU `irq`. `Ricoh2A03.InterruptPlugin`
@@ -76,7 +79,7 @@ class NesOpenBusPlugin extends FiberPlugin {
   * (`NesApuUnits.scala`), the DMC (its timer, sample buffer, memory reader, output level and
   * IRQ), the mixer (`audio`, one sample per cycle from the state at the start of the cycle),
   * OAM DMA (4014), and controller port 1 (4016, `buttons` pins: A B Select Start Up Down Left
-  * Right in bits 0-7). Reads of the other registers in 4000-4017 are open bus.
+  * Right in bits 0-7, registered, so a change shows a cycle later). Reads of the other registers in 4000-4017 are open bus.
   *
   * Each cycle the APU ticks first and the access sees the ticked state. Length halt flags and
   * loads take effect after the next cycle's tick. A 4017 write resets the
@@ -105,6 +108,9 @@ class NesApuPlugin extends FiberPlugin {
     val ints = host[NesInterruptsPlugin]
     val cpu = seq.logic.get.master
     buttons = in(Bits(8 bits)).setName("joypad1")
+    // The pins are registered, as asynchronous inputs should be. It also keeps the bus read data,
+    // and so most of the design, off the inputs, which Verilator re-evaluates on every edge.
+    val pad = RegNext(buttons).init(0)
     audio = out(UInt(16 bits)).setName("audio")
 
     val odd = RegInit(False)
@@ -262,7 +268,7 @@ class NesApuPlugin extends FiberPlugin {
     val data = slave.cmd.data
     def reads(address: Int) = slave.readFire && a === address
     def writes(address: Int) = slave.writeFire && a === address
-    val bit = strobe ? buttons(0) | shift(0)
+    val bit = strobe ? pad(0) | shift(0)
     slave.rdata := open
     when(a === Nes.APU_STATUS) {
       slave.rdata := (dmc.irq ## irqTicked ## open(5) ## (dmc.bytesTicked =/= 0) ## lengthTicked.map(_ =/= 0).asBits()).asUInt
@@ -308,7 +314,7 @@ class NesApuPlugin extends FiberPlugin {
     }
     when(writes(Nes.JOY1)) {
       strobe := data(0)
-      when(data(0)) { shift := buttons.asUInt }
+      when(data(0)) { shift := pad.asUInt }
     }
     when(writes(Nes.FRAME_COUNTER)) {
       fiveStep := data(7)

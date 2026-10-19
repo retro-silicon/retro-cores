@@ -51,11 +51,15 @@ trait SequencerService {
   * and plugin-defined keys. When the bus stalls the cycle is held and nothing is written.
   *
   * @param illegal  what an opcode with no spec does, in one M-cycle (usually: fetch at PC, PC+1)
-  * @param resetOpcode  IR at reset; its first M-cycle runs first, so make it one that fetches */
+  * @param resetOpcode  IR at reset; its first M-cycle runs first, so make it one that fetches
+  * @param romDecoder  decode with a ROM indexed by IR ## STEP instead of minimized logic: the same
+  *                    words (unused steps of defined opcodes give the illegal word rather than
+  *                    don't-care), and several times cheaper to evaluate in Verilator */
 class SequencerPlugin(val opcodeWidth: Int = 8,
                       val busPriority: Int = 0,
                       val resetOpcode: Int = 0,
-                      val illegal: MCycleSpec) extends FiberPlugin with SequencerService {
+                      val illegal: MCycleSpec,
+                      val romDecoder: Boolean = false) extends FiberPlugin with SequencerService {
   val seqLock = Retainer()
   private val ops = mutable.LinkedHashMap[Int, OpSpec]()
   private val sources = mutable.LinkedHashMap[Source, UInt]()
@@ -174,7 +178,11 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
       spec.addNeeds(Masked((BigInt(op.opcode) << stepWidth) | i, fullCare), Masked(encode(op.name, c), (BigInt(1) << wordWidth) - 1))
     // Undefined opcodes take the illegal word at any step; unused steps of defined opcodes are don't-care.
     val undefined = (0 until (1 << opcodeWidth)).filterNot(ops.contains).map(o => Masked(BigInt(o) << stepWidth, opcodeCare))
-    val word = spec.build(ir ## step, undefined)
+    val word = if (romDecoder) {
+      val table = Array.fill(1 << (opcodeWidth + stepWidth))(encode("<illegal>", illegal))
+      for (op <- ops.values; (c, i) <- op.cycles.zipWithIndex) table((op.opcode << stepWidth) | i) = encode(op.name, c)
+      Mem(Bits(wordWidth bits), table.map(w => B(w, wordWidth bits)).toSeq).readAsync((ir ## step).asUInt)
+    } else spec.build(ir ## step, undefined)
     def slice(f: Field) = word(f.offset, f.width bits).asUInt
 
     // ---- Datapath --------------------------------------------------------------------------

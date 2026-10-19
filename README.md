@@ -115,7 +115,7 @@ MMC3 (mapper 4) clocks its scanline counter on PPU A12 rising edges after A12 ha
 10 dots, with the Sharp chip's IRQ behavior (a counter reloaded to 0 fires). The cartridge
 sees every PPU bus address the 2C02 drives: unused sprite slots, the garbage nametable fetches
 at dots 257-320, 337 and 339, and 2006/2007 accesses outside rendering. With blargg's
-mmc3_test, mmc3_test_2 and mmc3_irq_tests (14 ROMs) the model passes 127 of 133; the three new
+mmc3_test, mmc3_test_2 and mmc3_irq_tests (18 ROMs) the model passes 131 of 137; the three new
 failures test other chips (MMC6, MMC3 revision A and the alternate MMC3 behavior).
 It is the reference the RTL NES system is cosimulated against.
 
@@ -123,8 +123,10 @@ It is the reference the RTL NES system is cosimulated against.
 
 ```sh
 sbt "testOnly retro.nes.NesSim"                    # six short ROMs, RTL cosimulated with NesReference
-sbt "Test/runMain retro.nes.NesRomReport"          # every mapper 0/1/3/4 test ROM, cosimulated (about 3 frames/s)
+sbt "Test/runMain retro.nes.NesRomReport"          # every mapper 0/1/3/4 test ROM, cosimulated, one per core at a time
 sbt "Test/runMain retro.nes.NesRomReport sprite_hit"
+JOBS=2 sbt "Test/runMain retro.nes.NesRomReport"   # fewer at a time
+sbt "Test/runMain retro.nes.NesSpeed"              # cycles per second: model, RTL alone, cosim
 ```
 
 `retro.nes.Nes(spec)` is the 2A03 plugins plus the NES ones in one host:
@@ -141,8 +143,22 @@ sbt "Test/runMain retro.nes.NesRomReport sprite_hit"
 `NesRtl.cosim` runs a test ROM on the RTL and the model in lockstep: every instruction must
 match in cycles (DMA stalls included), bus accesses (so every PPU and APU register read) and
 registers, every frame pixel for pixel, and the APU's mixed output in every cycle, until the
-ROM reports its result. All 133 ROMs run to their result with no difference from the model, so
-the RTL passes the same 127.
+ROM reports its result. All 137 ROMs run to their result with no difference from the model, so
+the RTL passes the same 131.
+
+Simulation speed (`NesSpeed`): the cosim runs about 10 frames per second per core, the RTL alone
+22 and the model 87, so the whole report takes about 18 minutes on four cores (it was 2 frames
+per second).
+What it takes:
+- `retro.sim.FastVerilator` builds the C++ at -O3 (SpinalSim's default is -O0) and emits
+  SpinalSim's `simPublic` markers as `verilator public_flat_rd`. Verilator assumes a `public`
+  signal may be written by the testbench between evaluations, so it re-evaluated everything
+  that depends on the register file and memories on both clock edges.
+- `SequencerPlugin(romDecoder = true)` decodes IR ## STEP with a ROM instead of minimized logic,
+  which Verilator evaluates as one array read (the sims use it; the default stays logic).
+- The NES has no external bus port (`BusPlugin(external = false)`: the open bus plugin claims
+  every free address) and registers the controller pins, so no logic depends on an input.
+- The probe reads each cycle's bus as one packed signal and the registers as 64-bit words.
 
 ### Hardware test ROMs
 
@@ -429,8 +445,8 @@ corruption bug tests, dmg-acid2 pixel for pixel, and 1829 ROMs of the c-sp colle
 Mealybug's 24 DMG tests among them (see *Hardware test ROMs*).
 
 NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
-127 of 133 blargg CPU/PPU/APU/MMC3 test ROMs, with sound checked against hardware recordings, and
+131 of 137 blargg CPU/PPU/APU/MMC3 test ROMs, with sound checked against hardware recordings, and
 the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM/MMC3) cosimulated against it on those
 ROMs, audio included.
 
-Next: the APU, MBC2, MBC3 and STOP on the Game Boy; on the NES, simulation speed.
+Next: the APU, MBC2, MBC3 and STOP on the Game Boy; on the NES, more mappers.
