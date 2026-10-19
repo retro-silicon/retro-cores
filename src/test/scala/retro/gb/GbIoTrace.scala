@@ -17,8 +17,11 @@ object GbIoTrace extends App {
   var wasHalted = false
   gb.onStatIrq = () => out.println(s"I ${gb.ppu.ly} ${gb.ppu.time}")
   gb.onAck = i => out.println(s"D $i ${gb.ppu.time} ${if (wasHalted) "H" else ""}")
+  gb.ppu.onPixel = (l, x, t) => out.println(s"P $l $x $t")
+  var lastMode = 0
+  gb.onPpuTick = () => { if (lastMode == 3 && gb.ppu.mode == 0) out.println(s"M0 ${gb.ppu.ly} ${gb.ppu.time}"); lastMode = gb.ppu.mode }
   gb.cpu.reset()
   var cycles = 0L
-  while (cycles < args(2).toLong) { cycles += gb.cpu.step()._2; wasHalted = gb.cpu.halted }
+  while (cycles < args(2).toLong) { val h = gb.cpu.halted; cycles += gb.cpu.step()._2; wasHalted = h }
   out.close()
 }

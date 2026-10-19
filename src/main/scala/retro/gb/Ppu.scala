@@ -75,11 +75,10 @@ class PpuPlugin(postBoot: Boolean = false)
   var lcd: LcdPixels = null
   /** LCDC, for a sim to tell whether the LCD is on. */
   var lcdcReg: UInt = null
-  private var statLateHalted, statLateRunning: Bool = null
+  private var statLateHalted: Bool = null
   override def withController(ctrl: IrqService): Unit = ctrl match {
     case c: InterruptControllerPlugin =>
       statLateHalted = c.late(Gb.Irq.STAT, halted = true)
-      statLateRunning = c.late(Gb.Irq.STAT, halted = false)
     case _ =>
   }
 
@@ -191,10 +190,17 @@ class PpuPlugin(postBoot: Boolean = false)
     }
 
     // ---- The pixel transfer: one dot -----------------------------------------------------
-    // The CPU's write this M-cycle, which lands between the dots.
-    val write = slave.writeFire
-    val wAddress = slave.cmd.address
-    val wData = slave.cmd.data
+    // The CPU's write this M-cycle, or the one before to a register the transfer reads
+    // (`PpuReference.lateWrite`): it lands between the dots.
+    def lateWrite(a: UInt, d: UInt) = Seq(Gb.SCY, Gb.SCX, Gb.BGP, Gb.OBP0, Gb.OBP1, Gb.WX).map(a === _).orR ||
+      a === Gb.LCDC && ((lcdc ^ d) & 0x84) === 0
+    val cpuLate = slave.writeFire && lateWrite(slave.cmd.address, slave.cmd.data)
+    val held = RegNext(cpuLate) init False
+    val heldAddress = RegNextWhen(slave.cmd.address, cpuLate)
+    val heldData = RegNextWhen(slave.cmd.data, cpuLate)
+    val write = held || slave.writeFire && !cpuLate
+    val wAddress = held ? heldAddress | slave.cmd.address
+    val wData = held ? heldData | slave.cmd.data
     def writes(a: Int) = write && wAddress === a
     /** LCDC writes that keep the LCD on or off land between the dots; others after them. */
     val lcdcWrite = writes(Gb.LCDC) && wData(7) === lcdc(7)
@@ -512,6 +518,8 @@ class PpuPlugin(postBoot: Boolean = false)
         when(transferAfter(3)) { mode := 3 }
         when(xTicked === Gb.oamEnd) { irqMode := scanMode } elsewhen (transferAfter(2)) { irqMode := 3 }
       }
+      // The next line's mode 2 interrupt rises with LY, except line 0's.
+      when(xTicked === Gb.lineCycles - 1 && lyTicked < Gb.visibleLines - 1) { irqMode := 2 }
     }
     irqModeBefore := irqMode
     when(transferPart) { irqModeBefore := (xTicked === Gb.oamEnd) ? scanMode | (s0.transfer ? U(3, 2 bits) | U(0, 2 bits)) }
@@ -537,15 +545,11 @@ class PpuPlugin(postBoot: Boolean = false)
     val stat = !statLine && start || !start && mid || !mid && line
     irq(0) := vblank
     irq(1) := stat
-    // A halted CPU sees the STAT line as it was before the dots; a running one sees line 0's
-    // mode 2 interrupt an M-cycle late.
-    if (statLateHalted != null) {
-      statLateHalted := stat && !lineFor(irqModeBefore, lycLineTicked || lycLine)
-      statLateRunning := stat && lyTicked === 0 && xTicked === 0 && !firstLineTicked && irqMode === 2
-    }
+    // A halted CPU sees the STAT line as it was before the dots.
+    if (statLateHalted != null) statLateHalted := stat && !lineFor(irqModeBefore, lycLineTicked || lycLine)
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
-    regs.readAndWrite(lcdc, Gb.LCDC)
+    regs.read(lcdc, Gb.LCDC)
     regs.readAndWrite(statSelect, Gb.STAT, 3)
     // The CPU's VRAM and OAM accesses the PPU blocks; see `PpuReference.vramReadLocked`.
     val lastOfScan = mode === 2 && xTicked === Gb.oamEnd - 1
@@ -559,16 +563,18 @@ class PpuPlugin(postBoot: Boolean = false)
 
     regs.read(coincidenceTicked, Gb.STAT, 2)
     regs.read(mode, Gb.STAT, 0)
-    regs.readAndWrite(scy, Gb.SCY)
-    regs.readAndWrite(scx, Gb.SCX)
+    regs.read(scy, Gb.SCY)
+    regs.read(scx, Gb.SCX)
     regs.read(lyRead, Gb.LY)
     regs.readAndWrite(lyc, Gb.LYC)
-    regs.readAndWrite(bgp, Gb.BGP)
-    regs.readAndWrite(obp0, Gb.OBP0)
-    regs.readAndWrite(obp1, Gb.OBP1)
+    regs.read(bgp, Gb.BGP)
+    regs.read(obp0, Gb.OBP0)
+    regs.read(obp1, Gb.OBP1)
     regs.readAndWrite(wy, Gb.WY)
-    regs.readAndWrite(wx, Gb.WX)
+    regs.read(wx, Gb.WX)
 
+    for ((r, a) <- Seq(lcdc -> Gb.LCDC, scy -> Gb.SCY, scx -> Gb.SCX, bgp -> Gb.BGP, obp0 -> Gb.OBP0, obp1 -> Gb.OBP1, wx -> Gb.WX))
+      when(writes(a)) { r := wData }
     x := xTicked
     ly := lyTicked
     statLine := line

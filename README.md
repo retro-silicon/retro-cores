@@ -225,20 +225,20 @@ on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped):
 | Suite | Pass | Fail |
 |---|---|---|
 | Mealybug Tearoom Tests | 15 | 9 |
-| Gambatte | 1323 | 461 |
-| GBMicrotest | 414 | 99 |
-| wilbertpol's Mooneye | 69 | 25 |
-| AGE | 3 | 11 |
-| Scribbltests | 4 | 1 |
+| Gambatte | 1539 | 245 |
+| GBMicrotest | 431 | 82 |
+| wilbertpol's Mooneye | 89 | 5 |
+| AGE | 6 | 8 |
+| Scribbltests | 5 | 0 |
 | SameSuite | 1 | 0 |
-| Bully, little-things, Strikethrough, TurtleTests | 0 | 5 |
+| Bully, little-things, Strikethrough, TurtleTests | 2 | 3 |
 
 The pixel transfer is a port of SameBoy's DMG FIFO and fetcher, which passes the same 15
 Mealybug DMG tests; `PpuReference` lists the timing it pins down (register writes landing between
 a cycle's dots, mode 3 ending 3 dots before the last pixel, when a halted or running CPU sees a
-STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`OamDmaPlugin`). Gambatte's
-expectations differ from SameBoy's on some late window, object-disable and mode-0 interrupt cases,
-which fail here.
+STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`OamDmaPlugin`). The reference
+model has no MBC, so the 40 Gambatte OAM DMA tests that bank-switch or push to cartridge RAM
+pass only on the RTL.
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
 VexiiRiscv: the plugin, fiber, database and pipeline APIs it uses all live in SpinalHDL's own

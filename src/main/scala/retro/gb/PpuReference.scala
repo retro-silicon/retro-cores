@@ -18,10 +18,13 @@ package retro.gb
   *    mode 3 ends for both 3 dots before the transfer's last pixel (`ended`);
   *  - a write to a PPU register lands during the dots (`writeDot`): SCX before the first,
   *    SCY, LCDC and the palettes before the second (the palettes show old | new and LCDC
-  *    old | new BG_EN for one dot first), WY and WX before the third; STAT and LYC after them;
+  *    old | new BG_EN for one dot first), WY and WX before the third; STAT and LYC after them.
+  *    Writes to SCY, SCX, the palettes, WX and LCDC (keeping the LCD on or off and the object
+  *    size) land in the next M-cycle's dots (`lateWrite`);
+  *  - the mode 2 interrupt of lines 1 to 143 rises in the line before's last M-cycle, with LY;
+  *    line 0's an M-cycle later (Mealybug's line_0_fix, Gambatte's m2int tests);
   *  - a halted CPU sees a STAT interrupt raised after the M-cycle's first dot an M-cycle late
-  *    (`statLate`), and a running CPU sees line 0's mode 2 interrupt an M-cycle late
-  *    (`statRunLate`, Mealybug's line_0_fix);
+  *    (`statLate`);
   *  - LY reads the next line in the last M-cycle of a line, and 0 from the second M-cycle of
   *    line 153, where LY = LYC also drops for one M-cycle;
   *  - the LY = LYC flag is only updated while the LCD is on, and stays on the STAT interrupt line
@@ -47,7 +50,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   /** The first line after the LCD is turned on, which has no OAM scan: it reads as mode 0. */
   private var firstLine = false
   /** A STAT interrupt a halted CPU sees an M-cycle late, and one a running CPU does. */
-  var statLate, statRunLate = false
+  var statLate = false
   /** LY as read and compared: line 153 reads 0 after its first M-cycle. */
   def lyNow = if (ly == Gb.frameLines - 1 && x >= 1) 0 else ly
   /** Whether LY is compared with LYC this M-cycle: not while LY changes. */
@@ -90,9 +93,13 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     case Gb.LCDC if ((lcdc ^ d) & 0x80) != 0 => 5
     case _ => 2
   }
-  private var scheduled: Option[(Int, Int)] = None
-  /** A CPU write to a PPU register in this M-cycle; it lands in `tick` (`writeDot`). */
-  def schedule(a: Int, d: Int): Unit = scheduled = Some(a -> d)
+  private var scheduled, scheduledNext: Option[(Int, Int)] = None
+  /** Writes that land in the next M-cycle's dots: the registers the pixel transfer reads. */
+  def lateWrite(a: Int, d: Int) = a == Gb.SCY || a == Gb.SCX || a == Gb.BGP || a == Gb.OBP0 || a == Gb.OBP1 ||
+    a == Gb.WX || a == Gb.LCDC && ((lcdc ^ d) & 0x84) == 0
+  /** A CPU write to a PPU register in this M-cycle; it lands in `tick` (`writeDot`), this
+    * M-cycle's or the next's (`lateWrite`). */
+  def schedule(a: Int, d: Int): Unit = if (lateWrite(a, d)) scheduledNext = Some(a -> d) else scheduled = Some(a -> d)
   private def applyScheduled(): Unit = for ((a, d) <- scheduled) { scheduled = None; write(a, d); if (a == Gb.WX) wxJustChanged = true }
 
   def on = (lcdc & 0x80) != 0
@@ -148,6 +155,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   def tick(): (Boolean, Boolean) = {
     val r = tickDots()
     applyScheduled()
+    scheduled = scheduledNext
+    scheduledNext = None
     r
   }
 
@@ -213,6 +222,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       if (compared) lycLine = coincidence
     }
     // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
+    // The next line's mode 2 interrupt rises with LY, except line 0's.
+    if (on && x == Gb.lineCycles - 1 && ly < Gb.visibleLines - 1) irqMode = 2
     val vblankMode2 = ly == Gb.visibleLines && x == 0
     def statFor(m: Int, lyc: Boolean = lycLine) = ((statSelect & 8) != 0 && lyc) || on && (((statSelect & 4) != 0 && (m == 2 || vblankMode2)) ||
       ((statSelect & 2) != 0 && m == 1) || ((statSelect & 1) != 0 && m == 0))
@@ -224,9 +235,6 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     val stat = !statLine && start || !start && mid || !mid && line
     // A halted CPU sees the STAT line as it was before this M-cycle's dots.
     statLate = stat && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
-    // Line 0's mode 2 interrupt rises a dot later than other lines': a running CPU sees it an
-    // M-cycle later (Mealybug's line_0_fix), a halted one in time.
-    statRunLate = stat && ly == 0 && x == 0 && !firstLine && irqMode == 2
     statLine = line
     (vblank, stat)
   }

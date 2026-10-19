@@ -88,6 +88,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   /** Called when the STAT interrupt is requested, for tracing. */
   var onStatIrq: () => Unit = null
   var onAck: Int => Unit = null
+  var onPpuTick: () => Unit = null
 
   private var iduAddress = -1
   override def idu(address: Int): Unit = iduAddress = address & 0xFFFF
@@ -137,6 +138,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     // PPU. A write to its registers lands during its dots (`PpuReference.writeDots`).
     if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
     val (vblank, stat) = ppu.tick()
+    if (onPpuTick != null) onPpuTick()
     if (vblank) iflag |= 1 << Gb.Irq.VBLANK.index
     if (stat) { iflag |= 1 << Gb.Irq.STAT.index; if (onStatIrq != null) onStatIrq() }
     // OAM DMA
@@ -161,12 +163,11 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     joypadPrevious = lines
 
     // ---- Access ----------------------------------------------------------------------------
-    // Bits 8-12: requests a halted CPU sees an M-cycle late; bits 16-20: ones a running CPU does.
+    // Bits 8-12: requests a halted CPU sees an M-cycle late (none are late for a running one).
     // A halted CPU sees the timer interrupt an M-cycle after TIMA reloads. A late request already
     // pending in IF is not late.
     val lateHalted = (if (reloading) 1 << Gb.Irq.TIMER.index else 0) | (if (ppu.statLate) 1 << Gb.Irq.STAT.index else 0)
-    val lateRunning = if (ppu.statRunLate) 1 << Gb.Irq.STAT.index else 0
-    requestLog((cycles & 63).toInt) = ie & iflag & 0x1F | (lateHalted & ~iflagBefore) << 8 | (lateRunning & ~iflagBefore) << 16
+    requestLog((cycles & 63).toInt) = ie & iflag & 0x1F | (lateHalted & ~iflagBefore) << 8
     cycles += 1
     val idu = iduAddress
     iduAddress = -1
