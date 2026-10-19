@@ -33,6 +33,8 @@ case class NesPpuState() extends Bundle {
   val age = Vec(UInt(6 bits), 8)
   val dot, line = UInt(9 bits)
   val oddFrame, suppress, skipDot = Bool()
+  /** A 2007 read took effect in the previous CPU cycle, so one now is ignored. */
+  val dataHold = Bool()
   // Background fetch pipeline.
   val ntByte, patLo, patHi = UInt(8 bits)
   val atByte = UInt(2 bits)
@@ -360,7 +362,7 @@ class NesPpuPlugin extends FiberPlugin {
       switch(register) {
         is(2) { readValue := (status & U(0xE0, 8 bits)) | (decayed & U(0x1F, 8 bits)) }
         is(4) { readValue := oamByte }
-        is(7) { readValue := toPalette ? ((paletteValue & U(0x3F, 8 bits)) | (decayed & U(0xC0, 8 bits))) | s.buffer }
+        is(7) { when(!s.dataHold) { readValue := toPalette ? ((paletteValue & U(0x3F, 8 bits)) | (decayed & U(0xC0, 8 bits))) | s.buffer } }
       }
       slave.rdata := readValue
 
@@ -374,14 +376,16 @@ class NesPpuPlugin extends FiberPlugin {
           }
           is(4) { drive(oamByte, 0xFF) }
           is(7) {
-            when(toPalette) {
-              drive(paletteValue, 0x3F)
-              o.buffer := ciramValue
-            } otherwise {
-              drive(s.buffer, 0xFF)
-              o.buffer := (a < 0x2000) ? chrValue | ciramValue
+            when(!s.dataHold) {
+              when(toPalette) {
+                drive(paletteValue, 0x3F)
+                o.buffer := ciramValue
+              } otherwise {
+                drive(s.buffer, 0xFF)
+                o.buffer := (a < 0x2000) ? chrValue | ciramValue
+              }
+              o.v := s.v + increment
             }
-            o.v := s.v + increment
           }
         }
       }
@@ -413,8 +417,10 @@ class NesPpuPlugin extends FiberPlugin {
       // The bus events the model's `ppuBus` sees: the 2007 access's address (none for palette
       // reads), then v after a 2006 or 2007 access while not rendering.
       val renderingNow = (s.mask(3) || s.mask(4)) && (s.line < 240 || s.line === 261)
-      val data7 = register === 7 && (slave.readFire && !toPalette || slave.writeFire)
-      val vChanged = (register === 7 && (slave.readFire || slave.writeFire)) || (register === 6 && slave.writeFire && s.w)
+      val read7 = register === 7 && slave.readFire && !s.dataHold
+      o.dataHold.allowOverride() := read7
+      val data7 = read7 && !toPalette || register === 7 && slave.writeFire
+      val vChanged = read7 || (register === 7 && slave.writeFire) || (register === 6 && slave.writeFire && s.w)
       (o, Seq((data7, a(12)), (vChanged && !renderingNow, o.v(12))))
     }
 

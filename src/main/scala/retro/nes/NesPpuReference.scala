@@ -31,6 +31,11 @@ class NesPpuReference(cart: NesCartridge) {
   private val back = Array.fill(256 * 240)(0)
   /** Set by a 2002 read in the dot before VBlank starts: the flag is not set this frame. */
   private var suppress = false
+  /** Dots left during which a 2007 read is ignored: one in the CPU cycle right after another
+    * (an indexed read crossing a page from 20F7) reads open bus and changes nothing, as in
+    * Mesen. Hardware varies with CPU-PPU alignment (blargg's double_2007_read lists four
+    * outcomes); this is one of them. */
+  private var dataReadHold = 0
   private var skipDot = false
 
   def rendering = (mask & 0x18) != 0
@@ -74,7 +79,9 @@ class NesPpuReference(cart: NesCartridge) {
       if (line == 241 && dot == 1) suppress = true
       drive(s, 0xE0)
     case 4 => drive(oam(oamAddr), 0xFF)
+    case 7 if dataReadHold > 0 => decayed
     case 7 =>
+      dataReadHold = 6
       val a = v & 0x3FFF
       val r = if (a >= 0x3F00) { buffer = ciram(cart.ciram(a)); drive(palette(paletteIndex(a)) & (if ((mask & 1) != 0) 0x30 else 0x3F), 0x3F) }
               else { val b = buffer; buffer = read(a); drive(b, 0xFF) }
@@ -226,6 +233,7 @@ class NesPpuReference(cart: NesCartridge) {
   /** One dot. */
   def tick(): Unit = {
     dotCount += 1
+    if (dataReadHold > 0) dataReadHold -= 1
     val visible = line < 240
     val pre = line == 261
     if (rendering && (visible || pre)) {
