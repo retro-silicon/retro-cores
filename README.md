@@ -13,7 +13,7 @@ and on the Game Boy composition it passes Blargg's `cpu_instrs`, `instr_timing`,
 timer, serial clock and OAM DMA (see *Hardware test ROMs*). STOP is not modelled.
 
 CPUs and SoCs are generated the same way: a Game Boy is the SM83's plugin list plus SoC plugins
-(on-chip RAMs, IF/IE, timer, serial, LCD timing, joypad) in the same host. The whole system passes
+(on-chip RAMs, IF/IE, timer, serial, PPU, joypad) in the same host. The whole system passes
 cosimulation against a system reference model. To add instructions, a CPU, a peripheral or a
 console, see [docs/EXTENDING.md](docs/EXTENDING.md).
 
@@ -30,10 +30,12 @@ sbt "runMain retro.gb.GameBoyVerilog"  # writes gen/GameBoy.v (CPU + SoC, cartri
 ### Hardware test ROMs
 
 ```sh
-scripts/fetch-test-roms.sh                         # Blargg's CPU tests and the Mooneye Test Suite into ./roms
+scripts/fetch-test-roms.sh                         # Blargg's CPU tests, the Mooneye Test Suite and dmg-acid2 into ./roms
 sbt "testOnly retro.gb.GameBoyRomSim"              # each ROM as a test on the RTL (about 10 minutes)
 sbt "Test/runMain retro.gb.GbRomReport timer/"     # pass/fail table for ROMs whose name matches
 sbt "Test/runMain retro.gb.GbRefRom timer/"        # the same ROMs on the reference model, in seconds
+sbt "testOnly retro.gb.GameBoyLcdSim"              # dmg-acid2 on the RTL; frames saved to out/
+sbt "Test/runMain retro.gb.GbRefFrame rom.gb out.png 20"  # a ROM's 20th frame from the reference model
 ```
 
 Only freely distributable test ROMs are used: Blargg's tests and the MIT-licensed Mooneye Test
@@ -42,12 +44,18 @@ Suite; `./roms` is gitignored and `GameBoyRomSim` is skipped when it is empty. T
 MBC5). Blargg's ROMs report over serial or in cartridge RAM, Mooneye's send the Fibonacci
 registers.
 
-Result on the RTL: 100 of the 125 ROMs pass, including all of Blargg's `cpu_instrs`,
+Result on the RTL: 103 of the 125 ROMs pass, including all of Blargg's `cpu_instrs`,
 `instr_timing`, `mem_timing`, `mem_timing-2` and `halt_bug`, every Mooneye acceptance test for
-CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, five of the PPU interrupt
-tests, and the MBC1 and MBC5 tests. The other 25 are registered as ignored with the reason: nine
-are for other models (DMG-0, MGB, SGB), seven PPU tests need real mode 3 and LCD-on timing,
-`boot_hwio` needs the APU registers, and MBC2 and the MBC1 multicart are not modelled.
+CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, eight of the twelve PPU
+tests (among them `intr_2_mode0_timing_sprites` and `hblank_ly_scx_timing`, which pin down mode 3
+lengths), and the MBC1 and MBC5 tests. The other 22 are registered as ignored with the reason:
+nine are for other models (DMG-0, MGB, SGB), four PPU tests need the PPU's VRAM/OAM locking and
+LCD-on line timing, `boot_hwio` needs the APU registers, and MBC2 and the MBC1 multicart are not
+modelled.
+
+`GameBoyLcdSim` runs [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (MIT, fetched by the
+same script) and checks the RTL's frame against the test's reference image and the reference
+model's frame, pixel for pixel; it writes both to `out/`.
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
 VexiiRiscv: the plugin, fiber, database and pipeline APIs it uses all live in SpinalHDL's own
@@ -147,7 +155,7 @@ generates a console:
 val cpu = RetroCore(Sm83.plugins())                     // the SM83 alone, bus and IRQs as pins
 val gb  = RetroCore(Sm83.plugins() ++ Seq(              // the same plugins, plus the SoC
   new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000),
-  new InterruptControllerPlugin, new TimerPlugin, new SerialPlugin, new LcdTimingPlugin, ...))
+  new InterruptControllerPlugin, new TimerPlugin, new SerialPlugin, new PpuPlugin, ...))
 ```
 
 What makes that work:
@@ -175,7 +183,7 @@ What makes that work:
 | `InterruptControllerPlugin` | FF0F, FFFF | IF, IE, `IrqService`, `Sm83.InterruptController` |
 | `TimerPlugin` | FF04-FF07 | DIV/TIMA/TMA/TAC from a 16-bit counter: falling-edge ticks (DIV and TAC write glitches) and the delayed TMA reload |
 | `SerialPlugin` | FF01-FF02 | internally clocked transfers, shifting on the 8192 Hz edges of the timer's counter; `serial_tx` pin with each byte sent |
-| `LcdTimingPlugin` | FF40-FF4B | LCDC, STAT, LY, LYC, VBlank and STAT interrupts, fixed mode lengths; no pixels yet |
+| `PpuPlugin` | FF40-FF4B | the PPU: dot-level pixel FIFO (background, window, objects), `lcd` pixel port, LCD registers, VBlank and STAT interrupts |
 | `JoypadPlugin` | FF00 | P1 matrix, `joypad_buttons` pins, joypad interrupt |
 | `OpenBusPlugin` ×2 | FEA0-FEFF, FF00-FFFF | 00 and FF for everything unmapped |
 | `PostBootPlugin` | | post-boot-ROM register state |
@@ -189,6 +197,22 @@ sees the ticked state (reads return it combinationally) and a write lands on top
 CPU's interrupt check sees requests raised by that tick too. Mooneye's `div_timing`,
 `intr_timing` and timer tests, and Blargg's `mem_timing`, pin this down; it is described at
 `retro.gb.Gb`.
+
+### The PPU
+
+`PpuPlugin` is a dot-level pixel FIFO: OAM scan (two entries per M-cycle, ten objects per line),
+then a background fetcher that fills an 8-pixel FIFO, an object fetcher that stalls it, and an
+object FIFO that mixes by priority, so mode 3 stretches by SCX, the window and each object exactly
+as on the DMG. The design runs one clock per M-cycle, so each clock chains four copies of the
+one-dot step, each with its own VRAM read port. VRAM and OAM are read through their own ports
+(`RamPlugin.directRead`, `OamDmaPlugin.oamRead`), not over the CPU's bus.
+
+Pixels leave on the `lcd` port, up to four per clock with their x, y and shade, for a sim to
+collect or an FPGA build to write into a scan-out framebuffer. `PpuReference` is the same
+pipeline as a Scala model inside `GbReference`; the system cosim checks every STAT read and every
+frame against it, including a test with random tiles, objects, scroll and window. The timing
+rules the Mooneye tests pin down (when STAT and the STAT interrupt see mode changes, LY reading
+the next line early, the LY = LYC flag freezing while the LCD is off) are listed there.
 
 ### Introspection
 
@@ -232,11 +256,12 @@ docs/EXTENDING.md            adding an instruction, a plugin or a CPU
 ## Roadmap
 
 Done: scaffold, framework layer, the SM83 instruction set with interrupts, extension guide, CPU
-and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, LCD timing, joypad,
-OAM DMA, cartridge with MBC1/MBC5) with system cosim.
+and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, PPU, joypad, OAM
+DMA, cartridge with MBC1/MBC5) with system cosim.
 
 Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mooneye's CPU,
-interrupt, timer, serial and OAM DMA acceptance tests (see *Hardware test ROMs*).
+interrupt, timer, serial and OAM DMA acceptance tests, most of Mooneye's PPU tests, and
+dmg-acid2 pixel for pixel (see *Hardware test ROMs*).
 
-Next: the PPU pixel pipeline (Mooneye's PPU tests and dmg-acid2), the APU, DMA bus conflicts,
-STOP, and the 2A03 (see the guide).
+Next: the PPU's VRAM/OAM locking and LCD-on timing (the last four Mooneye PPU tests), the APU,
+DMA bus conflicts, STOP, and the 2A03 (see the guide).

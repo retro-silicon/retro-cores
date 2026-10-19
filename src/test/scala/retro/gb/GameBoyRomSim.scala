@@ -126,14 +126,14 @@ object GbRomReport extends App {
 class GameBoyRomSim extends AnyFunSuite {
   import GbRomRunner._
 
-  /** PPU tests that need real mode 3 lengths and LCD-on timing; the other PPU tests pass. */
-  val needsPpu = Seq("hblank_ly_scx_timing-GS", "intr_2_mode0_timing_sprites", "intr_2_oam_ok_timing",
-    "lcdon_timing-GS", "lcdon_write_timing-GS", "stat_lyc_onoff", "vblank_stat_intr-GS")
+  /** PPU tests that need the PPU's VRAM and OAM locking or the LCD-on line timing (see
+    * `PpuReference`); the other PPU tests pass. */
+  val needsPpu = Seq("intr_2_oam_ok_timing", "lcdon_timing-GS", "lcdon_write_timing-GS", "vblank_stat_intr-GS")
 
   def skipReason(name: String): Option[String] = name match {
     case n if n.endsWith("cpu_instrs/cpu_instrs") || n.endsWith("mem_timing/mem_timing") => Some("combined ROM")
     case n if Seq("-S", "-dmg0", "-mgb", "-sgb", "-sgb2").exists(n.endsWith) => Some("another Game Boy model")
-    case n if needsPpu.exists(n.endsWith) => Some("needs the PPU")
+    case n if needsPpu.exists(n.endsWith) => Some("needs PPU memory locking and LCD-on timing")
     case n if n.contains("boot_hwio") => Some("needs the APU registers and PPU line timing")
     case n if n.contains("/mbc2/") => Some("MBC2 not modelled")
     case n if n.contains("multicart") => Some("MBC1 multicart wiring not modelled")

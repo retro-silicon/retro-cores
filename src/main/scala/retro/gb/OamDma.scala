@@ -17,6 +17,9 @@ import spinal.lib.misc.plugin._
   * Not modelled: bus conflicts (on the DMG a CPU access to the bus the DMA is reading returns the
   * DMA's byte), and OAM being locked by the PPU. */
 class OamDmaPlugin extends FiberPlugin {
+  /** A combinational read port into OAM for the PPU, which has its own path to it. */
+  def oamRead(index: UInt): UInt = logic.oam.readAsync(index)
+
   val logic = during setup new Area {
     val bus = host[BusService]
     val retainer = retains(bus.busLock)

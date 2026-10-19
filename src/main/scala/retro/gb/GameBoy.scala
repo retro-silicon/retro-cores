@@ -31,13 +31,12 @@ object Gb {
   val P1 = 0xFF00; val SB = 0xFF01; val SC = 0xFF02
   val DIV = 0xFF04; val TIMA = 0xFF05; val TMA = 0xFF06; val TAC = 0xFF07
   val IF = 0xFF0F; val IE = 0xFFFF
-  val LCDC = 0xFF40; val STAT = 0xFF41; val LY = 0xFF44; val LYC = 0xFF45; val DMA = 0xFF46
-  /** LCD registers that are plain storage until there is a PPU to read them. */
-  val lcdPlain = Seq(0xFF42, 0xFF43, 0xFF47, 0xFF48, 0xFF49, 0xFF4A, 0xFF4B) // SCY SCX BGP OBP0 OBP1 WY WX
+  val LCDC = 0xFF40; val STAT = 0xFF41; val SCY = 0xFF42; val SCX = 0xFF43; val LY = 0xFF44; val LYC = 0xFF45
+  val DMA = 0xFF46; val BGP = 0xFF47; val OBP0 = 0xFF48; val OBP1 = 0xFF49; val WY = 0xFF4A; val WX = 0xFF4B
 
-  /** M-cycles per scanline, visible lines, lines per frame; OAM scan and pixel transfer ends. */
+  /** M-cycles per scanline, visible lines, lines per frame; the M-cycle the OAM scan ends. */
   val lineCycles = 114; val visibleLines = 144; val frameLines = 154
-  val oamEnd = 20; val transferEnd = 63
+  val oamEnd = 20
   /** The timer counter bit whose falling edges clock the serial port (8192 Hz). */
   val serialClockBit = 8
 
@@ -231,58 +230,6 @@ class SerialPlugin extends GbPeripheral(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
   }
 }
 
-/** LCD timing without pixels: LCDC, STAT, LY, LYC and their interrupts, with fixed mode lengths
-  * (OAM scan 20 M-cycles, transfer 43, HBlank 51). Enough for software that waits on LY or
-  * VBlank. The scroll, palette and window registers are plain storage. */
-class LcdTimingPlugin(resetLcdc: Int = 0) extends GbPeripheral(SizeMapping(0xFF40, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
-  def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
-    val lcdc = Reg(UInt(8 bits)).init(resetLcdc).simPublic()
-    val statSelect = Reg(UInt(4 bits)) init 0
-    val lyc = Reg(UInt(8 bits)) init 0
-    val x = Reg(UInt(7 bits)).init(0).simPublic()
-    val ly = Reg(UInt(8 bits)).init(0).simPublic()
-    val statLine = RegInit(False)
-    val on = lcdc(7)
-
-    // The tick.
-    val xTicked = UInt(7 bits)
-    val lyTicked = UInt(8 bits)
-    when(!on) {
-      xTicked := 0
-      lyTicked := 0
-    } elsewhen (x === Gb.lineCycles - 1) {
-      xTicked := 0
-      lyTicked := (ly === Gb.frameLines - 1) ? U(0, 8 bits) | ly + 1
-    } otherwise {
-      xTicked := x + 1
-      lyTicked := ly
-    }
-    val mode = UInt(2 bits)
-    mode := 0
-    when(on) {
-      when(lyTicked >= Gb.visibleLines) { mode := 1 } elsewhen (xTicked < Gb.oamEnd) { mode := 2 } elsewhen (xTicked < Gb.transferEnd) { mode := 3 }
-    }
-    val coincidence = lyTicked === lyc
-    val line = on && ((statSelect(3) && coincidence) || (statSelect(2) && mode === 2) ||
-      (statSelect(1) && mode === 1) || (statSelect(0) && mode === 0))
-    irq(0) := on && ly === Gb.visibleLines - 1 && x === Gb.lineCycles - 1
-    irq(1) := line && !statLine
-
-    val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
-    regs.readAndWrite(lcdc, Gb.LCDC)
-    regs.readAndWrite(statSelect, Gb.STAT, 3)
-    regs.read(coincidence, Gb.STAT, 2)
-    regs.read(mode, Gb.STAT, 0)
-    regs.read(lyTicked, Gb.LY)
-    regs.readAndWrite(lyc, Gb.LYC)
-    for (a <- Gb.lcdPlain) regs.createReadAndWrite(UInt(8 bits), a) init 0
-
-    x := xTicked
-    ly := lyTicked
-    statLine := line
-  }
-}
-
 /** P1. `buttons` pins, high when pressed: bits 0-3 Right Left Up Down, bits 4-7 A B Select Start.
   * Any selected input going from released to pressed requests the joypad interrupt. */
 class JoypadPlugin extends GbPeripheral(SingleMapping(Gb.P1), Gb.Irq.JOYPAD) {
@@ -323,7 +270,7 @@ object GameBoy {
     new InterruptControllerPlugin,
     new TimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
     new SerialPlugin,
-    new LcdTimingPlugin(if (postBoot) Gb.PostBoot.lcdc else 0),
+    new PpuPlugin(if (postBoot) Gb.PostBoot.lcdc else 0),
     new JoypadPlugin
   ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil) ++ cartridge.map(new CartridgePlugin(_))
 

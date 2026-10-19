@@ -12,13 +12,13 @@ import scala.util.Random
 
 /** System cosimulation: the `GameBoy` RTL (SM83 and SoC plugins in one host) against
   * `GbReference`. Every retired instruction must match in M-cycles, ordered bus accesses (so
-  * every I/O register read, timer and LCD state included) and CPU registers, and the serial
-  * port must send the same bytes. */
+  * every I/O register read, timer and LCD state included) and CPU registers, the serial
+  * port must send the same bytes, and the PPU must draw the same frames. */
 class GameBoySim extends AnyFunSuite {
   lazy val compiled = SimConfig.withVerilator.compile(GameBoy())
   val implemented = Sm83.names.keys.filter(_ < 0x100).toIndexedSeq.sorted
 
-  case class Result(seen: Map[Int, Int], serial: Seq[Int], ref: GbReference)
+  case class Result(seen: Map[Int, Int], serial: Seq[Int], ref: GbReference, frames: Int)
 
   /** @param cart        the cartridge: answers every address the SoC leaves external
     * @param buttonRate  chance per M-cycle that the joypad inputs change
@@ -30,6 +30,7 @@ class GameBoySim extends AnyFunSuite {
       val buttons = dut.host[JoypadPlugin].buttons
       val tx = dut.host[SerialPlugin].tx
       val done = dut.host[TracePlugin].logic.done
+      val lcd = dut.host[PpuPlugin].lcd
       val mem = cart.clone()
       val buttonLog = ArrayBuffer[Int]()
       val ref = new GbReference(cart.clone())
@@ -54,6 +55,10 @@ class GameBoySim extends AnyFunSuite {
         }
       }
       ref.buttonsAt = k => buttonLog(k.toInt)
+      val frame = Array.fill(160 * 144)(0)
+      var lastY = 0
+      val rtlFrames, refFrames = ArrayBuffer[Array[Int]]()
+      ref.ppu.onFrame = f => refFrames += f.clone()
 
       val rnd = new Random(seed)
       var pressed = 0
@@ -67,6 +72,11 @@ class GameBoySim extends AnyFunSuite {
         }
         if (io.cmd.valid.toBoolean && io.cmd.write.toBoolean && io.cmd.address.toInt >= 0x8000) mem(io.cmd.address.toInt) = io.cmd.data.toInt
         if (tx.valid.toBoolean) serial += tx.payload.toInt
+        val valid = lcd.valid.toInt
+        val y = lcd.y.toInt
+        if (valid != 0) for (i <- 0 until 4 if (valid >> i & 1) != 0) frame(y * 160 + lcd.x(i).toInt) = lcd.shade(i).toInt
+        if (lastY == Gb.visibleLines - 1 && y == Gb.visibleLines) rtlFrames += frame.clone()
+        lastY = y
         if (rnd.nextDouble() < buttonRate) { pressed = rnd.nextInt(256); buttons #= pressed }
       }
       new Probe(dut.host[TracePlugin], dut.clockDomain).add(cosim)
@@ -77,7 +87,12 @@ class GameBoySim extends AnyFunSuite {
       val budget = if (maxCycles > 0) maxCycles else instructions * 50L
       dut.clockDomain.waitSamplingWhere(checked >= instructions || cycles > budget)
       assert(serial == ref.serialOut, s"serial: rtl $serial, reference ${ref.serialOut}")
-      result = Result(seen.toMap, serial.toList, ref)
+      val frames = rtlFrames.size min refFrames.size
+      for (k <- 0 until frames) {
+        val differ = GbFrame.differences(rtlFrames(k), refFrames(k))
+        assert(differ == 0, s"frame $k: $differ pixels differ")
+      }
+      result = Result(seen.toMap, serial.toList, ref, frames)
       simSuccess()
     }
     result
@@ -143,6 +158,51 @@ class GameBoySim extends AnyFunSuite {
     val r = cosim(cart(0x100 -> main, 0x40 -> handler), 30, seed = 2, maxCycles = 40000)
     assert(r.seen(Sm83.DISPATCH) >= 2)
     assert(r.ref.hram(1) == 144, s"LY in the VBlank handler: ${r.ref.hram(1)}")
+  }
+
+  /** Random tiles, tile maps, objects and LCD registers, copied in by the CPU; then a loop that
+    * keeps changing SCX, mid-line too, and reads STAT and LY. Each frame's pixels and every STAT
+    * read must match the model, so object, window and scroll penalties line up dot for dot. */
+  test("PPU: random tiles, objects, scroll and window") {
+    val main = Seq(
+      0xF3, //             DI
+      0x31, 0xFE, 0xFF, // LD SP,FFFE
+      0x21, 0x00, 0x80, // LD HL,8000
+      0x11, 0x00, 0x40, // LD DE,4000
+      0x06, 0x08, //       LD B,8          tiles 00-7F
+      0xCD, 0x50, 0x01, // CALL 0150
+      0x21, 0x00, 0x98, // LD HL,9800
+      0x06, 0x08, //       LD B,8          both tile maps
+      0xCD, 0x50, 0x01, // CALL 0150
+      0x21, 0x00, 0xFE, // LD HL,FE00
+      0x06, 0x01, //       LD B,1          OAM
+      0xCD, 0x50, 0x01, // CALL 0150
+      0x21, 0x00, 0x60) // LD HL,6000      LCDC SCY SCX BGP OBP0 OBP1 WY WX
+    val regs = Seq(0x40, 0x42, 0x43, 0x47, 0x48, 0x49, 0x4A, 0x4B).flatMap(r => Seq(0x2A, 0xE0, r)) // LD A,(HL+) / LDH (r),A
+    val loop = Seq(
+      0xF0, 0x43, //       LDH A,(SCX)
+      0x3C, //             INC A
+      0xE0, 0x43, //       LDH (SCX),A
+      0xF0, 0x41, //       LDH A,(STAT)
+      0xF0, 0x44, //       LDH A,(LY)
+      0x18, 0xF5) //       JR loop
+    val copy = Seq(0x1A, 0x22, 0x1C, 0x20, 0xFB, 0x14, 0x05, 0x20, 0xF7, 0xC9) // B pages from DE to HL
+    for (seed <- 0 until 4) {
+      val rnd = new Random(seed)
+      val c = cart(0x100 -> (main ++ regs ++ loop), 0x150 -> copy)
+      for (a <- 0x4000 until 0x5000) c(a) = rnd.nextInt(256)
+      for (o <- 0 until 40) {
+        c(0x5000 + 4 * o) = rnd.nextInt(176)
+        c(0x5001 + 4 * o) = rnd.nextInt(176)
+        c(0x5002 + 4 * o) = rnd.nextInt(256)
+        c(0x5003 + 4 * o) = rnd.nextInt(256)
+      }
+      val lcdRegs = Seq(0x80 | rnd.nextInt(0x80), rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256),
+        rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(150), rnd.nextInt(170))
+      for ((v, i) <- lcdRegs.zipWithIndex) c(0x6000 + i) = v
+      val r = cosim(c, 36000, seed)
+      assert(r.frames >= 3, s"only ${r.frames} frames")
+    }
   }
 
   // Random code from the cartridge, after a prologue that enables every interrupt source, a fast

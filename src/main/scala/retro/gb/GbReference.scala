@@ -5,7 +5,7 @@ import retro.sm83._
 import scala.collection.mutable.ArrayBuffer
 
 /** Game Boy system reference model for cosimulation: `Sm83Reference` attached to models of the
-  * on-chip RAMs, IF/IE, timer, serial port, LCD timing and joypad, written from the Pan Docs
+  * on-chip RAMs, IF/IE, timer, serial port, PPU (`PpuReference`) and joypad, written from the Pan Docs
   * descriptions independently of the RTL plugins.
   *
   * Every M-cycle the peripherals tick first, then the bus access sees the ticked state and a
@@ -34,11 +34,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   var active, internalClock = false
   /** Bytes sent with the internal clock. */
   val serialOut = ArrayBuffer[Int]()
-  // LCD
-  var lcdc = if (postBoot) Gb.PostBoot.lcdc else 0
-  var statSelect, lyc, x, ly = 0
-  var statLine = false
-  val lcdPlain = collection.mutable.Map[Int, Int]().withDefaultValue(0)
+  val ppu = new PpuReference(vram, oam, postBoot)
   // OAM DMA
   var dmaRegister = 0xFF
   var dmaStartIn, dmaSource, dmaIndex = 0
@@ -52,8 +48,6 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
 
   if (postBoot) cpu.load(Gb.PostBoot.regs.map { case (r, v) => r.name -> v.toInt }.toMap)
 
-  def mode = if ((lcdc & 0x80) == 0) 0 else if (ly >= Gb.visibleLines) 1 else if (x < Gb.oamEnd) 2 else if (x < Gb.transferEnd) 3 else 0
-  def coincidence = ly == lyc
   def joypadLines = {
     val pressed = (if ((select & 1) == 0) buttons & 0xF else 0) | (if ((select & 2) == 0) buttons >> 4 else 0)
     ~pressed & 0xF
@@ -75,12 +69,8 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     case Gb.TIMA => tima
     case Gb.TMA => tma
     case Gb.TAC => 0xF8 | tac
-    case Gb.LCDC => lcdc
-    case Gb.STAT => 0x80 | statSelect << 3 | (if (coincidence) 4 else 0) | mode
-    case Gb.LY => ly
-    case Gb.LYC => lyc
-    case _ if Gb.lcdPlain.contains(a) => lcdPlain(a)
     case Gb.DMA => dmaRegister
+    case _ if a >= Gb.LCDC && a <= Gb.WX => ppu.read(a)
     case _ if a >= 0xFF00 => 0xFF
     case _ => external(a)
   }
@@ -107,16 +97,10 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
       bits -= 1
       if (bits == 0) { active = false; iflag |= 1 << Gb.Irq.SERIAL.index }
     }
-    // LCD
-    val on = (lcdc & 0x80) != 0
-    if (on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1) iflag |= 1 << Gb.Irq.VBLANK.index
-    if (!on) { x = 0; ly = 0 }
-    else if (x == Gb.lineCycles - 1) { x = 0; ly = if (ly == Gb.frameLines - 1) 0 else ly + 1 }
-    else x += 1
-    val line = on && (((statSelect & 8) != 0 && coincidence) || ((statSelect & 4) != 0 && mode == 2) ||
-      ((statSelect & 2) != 0 && mode == 1) || ((statSelect & 1) != 0 && mode == 0))
-    if (line && !statLine) iflag |= 1 << Gb.Irq.STAT.index
-    statLine = line
+    // PPU
+    val (vblank, stat) = ppu.tick()
+    if (vblank) iflag |= 1 << Gb.Irq.VBLANK.index
+    if (stat) iflag |= 1 << Gb.Irq.STAT.index
     // OAM DMA
     dmaCopying = dmaStartIn == 1 || dmaActive
     if (dmaCopying) {
@@ -162,11 +146,8 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
         case Gb.TIMA => if (!reloading) { tima = d; overflowed = false }
         case Gb.TMA => tma = d; if (reloading) tima = d
         case Gb.TAC => tac = d & 7
-        case Gb.LCDC => lcdc = d
-        case Gb.STAT => statSelect = (d >> 3) & 0xF
-        case Gb.LYC => lyc = d
-        case _ if Gb.lcdPlain.contains(a) => lcdPlain(a) = d
         case Gb.DMA => dmaRegister = d; dmaStartIn = 2
+        case _ if a >= Gb.LCDC && a <= Gb.WX => ppu.write(a, d)
         case _ =>
       }
       // Resetting DIV or changing TAC can drop the selected bit: that is a falling edge too.

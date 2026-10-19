@@ -71,9 +71,9 @@ class GbReferenceSpec extends AnyFunSuite {
   test("LCD: LY advances every 114 M-cycles and VBlank is flagged entering line 144") {
     val gb = fresh()
     gb.write(Gb.LCDC, 0x80) // on from the next tick, which starts line 0
-    for (_ <- 0 until 112) gb.idle()
+    for (_ <- 0 until 111) gb.idle()
     assert(gb.read(Gb.LY) == 0)
-    assert(gb.read(Gb.LY) == 1)
+    assert(gb.read(Gb.LY) == 1) // the line's last M-cycle: LY already reads the next line
     for (_ <- 0 until 142 * 114 - 1) gb.idle()
     assert(gb.read(Gb.LY) == 143 && gb.read(Gb.IF) == 0xE0)
     for (_ <- 0 until 112) gb.idle()

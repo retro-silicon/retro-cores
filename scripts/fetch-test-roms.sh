@@ -1,6 +1,7 @@
 #!/bin/sh
 # Downloads the freely distributable Game Boy test ROMs into ./roms (gitignored):
-# Blargg's CPU tests (gbdev.gg8.se mirror of the originals) and the Mooneye Test Suite (MIT).
+# Blargg's CPU tests (gbdev.gg8.se mirror of the originals), the Mooneye Test Suite (MIT) and
+# dmg-acid2 (MIT) with its reference image.
 # `sbt "testOnly retro.gb.GameBoyRomSim"` runs them; without ./roms that suite is skipped.
 set -eu
 cd "$(dirname "$0")/.."
@@ -14,4 +15,7 @@ done
 mts=mts-20240926-1737-443f6e1
 curl -fsSL -o "$tmp/mts.zip" "https://gekkio.fi/files/mooneye-test-suite/$mts/$mts.zip"
 unzip -qo "$tmp/mts.zip" -d "$tmp" && rm -rf roms/mooneye && mv "$tmp/$mts" roms/mooneye
+mkdir -p roms/dmg-acid2
+curl -fsSL -o roms/dmg-acid2/dmg-acid2.gb https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb
+curl -fsSL -o roms/dmg-acid2/reference-dmg.png https://raw.githubusercontent.com/mattcurrie/dmg-acid2/master/img/reference-dmg.png
 find roms -name '*.gb' | wc -l
