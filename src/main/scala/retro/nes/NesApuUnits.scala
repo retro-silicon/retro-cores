@@ -1,5 +1,6 @@
 package retro.nes
 
+import retro.core._
 import spinal.core._
 
 /** The APU's tone channels in hardware, mirroring `NesPulse`, `NesTriangle` and `NesNoise`
@@ -110,7 +111,7 @@ class NoiseUnit extends Area {
   def output(playing: Bool): UInt = (playing && !lfsr(0)) ? envelope.output | U(0, 4 bits)
 }
 
-/** `NesMixer` as two ROMs. */
+/** `NesMixer` as two ROMs; the big one reads like block RAM (`MidCycleRead`). */
 class MixerUnit extends Area {
   require(NesMixer.pulse.last + NesMixer.tnd.last < 65536)
   val pulseRom = Mem(UInt(16 bits), NesMixer.pulse.map(v => U(v, 16 bits)).toSeq)
@@ -118,6 +119,6 @@ class MixerUnit extends Area {
   def mix(pulse1: UInt, pulse2: UInt, triangle: UInt, noise: UInt, dmc: UInt): UInt = {
     val (wt, wn, wd) = NesMixer.tndWeights
     val l = (triangle * U(wt, 7 bits)).resize(13) + (noise * U(wn, 6 bits)).resize(13) + (dmc * U(wd, 6 bits)).resize(13)
-    pulseRom.readAsync(pulse1 +^ pulse2) + tndRom.readAsync(l)
+    pulseRom.readAsync(pulse1 +^ pulse2) + MidCycleRead(tndRom, l)
   }
 }

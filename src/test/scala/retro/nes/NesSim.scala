@@ -95,15 +95,6 @@ object NesRtl {
           if (a != b && failure.isEmpty) failure = Some(new AssertionError(s"audio sample $samples (frame ${ref.ppu.frames}): rtl $a, ref $b"))
           samples += 1
         }
-        val tap = pixelTap.toBigInt
-        if (tap != 0) for (i <- 0 until 3) {
-          val p = (tap >> (23 * i)).toInt & 0x7FFFFF
-          if ((p >> 22) != 0) {
-            val (y, x) = ((p >> 14) & 0xFF, (p >> 6) & 0xFF)
-            frame(y * 256 + x) = p & 0x3F
-            if (y == 239 && x == 255) rtlFrames += frame.clone()
-          }
-        }
         while (rtlFrames.nonEmpty && refFrames.nonEmpty) {
           val (a, b) = (rtlFrames.dequeue(), refFrames.dequeue())
           val differ = a.indices.count(i => a(i) != b(i))
@@ -117,8 +108,18 @@ object NesRtl {
         }
       }
       val probe = new Probe(dut.host[TracePlugin], dut.clockDomain, cycleEvents = false, autoSample = false).add(cosim)
-      // One sampling callback for the probe and the checks.
-      dut.clockDomain.onSamplings { probe.sample(); sample() }
+      // One sampling callback: a pixel every fast clock; the probe and the checks every CPU cycle,
+      // at the clock ending phase 2.
+      val phase = dut.phase
+      dut.clockDomain.onSamplings {
+        val p = pixelTap.toInt
+        if ((p >> 22) != 0) {
+          val (y, x) = ((p >> 14) & 0xFF, (p >> 6) & 0xFF)
+          frame(y * 256 + x) = p & 0x3F
+          if (y == 239 && x == 255) rtlFrames += frame.clone()
+        }
+        if (phase.toInt == 2) { probe.sample(); sample() }
+      }
       dut.clockDomain.forkStimulus(10)
       dut.clockDomain.waitSamplingWhere(failure.nonEmpty || verdict != NesRoms.Running || ref.ppu.frames >= budget)
       for (t <- failure) throw t

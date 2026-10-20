@@ -135,7 +135,7 @@ sbt "Test/runMain retro.nes.NesSpeed"              # cycles per second: model, R
 
 ```sh
 sbt "runMain retro.nes.NesVerilog"                 # writes gen/Nes.v (NROM cartridge, no trace taps)
-scripts/synth-nes-ecp5.sh                          # Yosys and nextpnr for an ECP5-85F: size and clock
+scripts/synth-nes-ecp5.sh                          # Yosys and nextpnr for an ECP5-25F (DEVICE=85k etc.): size and clock
 ```
 
 `retro.nes.Nes(spec)` is the 2A03 plugins plus the NES ones in one host:
@@ -143,7 +143,7 @@ scripts/synth-nes-ecp5.sh                          # Yosys and nextpnr for an EC
 | NES plugin | Addresses | What it does |
 |---|---|---|
 | `RamPlugin` | 0000-1FFF | 2 KB of RAM, mirrored |
-| `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: three dots per CPU cycle with the access between the second and third, CIRAM, OAM, palette, `ppu_pixels` port |
+| `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: one dot per fast clock (three per CPU cycle, the access between the second and third), CIRAM, OAM, palette, `ppu_pixel` port |
 | `NesApuPlugin` | 4000-4017 | frame counter and IRQ, length counters, pulses, triangle, noise, DMC, mixer (`audio` port, one sample per cycle), 4015, controller 1 (`joypad1` pins), and the DMA unit (OAM DMA and DMC fetches) as a second bus master above the CPU |
 | `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, mirroring, CNROM's bank, MMC1's registers or MMC3's banks and scanline IRQ (fed every PPU bus address); images loaded by the sim |
 | `NesOpenBusPlugin` | everything else | the data bus latch, for unmapped reads and undriven bits |
@@ -155,17 +155,22 @@ registers, every frame pixel for pixel, and the APU's mixed output in every cycl
 ROM reports its result. All 144 ROMs run to their result with no difference from the model, so
 the RTL passes the same 138.
 
-On an ECP5-85F (Yosys, nextpnr) the NES with an NROM cartridge uses 26% of the logic cells
-(22.0k; Yosys maps 14.6k LUT4s), 1.3k flip-flops, 0.9k LUT RAM blocks, 5 block RAMs and 2
-multipliers, with no latches, and closes at 25 MHz against the 1.79 MHz it needs (one clock per
-CPU cycle). The CPU's RAM, PRG ROM and PRG RAM are read on the falling clock edge
-(`MidCycleRead`), which block RAM can do (the empty PRG ROM is optimized away here; a real build
-gives it block RAM or external memory). The PPU's memories (CIRAM, OAM, CHR) are still read
-combinationally, three dots per clock, so they stay in LUT RAM, one copy per read port.
+The NES runs on a clock three times the CPU's (5.37 MHz), one PPU dot per clock:
+`RetroCore(plugins, clockDivider = 3)` runs the plugins on that clock enabled every third
+cycle, and the PPU and MMC3's scanline counter build their logic on the fast clock
+(`CoreClocks`). That lets every large memory be block RAM: the PPU reads CIRAM and CHR
+synchronously, a clock ahead, addressed from the state the current dot leaves, and the CPU's
+RAM, PRG ROM, PRG RAM and the mixer's table are read on the fast clock (`MidCycleRead`).
 
-Simulation speed (`NesSpeed`): the cosim runs about 10 frames per second per core, the RTL alone
-22 and the model 87, so the whole report takes about 18 minutes on four cores (it was 2 frames
-per second).
+On an ECP5-25F (Yosys, nextpnr) the NES with an NROM cartridge (32 KB PRG and 8 KB CHR ROM,
+built in) uses 30% of the logic cells (7.4k; Yosys maps 5.9k LUT4s), 1.6k flip-flops, 64 LUT
+RAM blocks, 31 of the 56 block RAMs and 2 multipliers, with no latches, and closes at 44 MHz
+against the 5.37 MHz it needs. (With the PPU running three dots per CPU clock, it was 22.0k
+cells on an 85F with the ROMs left out.)
+
+Simulation speed (`NesSpeed`): the cosim runs about 8 frames per second per core, the RTL alone
+14 and the model 110, so the whole report takes about 24 minutes on four cores (it was 2 frames
+per second; 10 before the PPU went to one dot per clock).
 What it takes:
 - `retro.sim.FastVerilator` builds the C++ at -O3 (SpinalSim's default is -O0) and emits
   SpinalSim's `simPublic` markers as `verilator public_flat_rd`. Verilator assumes a `public`

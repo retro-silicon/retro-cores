@@ -22,8 +22,8 @@ object NesSpeed extends App {
     dut.host[NesApuPlugin].buttons #= 0
     dut.host[NesInterruptsPlugin].logic.get.button #= false
     dut.clockDomain.forkStimulus(10)
-    dut.clockDomain.waitSampling(10)
-    time("rtl") { dut.clockDomain.waitSampling(n) }
+    dut.clockDomain.waitSampling(30)
+    time("rtl") { dut.clockDomain.waitSampling(3 * n) }
   }
   time("cosim") { NesRtl.cosim(file, frames) }
 }

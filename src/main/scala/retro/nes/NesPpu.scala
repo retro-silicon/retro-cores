@@ -15,13 +15,13 @@ case class NesPixel() extends Bundle {
   val color = UInt(6 bits)
 }
 
-/** A memory write the CPU access makes, which the dot after it must see. */
+/** A memory write the CPU access makes. */
 case class NesPpuWrite[A <: Data, D <: Data](address: A, data: D) {
   val enable = Bool()
 }
 
 /** Everything the 2C02 holds between dots, as one bundle so a dot is a function from one value
-  * of it to the next (`NesPpuPlugin.dot`), chained three times per CPU cycle. */
+  * of it to the next (`NesPpuPlugin.dot`). */
 case class NesPpuState() extends Bundle {
   val ctrl, mask = UInt(8 bits)
   val vblank, sprite0Hit, overflow, w = Bool()
@@ -64,14 +64,18 @@ case class NesPpuState() extends Bundle {
   * read race, and the odd-frame skipped dot. CIRAM (2 KB), OAM and palette RAM live here; CHR
   * and mirroring come from `NesCartridgePlugin`.
   *
-  * Three dots per CPU cycle, with the CPU's access between the second and the third, as the
-  * model has it. Each dot reads CIRAM, CHR and OAM at most once, through its own port.
+  * One dot per fast clock (`CoreClocks`, three per CPU cycle): phase 0 runs the first dot,
+  * phase 1 the second and then the CPU's access, phase 2 the third, as the model has it. The
+  * access's writes land at the end of phase 1, its read value is held for the CPU through phase
+  * 2, and a 2007 read fills the read buffer at the end of phase 2. CIRAM and CHR are read
+  * synchronously, as block RAM does: each clock reads what the next dot fetches, addressed from
+  * the state this dot leaves, and the access reads through a second port.
   *
   * Where the model takes shortcuts the RTL cannot, the RTL scans OAM one entry per dot from dot
   * 66 instead of all at once at dot 65, with the same result unless OAM or the sprite size
-  * changes during the scan. Pixels come out on `pixels`, up to three per clock. */
+  * changes during the scan. Pixels come out on `pixel`, one per fast clock. */
 class NesPpuPlugin extends FiberPlugin {
-  var pixels: Vec[Flow[NesPixel]] = null
+  var pixel: Flow[NesPixel] = null
 
   /** Power-up palette, as in `NesPpuReference`. */
   val powerUpPalette = Seq(0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C,
@@ -85,7 +89,13 @@ class NesPpuPlugin extends FiberPlugin {
     retainer.release()
     val cart = host[NesCartridgePlugin]
     val ints = host[NesInterruptsPlugin]
-    pixels = out(Vec.fill(3)(Flow(NesPixel()))).setName("ppu_pixels")
+    pixel = out(Flow(NesPixel())).setName("ppu_pixel")
+    val clocks = RetroCore.clocks.get
+    require(clocks.divider == 3, "the PPU runs a dot per fast clock, so the core needs a clock divider of 3")
+    val fast = new ClockingArea(clocks.fast) {
+    val phase = clocks.phase
+    /** The CPU's access happens in this clock, after the dot. */
+    val accessPhase = phase === 1
 
     val state = Reg(NesPpuState())
     for (d <- state.flatten) d match {
@@ -118,35 +128,37 @@ class NesPpuPlugin extends FiberPlugin {
       r
     }
 
-    // Memory writes come from the CPU access in the middle of the cycle; the third dot reads past
-    // them, as the model's does.
+    // Memory writes come from the CPU access, at the end of phase 1.
     val ciramWrite = NesPpuWrite(UInt(11 bits), UInt(8 bits))
     val chrWrite = NesPpuWrite(UInt(13 bits), UInt(8 bits))
     val oamWrite = NesPpuWrite(UInt(6 bits), Bits(32 bits))
     val oamWriteMask = Bits(4 bits)
     val paletteWrite = NesPpuWrite(UInt(5 bits), UInt(6 bits))
 
-    /** One dot. `bypass` makes this dot's memory reads see the access's writes. */
-    def dot(s: NesPpuState, pal: Vec[UInt], bypass: Boolean): (NesPpuState, Flow[NesPixel], (Bool, Bool)) = {
-      def ciramRead(a: UInt): UInt = {
-        val i = cart.ciramIndex(a, afterAccess = bypass)
-        val r = ciram.readAsync(i)
-        if (bypass) (ciramWrite.enable && ciramWrite.address === i) ? ciramWrite.data | r else r
-      }
-      def chrRead(a: UInt): UInt = {
-        val r = cart.chrRead(a, afterAccess = bypass)
-        if (bypass && cart.spec.chrRam) (chrWrite.enable && chrWrite.address === a(12 downto 0)) ? chrWrite.data | r else r
-      }
-      def oamRead(entry: UInt): Bits = {
-        val r = oam.readAsync(entry)
-        if (bypass) {
-          val merged = Bits(32 bits)
-          for (b <- 0 until 4) merged(b * 8 + 7 downto b * 8) := (oamWrite.enable && oamWrite.address === entry && oamWriteMask(b)) ?
-            oamWrite.data(b * 8 + 7 downto b * 8) | r(b * 8 + 7 downto b * 8)
-          merged
-        } else r
-      }
+    /** The addresses a dot in state `s` fetches from: the nametable or attribute byte (CIRAM, a
+      * PPU address 2000-2FFF) and the background or sprite pattern (CHR, 0000-1FFF). */
+    def fetchAddresses(s: NesPpuState): (UInt, UInt) = {
+      val d = s.dot
+      val phase = (d - 1)(2 downto 0)
+      val v = s.v
+      val ntAddress = U(0x2, 2 bits) @@ v(11 downto 0)
+      val atAddress = U(0x23C, 10 bits) @@ U(0, 4 bits) | (U(0, 2 bits) @@ v(11 downto 10) @@ U(0, 10 bits)) |
+        (U(0, 8 bits) @@ v(9 downto 7) @@ U(0, 3 bits)) | (U(0, 11 bits) @@ v(4 downto 2))
+      val bgPattern = (s.ctrl(4) ## s.ntByte ## phase(1) ## v(14 downto 12)).asUInt
+      val sprite = (d - 257).resize(6 bits)
+      val spriteFetch = d >= 257 && d <= 320 && sprite(2) && !sprite(0)
+      val si = sprite(5 downto 3)
+      val h16 = s.ctrl(5)
+      val row0 = (s.line - s.spY(si)).resize(4 bits)
+      val tile = s.spTile(si)
+      val row = s.spAttr(si)(7) ? ((h16 ? U(15, 4 bits) | U(7, 4 bits)) - row0) | row0
+      val spPattern = h16 ? (tile(0) ## tile(7 downto 1) ## row(3) ## sprite(1) ## row(2 downto 0)).asUInt |
+                            (s.ctrl(3) ## tile ## sprite(1) ## row(2 downto 0)).asUInt
+      (phase(1) ? atAddress | ntAddress, spriteFetch ? spPattern | bgPattern)
+    }
 
+    /** One dot, given what it fetches (`fetchAddresses` of `s`) from CIRAM and CHR. */
+    def dot(s: NesPpuState, pal: Vec[UInt], ciramValue: UInt, chrValue: UInt): (NesPpuState, Flow[NesPixel], (Bool, Bool)) = {
       val o = NesPpuState()
       o := s
       val px = Flow(NesPixel())
@@ -203,22 +215,11 @@ class NesPpuPlugin extends FiberPlugin {
       val fetching = (d >= 1 && d <= 256) || (d >= 321 && d <= 336)
       val phase = (d - 1)(2 downto 0)
       val v = s.v
-      val ntAddress = U(0x2, 2 bits) @@ v(11 downto 0)
-      val atAddress = U(0x23C, 10 bits) @@ U(0, 4 bits) | (U(0, 2 bits) @@ v(11 downto 10) @@ U(0, 10 bits)) |
-        (U(0, 8 bits) @@ v(9 downto 7) @@ U(0, 3 bits)) | (U(0, 11 bits) @@ v(4 downto 2))
-      val ciramValue = ciramRead(phase(1) ? atAddress | ntAddress)
-      val bgPattern = (s.ctrl(4) ## s.ntByte ## phase(1) ## v(14 downto 12)).asUInt
       val sprite = (d - 257).resize(6 bits)
       val spriteFetch = d >= 257 && d <= 320 && sprite(2) && !sprite(0)
       val si = sprite(5 downto 3)
       val high = sprite(1)
-      val row0 = (line - s.spY(si)).resize(4 bits)
-      val flipV = s.spAttr(si)(7)
       val tile = s.spTile(si)
-      val row = flipV ? ((h16 ? U(15, 4 bits) | U(7, 4 bits)) - row0) | row0
-      val spPattern = h16 ? (tile(0) ## tile(7 downto 1) ## row(3) ## high ## row(2 downto 0)).asUInt |
-                            (s.ctrl(3) ## tile ## high ## row(2 downto 0)).asUInt
-      val chrValue = chrRead(spriteFetch ? spPattern | bgPattern)
       val spBits = (si < s.spCount) ? (s.spAttr(si)(6) ? chrValue.reversed | chrValue) | U(0, 8 bits)
       // The address bus as the cartridge sees it (`NesCartridge.ppuBus`): fetches, sprite
       // pattern fetches (unused slots fetch tile FF), and the garbage nametable fetches.
@@ -235,7 +236,7 @@ class NesPpuPlugin extends FiberPlugin {
       val v4 = (pre && d >= 280 && d <= 304) ? ((v3 & ~U(0x7BE0, 15 bits)) | (s.t & U(0x7BE0, 15 bits))) | v3
 
       // Sprite evaluation: started at dot 65, then one OAM entry per dot.
-      val entry = oamRead(s.evalN(5 downto 0))
+      val entry = oam.readAsync(s.evalN(5 downto 0))
       val bytes = entry.subdivideIn(8 bits).map(_.asUInt)
       val slot = s.nxCount.resize(3 bits)
 
@@ -334,8 +335,6 @@ class NesPpuPlugin extends FiberPlugin {
       }
       val a = s.v(13 downto 0)
       val toPalette = a >= 0x3F00
-      val ciramValue = ciram.readAsync(cart.ciramIndex(a))
-      val chrValue = cart.chrRead(a)
       val oamEntry = oam.readAsync(s.oamAddr(7 downto 2))
       val oamByte = oamEntry.subdivideIn(8 bits)(s.oamAddr(1 downto 0)).asUInt
       val increment = s.ctrl(2) ? U(32, 15 bits) | U(1, 15 bits)
@@ -353,6 +352,9 @@ class NesPpuPlugin extends FiberPlugin {
       paletteWrite.address := paletteIndex(a)
       paletteWrite.data := value(5 downto 0)
       paletteWrite.enable := False
+      // A 2007 read refills the buffer from CHR below 2000, else CIRAM (also under the palette).
+      fill := False
+      fillFromChr := a < 0x2000 && !toPalette
 
       // What a read returns; latch refreshes and side effects only when it completes.
       val status = (s.vblank ## s.sprite0Hit ## s.overflow ## B"00000").asUInt
@@ -364,7 +366,7 @@ class NesPpuPlugin extends FiberPlugin {
         is(4) { readValue := oamByte }
         is(7) { when(!s.dataHold) { readValue := toPalette ? ((paletteValue & U(0x3F, 8 bits)) | (decayed & U(0xC0, 8 bits))) | s.buffer } }
       }
-      slave.rdata := readValue
+      rdata := readValue
 
       when(slave.readFire) {
         switch(register) {
@@ -377,13 +379,8 @@ class NesPpuPlugin extends FiberPlugin {
           is(4) { drive(oamByte, 0xFF) }
           is(7) {
             when(!s.dataHold) {
-              when(toPalette) {
-                drive(paletteValue, 0x3F)
-                o.buffer := ciramValue
-              } otherwise {
-                drive(s.buffer, 0xFF)
-                o.buffer := (a < 0x2000) ? chrValue | ciramValue
-              }
+              when(toPalette) { drive(paletteValue, 0x3F) } otherwise { drive(s.buffer, 0xFF) }
+              fill := True
               o.v := s.v + increment
             }
           }
@@ -424,23 +421,52 @@ class NesPpuPlugin extends FiberPlugin {
       (o, Seq((data7, a(12)), (vChanged && !renderingNow, o.v(12))))
     }
 
-    // ---- Three dots and the access in between -------------------------------------------------
-    val paletteAfter = CombInit(palette)
-    when(paletteWrite.enable) { paletteAfter(paletteWrite.address) := paletteWrite.data }
-    val (s1, p1, b1) = dot(state, palette, bypass = false)
-    val (s2, p2, b2) = dot(s1, palette, bypass = false)
-    val (s2a, accessBus) = access(s2)
-    val (s3, p3, b3) = dot(s2a, paletteAfter, bypass = true)
-    cart.ppuBus(Seq(b1, b2, b3), accessBus)
-    state := s3
-    palette := paletteAfter
-    pixels(0) := p1; pixels(1) := p2; pixels(2) := p3
-    /** The three pixels as one value (valid, y, x, color from the MSB; pixel 0 lowest), so a
-      * sim reads them in one go. */
-    val pixelTap = pixels.map(p => p.valid ## p.y ## p.x ## p.color).reduce((low, high) => high ## low).setName("ppu_pixel_tap").simPublic()
-    ciram.write(ciramWrite.address, ciramWrite.data, ciramWrite.enable)
-    cart.chrWrite(chrWrite.address, chrWrite.data, chrWrite.enable)
-    oam.write(oamWrite.address, oamWrite.data, oamWrite.enable, oamWriteMask)
-    ints.nmi := s3.vblank && s3.ctrl(7)
+    // ---- A dot, and in phase 1 the access after it ---------------------------------------------
+    val rdata = UInt(8 bits)
+    val fill, fillFromChr = Bool()
+    // What this dot fetches, read in the last clock.
+    val ciramDot, chrDot = UInt(8 bits)
+    val (s1, px, dotBus) = dot(state, palette, ciramDot, chrDot)
+    val (s1a, accessBus) = access(s1)
+    val next = NesPpuState()
+    next := (accessPhase ? s1a | s1)
+    // The buffer refill a 2007 read asked for in phase 1, from the access port's read.
+    val fillPending = RegNext(accessPhase && slave.readFire && fill).init(False)
+    val fillChr = RegNext(fillFromChr)
+    val ciramAccess = UInt(8 bits)
+    val chrAccess = UInt(8 bits)
+    when(fillPending) { next.buffer := fillChr ? chrAccess | ciramAccess }
+    state := next
+    // The read value, held for the CPU, which takes it at the end of phase 2.
+    slave.rdata := RegNextWhen(rdata, accessPhase)
+
+    // Memories. Writes land at the end of phase 1; the access port reads where the access does;
+    // the dot port reads what the next dot fetches, with the bank and mirroring registers as that
+    // dot sees them (after this CPU cycle's access unless the next dot is phase 1's).
+    val nextAfter = phase =/= 0
+    val (ciramNext, chrNext) = fetchAddresses(next)
+    val ciramIndexNext = cart.ciramIndex(ciramNext, nextAfter)
+    val ciramWriteNow = ciramWrite.enable && accessPhase && slave.writeFire
+    val fillNow = accessPhase && slave.readFire && fill
+    ciramAccess := ciram.readWriteSync(ciramWrite.address, ciramWrite.data, ciramWriteNow || (fillNow && !fillFromChr), ciramWriteNow)
+    val ciramBypass = RegNext(ciramWriteNow && ciramWrite.address === ciramIndexNext).init(False)
+    val ciramRead = ciram.readSync(ciramIndexNext)
+    ciramDot := ciramBypass ? RegNext(ciramWrite.data) | ciramRead
+    val chrWriteNow = chrWrite.enable && accessPhase && slave.writeFire
+    val (chrDotValue, chrAccessValue) = cart.chrPorts(chrNext, nextAfter, chrWrite.address, chrWrite.data,
+      chrWriteNow || (fillNow && fillFromChr), chrWriteNow)
+    chrDot := chrDotValue
+    chrAccess := chrAccessValue
+    oam.write(oamWrite.address, oamWrite.data, oamWrite.enable && accessPhase && slave.writeFire, oamWriteMask)
+    when(paletteWrite.enable && accessPhase && slave.writeFire) { palette(paletteWrite.address) := paletteWrite.data }
+
+    cart.ppuBus(dotBus, accessBus.map { case (valid, high) => (valid && accessPhase, high) }, accessPhase, phase === 2)
+    pixel := px
+    /** The pixel as one value (valid, y, x, color from the MSB), so a sim reads it in one go. */
+    val pixelTap = (px.valid ## px.y ## px.x ## px.color).setName("ppu_pixel_tap").simPublic()
+    // The CPU takes NMI as the third dot leaves it.
+    ints.nmi := next.vblank && next.ctrl(7)
+    }
+    def pixelTap = fast.pixelTap
   }
 }

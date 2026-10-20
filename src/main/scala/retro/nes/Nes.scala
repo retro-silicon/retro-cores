@@ -13,7 +13,9 @@ import spinal.lib.misc.plugin._
   *
   * Timing convention, the same as the model's: each CPU cycle the PPU runs two dots, the APU
   * ticks, the bus access happens (seeing that state, writes landing on top), the PPU runs its
-  * third dot, and the CPU samples NMI and IRQ as they are at the end of the cycle. */
+  * third dot, and the CPU samples NMI and IRQ as they are at the end of the cycle. The RTL runs
+  * on a clock three times the CPU's, one PPU dot per clock; the CPU and the rest tick on the
+  * third (`CoreClocks`). */
 object Nes {
   val OAMDMA = 0x4014; val APU_STATUS = 0x4015; val JOY1 = 0x4016; val FRAME_COUNTER = 0x4017
   /** APU length counter loads, indexed by the top 5 bits of the 4003/4007/400B/400F write. */
@@ -23,17 +25,17 @@ object Nes {
   /** The 2A03 plugins plus the NES ones, in one host. `NesOpenBusPlugin` claims every address
     * no other slave does, so the CPU has no external bus port. `romDecoder`: see `SequencerPlugin`
     * (the simulations use it). */
-  def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false): Seq[Hostable] =
+  def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None): Seq[Hostable] =
     Ricoh2A03.plugins(withTrace, external = false, romDecoder = romDecoder) ++ Seq(
     new NesInterruptsPlugin,
     new NesOpenBusPlugin,
     new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800, midCycleRead = true), // 0800-1FFF mirror it
     new NesPpuPlugin,
     new NesApuPlugin,
-    new NesCartridgePlugin(cart))
+    new NesCartridgePlugin(cart, image))
 
-  def apply(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false): RetroCore =
-    RetroCore(plugins(cart, withTrace, romDecoder)).setDefinitionName("Nes")
+  def apply(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None): RetroCore =
+    RetroCore(plugins(cart, withTrace, romDecoder, image), clockDivider = 3).setDefinitionName("Nes")
 }
 
 /** The CPU's NMI and IRQ inputs: the PPU drives `nmi`, the APU `irq`. `Ricoh2A03.InterruptPlugin`
@@ -367,8 +369,8 @@ object NesCartSpec {
   * ROM or RAM for the PPU, the nametable mirroring, and the mapper's registers as
   * `NesCartridge` models them: CNROM's CHR bank (any write to 8000-FFFF), or MMC1's shift
   * register, control, CHR and PRG banks. Memories are `simPublic`: a sim loads an image with
-  * `load` instead of recompiling per ROM. */
-class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
+  * `load` instead of recompiling per ROM. `image` builds the ROMs in (synthesis needs them). */
+class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = None) extends FiberPlugin {
   val logic = during setup new Area {
     val bus = host[BusService]
     val retainer = retains(bus.busLock)
@@ -440,17 +442,20 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
       bankSelect := bankSelectAfter; banks := banksAfter; horizontal := horizontalAfter
       irqLatch := irqLatchAfter; irqEnabled := irqEnabledAfter
       /** A12 as last driven, dots since it fell (saturating), the counter, its reload request
-        * and the IRQ, as `NesCartridge` keeps them. */
-      val a12 = RegInit(False)
-      val lowDots = Reg(UInt(4 bits)).init(0)
-      val counter = Reg(UInt(8 bits)).init(0)
-      val reload, irq = RegInit(False)
+        * and the IRQ, as `NesCartridge` keeps them; updated every dot, on the fast clock. */
+      val counterState = new ClockingArea(RetroCore.clocks.get.fast) {
+        val a12 = RegInit(False)
+        val lowDots = Reg(UInt(4 bits)).init(0)
+        val counter = Reg(UInt(8 bits)).init(0)
+        val reload, irq = RegInit(False)
+      }
     }
     /** The cartridge's IRQ output as this cycle leaves it (MMC3), set by `ppuBus`. */
     val irq = Bool()
     if (spec.mapper != 4) irq := False
 
     val prg = Mem.fill(spec.prgBytes)(UInt(8 bits)).setName("cart_prg").simPublic()
+    for (c <- image) prg.init(c.prg.map(U(_, 8 bits)).toSeq)
     val pa = prgSlave.cmd.address
     val prgBank16 = UInt(4 bits)
     prgBank16 := pa(14).asUInt.resize(4)
@@ -483,6 +488,7 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
 
     val chr = Mem.fill(spec.chrBytes)(UInt(8 bits)).setName("cart_chr").simPublic()
     if (spec.chrRam) chr.init(Seq.fill(spec.chrBytes)(U(0, 8 bits)))
+    else for (c <- image) chr.init(c.chr.map(U(_, 8 bits)).toSeq)
     /** CHR index of a PPU address; `after` uses the registers as this cycle's access leaves them. */
     def chrIndex(a: UInt, after: Boolean = false): UInt = {
       val (bank0, bank1, ctrl) = if (after) (chrBank0After, chrBank1After, controlAfter) else (chrBank0, chrBank1, control)
@@ -514,17 +520,29 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
     }
   }
 
-  /** A read port on CHR at a PPU address (0000-1FFF). Call it from a build phase. With
-    * `afterAccess`, a bank switch written by this cycle's CPU access already applies. */
-  def chrRead(address: UInt, afterAccess: Boolean = false): UInt = logic.chr.readAsync(logic.chrIndex(address, afterAccess))
-  /** The PPU's write port, used only with CHR RAM. */
-  def chrWrite(address: UInt, data: UInt, enable: Bool): Unit = if (spec.chrRam) logic.chr.write(logic.chrIndex(address), data, enable)
-  /** The PPU's bus as MMC3's scanline counter sees it, from the PPU's build: for each of the
-    * cycle's three dots whether it drove an address and that address's A12, and the same for
-    * the CPU access's two possible events (the 2007 access, then v after it when not
-    * rendering), which come between the second and third dot along with mapper writes. */
-  def ppuBus(dots: Seq[(Bool, Bool)], access: Seq[(Bool, Bool)]): Unit = if (spec.mapper == 4) {
+  /** The PPU's two CHR ports, read synchronously (call them from the PPU's fast clock area): the
+    * dot port at a PPU address (0000-1FFF), with the bank registers as this CPU cycle's access
+    * leaves them when `dotAfter`; and the access port, which reads, or with CHR RAM writes, at a
+    * PPU address when `enable`. The dot port sees a write the access port makes in the same
+    * clock. Returns the two ports' data. */
+  def chrPorts(dotAddress: UInt, dotAfter: Bool, address: UInt, data: UInt, enable: Bool, write: Bool): (UInt, UInt) = {
+    val l = logic.get
+    val dotIndex = dotAfter ? l.chrIndex(dotAddress, after = true) | l.chrIndex(dotAddress)
+    val index = l.chrIndex(address)
+    if (spec.chrRam) {
+      val accessData = l.chr.readWriteSync(index, data, enable, write)
+      val bypass = RegNext(enable && write && index === dotIndex).init(False)
+      (bypass ? RegNext(data) | l.chr.readSync(dotIndex), accessData)
+    } else (l.chr.readSync(dotIndex), l.chr.readSync(index, enable))
+  }
+  /** The PPU's bus as MMC3's scanline counter sees it, from the PPU's fast clock area, once per
+    * dot: whether the dot drove an address and that address's A12, and when `accessPhase` (the
+    * CPU access follows this dot), the access's two possible events (the 2007 access, then v
+    * after it when not rendering), which come after the mapper writes. `after`: this dot comes
+    * after the CPU cycle's access, so it sees its latch and enable writes. */
+  def ppuBus(dot: (Bool, Bool), access: Seq[(Bool, Bool)], accessPhase: Bool, after: Bool): Unit = if (spec.mapper == 4) {
     val m = logic.mmc3
+    val r = m.counterState
     case class S(a12: Bool, low: UInt, counter: UInt, reload: Bool, irq: Bool)
     def event(s: S, valid: Bool, high: Bool, latch: UInt, enabled: Bool): S = {
       val clock = valid && high && !s.a12 && s.low >= NesCartridge.a12Filter
@@ -535,20 +553,22 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
         !clock && s.reload,
         s.irq || (clock && next === 0 && enabled))
     }
-    def dot(s: S, e: (Bool, Bool), latch: UInt, enabled: Bool) =
-      event(s.copy(low = (s.low === 15) ? s.low | (s.low + 1)), e._1, e._2, latch, enabled)
-    val start = S(m.a12, m.lowDots, m.counter, m.reload, m.irq)
-    val s2 = dot(dot(start, dots(0), m.irqLatch, m.irqEnabled), dots(1), m.irqLatch, m.irqEnabled)
-    val written = s2.copy(counter = m.reloadWrite ? U(0, 8 bits) | s2.counter, reload = m.reloadWrite || s2.reload, irq = !m.ackWrite && s2.irq)
-    val accessed = access.foldLeft(written)((s, e) => event(s, e._1, e._2, m.irqLatchAfter, m.irqEnabledAfter))
-    val s3 = dot(accessed, dots(2), m.irqLatchAfter, m.irqEnabledAfter)
-    m.a12 := s3.a12; m.lowDots := s3.low; m.counter := s3.counter; m.reload := s3.reload; m.irq := s3.irq
-    logic.irq := s3.irq
+    val start = S(r.a12, r.lowDots, r.counter, r.reload, r.irq)
+    val ticked = start.copy(low = (start.low === 15) ? start.low | (start.low + 1))
+    val dotted = event(ticked, dot._1, dot._2, after ? m.irqLatchAfter | m.irqLatch, after ? m.irqEnabledAfter | m.irqEnabled)
+    val reloadWrite = accessPhase && m.reloadWrite
+    val written = dotted.copy(counter = reloadWrite ? U(0, 8 bits) | dotted.counter, reload = reloadWrite || dotted.reload,
+      irq = !(accessPhase && m.ackWrite) && dotted.irq)
+    val s = access.foldLeft(written)((s, e) => event(s, e._1, e._2, m.irqLatchAfter, m.irqEnabledAfter))
+    r.a12 := s.a12; r.lowDots := s.low; r.counter := s.counter; r.reload := s.reload; r.irq := s.irq
+    logic.irq := s.irq
   }
 
   /** A nametable address (2000-3FFF) to an index into the console's 2 KB of VRAM. With
     * `afterAccess`, a mirroring change written by this cycle's CPU access already applies. */
   def ciramIndex(address: UInt, afterAccess: Boolean = false): UInt = logic.ciramIndex(address, afterAccess)
+  /** `ciramIndex`, with `afterAccess` chosen in hardware. */
+  def ciramIndex(address: UInt, afterAccess: Bool): UInt = afterAccess ? logic.ciramIndex(address, true) | logic.ciramIndex(address, false)
 
   /** Copies an iNES image's PRG and CHR into the simulated cartridge. */
   def load(c: NesCartridge): Unit = {
@@ -557,8 +577,11 @@ class NesCartridgePlugin(val spec: NesCartSpec) extends FiberPlugin {
   }
 }
 
-/** Synthesis Verilog for an NROM cartridge (32 KB PRG, 8 KB CHR ROM), without trace taps:
+/** Synthesis Verilog for an NROM cartridge (32 KB PRG, 8 KB CHR ROM, filled with stand-in random
+  * bytes so synthesis keeps them), without trace taps:
   * {{{ sbt "runMain retro.nes.NesVerilog" }}} writes gen/Nes.v. */
 object NesVerilog extends App {
-  SpinalConfig(targetDirectory = "gen").generateVerilog(Nes(NesCartSpec(0x8000, 0x2000, chrRam = false, mapper = 0, verticalMirroring = true), withTrace = false))
+  val random = new scala.util.Random(1)
+  val cart = NesCartridge(Array.fill(0x8000)(random.nextInt(256)), Array.fill(0x2000)(random.nextInt(256)), chrRam = false, mapper = 0, verticalMirroring = true)
+  SpinalConfig(targetDirectory = "gen").generateVerilog(Nes(NesCartSpec.of(cart), withTrace = false, image = Some(cart)))
 }
