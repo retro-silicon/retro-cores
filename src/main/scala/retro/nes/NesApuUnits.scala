@@ -89,10 +89,10 @@ class TriangleUnit extends Area {
   val output = CombInit(position(4) ? position(3 downto 0) | ~position(3 downto 0))
 }
 
-class NoiseUnit extends Area {
+class NoiseUnit(periods: Seq[Int] = NesNoise.periods.toSeq) extends Area {
   val envelope = new EnvelopeUnit
   val mode = RegInit(False)
-  val period = Reg(UInt(12 bits)).init(NesNoise.periods(0) - 1)
+  val period = Reg(UInt(12 bits)).init(periods(0) - 1)
   val timer = Reg(UInt(12 bits)).init(0)
   val lfsr = Reg(UInt(15 bits)).init(1)
   def tick(quarter: Bool): Unit = {
@@ -104,7 +104,7 @@ class NoiseUnit extends Area {
   }
   def write(reg: Int, v: Bits): Unit = reg match {
     case 0 => envelope.write(v)
-    case 2 => mode := v(7); period := Vec(NesNoise.periods.map(p => U(p - 1, 12 bits)))(v(3 downto 0).asUInt)
+    case 2 => mode := v(7); period := Vec(periods.map(p => U(p - 1, 12 bits)))(v(3 downto 0).asUInt)
     case 3 => envelope.start := True
     case _ =>
   }

@@ -20,6 +20,10 @@ object NesRoms {
       }
   }
 
+  /** The console a ROM is for: PAL for blargg's pal_apu_tests, NTSC otherwise (iNES headers
+    * rarely say). */
+  def timing(file: File): NesTiming = if (file.getPath.contains("pal_apu_tests")) NesTiming.pal else NesTiming.ntsc
+
   sealed trait Verdict
   case object Running extends Verdict
   case class Done(passed: Boolean, code: Int, text: String) extends Verdict
@@ -177,7 +181,7 @@ object NesRefRom extends App {
   val dots = sys.env.getOrElse("DOTS", "2").toInt
   var passed, total = 0
   for ((name, file) <- NesRoms.all if args.isEmpty || args.exists(name.contains)) {
-    val nes = new NesReference(NesCartridge.load(file), dots)
+    val nes = new NesReference(NesCartridge.load(file), dots, NesRoms.timing(file))
     val crcs = NesRoms.expectedCrcs(file)
     val audio = if (sys.env.contains("WAV")) Some(new NesAudio) else None
     for (a <- audio) nes.onSample = a.add

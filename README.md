@@ -104,12 +104,12 @@ console's output filters, and checks that the residual is no louder than in the 
 recordings in the nes-test-roms collection: square 0.8% (hardware 1.2%), triangle 1.5% (1.9%),
 noise 11.6% (10.8%), DMC 0.8% (2.8%).
 
-The model passes 138 of the 144 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
+The model passes 148 of the 154 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
 sprite_hit, sprite_overflow, cpu_interrupts_v2, instr_test, instr_timing, nes_cpu_test5,
 cpu_dummy_writes, cpu_exec_space, oam_stress, ppu_open_bus, sprdma_and_dmc_dma, apu_test,
 blargg_apu_2005.07.30, apu_mixer, apu_reset, cpu_reset, dmc_dma_during_read4, read_joy3,
-the MMC3 tests and others; print-only tests are judged by the CRCs their source lists). The
-rest of the nes-test-roms collection is demos, visual or interactive tests, PAL tests, or
+the MMC3 tests, pal_apu_tests and others; print-only tests are judged by the CRCs their source
+lists). The rest of the nes-test-roms collection is demos, visual or interactive tests, or
 needs other mappers; instr_test-v3 and nes_instr_test are older versions of instr_test-v5.
 Left: LXA in instr_test 03-immediate, the all_instrs ROM that stops there and nes_cpu_test5's
 cpu.nes, where blargg's console and SingleStepTests disagree on the unstable constant (the core
@@ -155,7 +155,7 @@ scripts/synth-nes-ecp5.sh                          # Yosys and nextpnr for an EC
 | NES plugin | Addresses | What it does |
 |---|---|---|
 | `RamPlugin` | 0000-1FFF | 2 KB of RAM, mirrored |
-| `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: one dot per fast clock (three per CPU cycle, the access between the second and third), CIRAM, OAM, palette, `ppu_pixel` port |
+| `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: one dot per fast clock (three per CPU cycle, the access between the second and third; on PAL a fourth every fifth cycle), CIRAM, OAM, palette, `ppu_pixel` port |
 | `NesApuPlugin` | 4000-4017 | frame counter and IRQ, length counters, pulses, triangle, noise, DMC, mixer (`audio` port, one sample per cycle), 4015, controller 1 (`joypad1` pins), and the DMA unit (OAM DMA and DMC fetches) as a second bus master above the CPU |
 | `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, mirroring, CNROM's bank, MMC1's registers, MMC3's banks and scanline IRQ (fed every PPU bus address), MMC2/MMC4's latches (on the fast clock, fed every PPU bus address), FME-7's registers and IRQ counter, or a discrete board's register (mappers 2, 7, 11, 34, 66, 180); images loaded by the sim |
 | `NesOpenBusPlugin` | everything else | the data bus latch, for unmapped reads and undriven bits |
@@ -164,15 +164,22 @@ scripts/synth-nes-ecp5.sh                          # Yosys and nextpnr for an EC
 `NesRtl.cosim` runs a test ROM on the RTL and the model in lockstep: every instruction must
 match in cycles (DMA stalls included), bus accesses (so every PPU and APU register read) and
 registers, every frame pixel for pixel, and the APU's mixed output in every cycle, until the
-ROM reports its result. All 144 ROMs run to their result with no difference from the model, so
-the RTL passes the same 138.
+ROM reports its result. All 154 ROMs, and the three mapper exercise ROMs, run to their result
+with no difference from the model, so the RTL passes the same 148 (151 of 157).
 
 The NES runs on a clock three times the CPU's (5.37 MHz), one PPU dot per clock:
-`RetroCore(plugins, clockDivider = 3)` runs the plugins on that clock enabled every third
+`RetroCore(plugins, cycleClocks = Seq(3))` runs the plugins on that clock enabled every third
 cycle, and the PPU and MMC3's scanline counter build their logic on the fast clock
 (`CoreClocks`). That lets every large memory be block RAM: the PPU reads CIRAM and CHR
 synchronously, a clock ahead, addressed from the state the current dot leaves, and the CPU's
 RAM, PRG ROM, PRG RAM and the mixer's table are read on the fast clock (`MidCycleRead`).
+
+PAL consoles (`NesTiming.pal`, for the 2A07 and 2C07) differ in the PPU's 312 lines with no
+skipped dot, the frame counter's steps and the noise and DMC period tables, and run 3.2 PPU
+dots per CPU cycle: `cycleClocks = Seq(3, 3, 3, 3, 4)`, the fourth dot after the access. The
+runners pick PAL for blargg's pal_apu_tests (iNES headers rarely say), which all pass on the
+model and match on the RTL; seven of them fail with NTSC timing. Nothing here tests the PAL
+noise and DMC tables or the PPU-CPU alignment.
 
 On an ECP5-25F (Yosys, nextpnr) the NES with an NROM cartridge (32 KB PRG and 8 KB CHR ROM,
 built in) uses 30% of the logic cells (7.4k; Yosys maps 5.9k LUT4s), 1.6k flip-flops, 64 LUT
@@ -483,7 +490,7 @@ corruption bug tests, dmg-acid2 pixel for pixel, and 2327 ROMs of the c-sp colle
 Mealybug's 24 DMG tests among them (see *Hardware test ROMs*).
 
 NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
-138 of 144 blargg CPU/PPU/APU/MMC3 test ROMs, with sound checked against hardware recordings, and
+148 of 154 blargg CPU/PPU/APU/MMC3 test ROMs (PAL APU timing included), with sound checked against hardware recordings, and
 the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM/MMC3/MMC2/MMC4/FME-7 and six
 discrete boards) cosimulated against it on those ROMs, audio included.
 

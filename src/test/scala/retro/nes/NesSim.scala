@@ -15,11 +15,11 @@ import scala.collection.mutable
   * read) and CPU registers, every frame must match pixel for pixel, and the APU's mixed output
   * must match in every cycle. */
 object NesRtl {
-  private val compiled = mutable.Map[NesCartSpec, SimCompiled[RetroCore]]()
-  def compile(spec: NesCartSpec) = synchronized(compiled.getOrElseUpdate(spec,
+  private val compiled = mutable.Map[(NesCartSpec, NesTiming), SimCompiled[RetroCore]]()
+  def compile(spec: NesCartSpec, timing: NesTiming = NesTiming.ntsc) = synchronized(compiled.getOrElseUpdate((spec, timing),
     FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz)))
-      .workspaceName(f"Nes_${spec.prgBytes}%x_${spec.chrBytes}%x_${spec.chrRam}_${spec.mapper}_${spec.verticalMirroring}")
-      .compile(Nes(spec, romDecoder = true))))
+      .workspaceName(f"Nes_${spec.prgBytes}%x_${spec.chrBytes}%x_${spec.chrRam}_${spec.mapper}_${spec.verticalMirroring}${if (timing.pal) "_pal" else ""}")
+      .compile(Nes(spec, romDecoder = true, timing = timing))))
 
   case class Result(verdict: NesRoms.Verdict, frames: Int, instructions: Long, cycles: Long, ref: NesReference)
 
@@ -28,9 +28,10 @@ object NesRtl {
   def cosim(file: File, budget: Int): Result = {
     val spec = NesCartSpec.of(NesCartridge.load(file))
     var result: Result = null
-    compile(spec).doSimUntilVoid { dut =>
+    val timing = NesRoms.timing(file)
+    compile(spec, timing).doSimUntilVoid { dut =>
       dut.host[NesCartridgePlugin].load(NesCartridge.load(file))
-      val ref = new NesReference(NesCartridge.load(file))
+      val ref = new NesReference(NesCartridge.load(file), timing = timing)
       val crcs = NesRoms.expectedCrcs(file)
       dut.host[NesApuPlugin].buttons #= 0
       val resetButton = dut.host[NesInterruptsPlugin].logic.get.button
@@ -109,8 +110,8 @@ object NesRtl {
       }
       val probe = new Probe(dut.host[TracePlugin], dut.clockDomain, cycleEvents = false, autoSample = false).add(cosim)
       // One sampling callback: a pixel every fast clock; the probe and the checks every CPU cycle,
-      // at the clock ending phase 2.
-      val phase = dut.phase
+      // at the clock ending it.
+      val cpuEnable = dut.cpuEnable
       dut.clockDomain.onSamplings {
         val p = pixelTap.toInt
         if ((p >> 22) != 0) {
@@ -118,7 +119,7 @@ object NesRtl {
           frame(y * 256 + x) = p & 0x3F
           if (y == 239 && x == 255) rtlFrames += frame.clone()
         }
-        if (phase.toInt == 2) { probe.sample(); sample() }
+        if (cpuEnable.toBoolean) { probe.sample(); sample() }
       }
       dut.clockDomain.forkStimulus(10)
       dut.clockDomain.waitSamplingWhere(failure.nonEmpty || verdict != NesRoms.Running || ref.ppu.frames >= budget)
@@ -157,7 +158,7 @@ object NesRomReport extends App {
   implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
   val roms = NesRoms.all.filter { case (name, _) => args.isEmpty || args.exists(name.contains) }
   // Compile each cartridge configuration once, before the runs share it.
-  roms.map { case (_, file) => NesCartSpec.of(NesCartridge.load(file)) }.distinct.foreach(NesRtl.compile)
+  roms.map { case (_, file) => (NesCartSpec.of(NesCartridge.load(file)), NesRoms.timing(file)) }.distinct.foreach { case (s, t) => NesRtl.compile(s, t) }
   val start = System.nanoTime()
   val results = Future.sequence(roms.map { case (name, file) => Future {
     val t = System.nanoTime()

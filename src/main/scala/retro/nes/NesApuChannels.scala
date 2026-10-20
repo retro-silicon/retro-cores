@@ -70,16 +70,16 @@ final class NesTriangle {
 }
 
 /** The noise channel: a 15-bit LFSR (feedback from bit 1, or bit 6 in mode 1) clocked from a
-  * period table in CPU cycles, and the envelope. */
-final class NesNoise {
+  * period table in CPU cycles (`NesTiming.noisePeriods`), and the envelope. */
+final class NesNoise(periods: Seq[Int] = NesNoise.periods.toSeq) {
   val envelope = new NesEnvelope
   var mode = false
-  var period = NesNoise.periods(0) - 1
+  var period = periods(0) - 1
   var timer = 0
   var lfsr = 1
   def write(reg: Int, value: Int): Unit = reg match {
     case 0 => envelope.write(value)
-    case 2 => mode = (value & 0x80) != 0; period = NesNoise.periods(value & 0x0F) - 1
+    case 2 => mode = (value & 0x80) != 0; period = periods(value & 0x0F) - 1
     case 3 => envelope.start = true
     case _ =>
   }
@@ -92,7 +92,7 @@ final class NesNoise {
   def output(playing: Boolean) = if (!playing || (lfsr & 1) != 0) 0 else envelope.output
 }
 object NesNoise {
-  val periods = Array(4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068)
+  val periods = NesTiming.ntsc.noisePeriods.toArray
 }
 
 /** The APU's non-linear mixer, from the nesdev wiki's formulas, scaled so the loudest output is

@@ -64,17 +64,18 @@ case class NesPpuState() extends Bundle {
   * read race, and the odd-frame skipped dot. CIRAM (2 KB), OAM and palette RAM live here; CHR
   * and mirroring come from `NesCartridgePlugin`.
   *
-  * One dot per fast clock (`CoreClocks`, three per CPU cycle): phase 0 runs the first dot,
-  * phase 1 the second and then the CPU's access, phase 2 the third, as the model has it. The
-  * access's writes land at the end of phase 1, its read value is held for the CPU through phase
-  * 2, and a 2007 read fills the read buffer at the end of phase 2. CIRAM and CHR are read
+  * One dot per fast clock (`CoreClocks`, three per CPU cycle, and on PAL a fourth every fifth
+  * cycle): phase 0 runs the first dot, phase 1 the second and then the CPU's access, phases 2-3
+  * the rest, as the model has it. The access's writes land at the end of phase 1, its read value
+  * is held for the CPU to the end of the cycle, and a 2007 read fills the read buffer at the end
+  * of phase 2. CIRAM and CHR are read
   * synchronously, as block RAM does: each clock reads what the next dot fetches, addressed from
   * the state this dot leaves, and the access reads through a second port.
   *
   * Where the model takes shortcuts the RTL cannot, the RTL scans OAM one entry per dot from dot
   * 66 instead of all at once at dot 65, with the same result unless OAM or the sprite size
   * changes during the scan. Pixels come out on `pixel`, one per fast clock. */
-class NesPpuPlugin extends FiberPlugin {
+class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
   var pixel: Flow[NesPixel] = null
 
   /** Power-up palette, as in `NesPpuReference`. */
@@ -91,7 +92,7 @@ class NesPpuPlugin extends FiberPlugin {
     val ints = host[NesInterruptsPlugin]
     pixel = out(Flow(NesPixel())).setName("ppu_pixel")
     val clocks = RetroCore.clocks.get
-    require(clocks.divider == 3, "the PPU runs a dot per fast clock, so the core needs a clock divider of 3")
+    require(clocks.cycleClocks == timing.dotsPerCycle, "the PPU runs a dot per fast clock, so the core's cycles need `timing.dotsPerCycle` clocks")
     val fast = new ClockingArea(clocks.fast) {
     val phase = clocks.phase
     /** The CPU's access happens in this clock, after the dot. */
@@ -165,7 +166,7 @@ class NesPpuPlugin extends FiberPlugin {
       val d = s.dot
       val line = s.line
       val visible = line < 240
-      val pre = line === 261
+      val pre = line === timing.preLine
       val rendering = s.mask(3) || s.mask(4)
       val renderLine = rendering && (visible || pre)
       val grey = s.mask(0) ? U(0x30, 6 bits) | U(0x3F, 6 bits)
@@ -314,7 +315,7 @@ class NesPpuPlugin extends FiberPlugin {
 
       // Advance; the pre-render line is one dot shorter on odd frames when rendering was on at
       // dot 338.
-      when(pre && d === 338) { o.skipDot := s.oddFrame && rendering }
+      if (timing.oddFrameSkip) when(pre && d === 338) { o.skipDot := s.oddFrame && rendering }
       when(pre && d === 339 && s.skipDot) {
         o.dot := 0; o.line := 0; o.oddFrame := !s.oddFrame
       } elsewhen (d === 340) {
@@ -418,7 +419,7 @@ class NesPpuPlugin extends FiberPlugin {
       }
       // The bus events the model's `ppuBus` sees: the 2007 access's address (none for palette
       // reads), then v after a 2006 or 2007 access while not rendering.
-      val renderingNow = (s.mask(3) || s.mask(4)) && (s.line < 240 || s.line === 261)
+      val renderingNow = (s.mask(3) || s.mask(4)) && (s.line < 240 || s.line === timing.preLine)
       val read7 = register === 7 && slave.readFire && !s.dataHold
       o.dataHold.allowOverride() := read7
       val data7 = read7 && !toPalette || register === 7 && slave.writeFire
@@ -465,7 +466,7 @@ class NesPpuPlugin extends FiberPlugin {
     oam.write(oamWrite.address, oamWrite.data, oamWrite.enable && accessPhase && slave.writeFire, oamWriteMask)
     when(paletteWrite.enable && accessPhase && slave.writeFire) { palette(paletteWrite.address) := paletteWrite.data }
 
-    cart.ppuBus(dotBus, accessBus.map { case (valid, address) => (valid && accessPhase, address) }, accessPhase, phase === 2)
+    cart.ppuBus(dotBus, accessBus.map { case (valid, address) => (valid && accessPhase, address) }, accessPhase, phase >= 2)
     pixel := px
     /** The pixel as one value (valid, y, x, color from the MSB), so a sim reads it in one go. */
     val pixelTap = (px.valid ## px.y ## px.x ## px.color).setName("ppu_pixel_tap").simPublic()

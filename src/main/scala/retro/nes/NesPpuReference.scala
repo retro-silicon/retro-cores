@@ -7,7 +7,7 @@ package retro.nes
   * buffer. Written first so test ROMs run in seconds; the RTL `PpuPlugin` mirrors it.
   *
   * Each `tick()` is one dot. `frame` holds the last 256x240 frame as palette indices (0-63). */
-class NesPpuReference(cart: NesCartridge) {
+class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
   var ctrl, mask = 0
   var vblank, sprite0Hit, overflow = false
   var oamAddr = 0
@@ -229,13 +229,13 @@ class NesPpuReference(cart: NesCartridge) {
     back(line * 256 + x) = palette(index) & (if ((mask & 1) != 0) 0x30 else 0x3F)
   }
 
-  private def renderingNow = rendering && (line < 240 || line == 261)
+  private def renderingNow = rendering && (line < 240 || line == timing.preLine)
   /** One dot. */
   def tick(): Unit = {
     dotCount += 1
     if (dataReadHold > 0) dataReadHold -= 1
     val visible = line < 240
-    val pre = line == 261
+    val pre = line == timing.preLine
     if (rendering && (visible || pre)) {
       // The shifters move, then take the next tile every 8 dots, then give this dot's pixel.
       if ((dot >= 2 && dot <= 257) || (dot >= 322 && dot <= 337)) shift()
@@ -281,13 +281,13 @@ class NesPpuReference(cart: NesCartridge) {
     if (pre && dot == 1) { vblank = false; sprite0Hit = false; overflow = false }
 
     // Advance; the pre-render line is one dot shorter on odd frames when rendering was on at dot 338.
-    if (pre && dot == 338) skipDot = oddFrame && rendering
+    if (pre && dot == 338) skipDot = oddFrame && rendering && timing.oddFrameSkip
     if (pre && dot == 339 && skipDot) { dot = 0; line = 0; oddFrame = !oddFrame }
     else {
       dot += 1
       if (dot > 340) {
         dot = 0; line += 1
-        if (line > 261) { line = 0; oddFrame = !oddFrame }
+        if (line > timing.preLine) { line = 0; oddFrame = !oddFrame }
       }
     }
   }

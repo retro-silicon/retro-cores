@@ -25,17 +25,44 @@ object Nes {
   /** The 2A03 plugins plus the NES ones, in one host. `NesOpenBusPlugin` claims every address
     * no other slave does, so the CPU has no external bus port. `romDecoder`: see `SequencerPlugin`
     * (the simulations use it). */
-  def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None): Seq[Hostable] =
+  def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None,
+              timing: NesTiming = NesTiming.ntsc): Seq[Hostable] =
     Ricoh2A03.plugins(withTrace, external = false, romDecoder = romDecoder) ++ Seq(
     new NesInterruptsPlugin,
     new NesOpenBusPlugin,
     new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800, midCycleRead = true), // 0800-1FFF mirror it
-    new NesPpuPlugin,
-    new NesApuPlugin,
+    new NesPpuPlugin(timing),
+    new NesApuPlugin(timing),
     new NesCartridgePlugin(cart, image))
 
-  def apply(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None): RetroCore =
-    RetroCore(plugins(cart, withTrace, romDecoder, image), clockDivider = 3).setDefinitionName("Nes")
+  def apply(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None,
+            timing: NesTiming = NesTiming.ntsc): RetroCore =
+    RetroCore(plugins(cart, withTrace, romDecoder, image, timing), cycleClocks = timing.dotsPerCycle).setDefinitionName("Nes")
+}
+
+/** What differs between the NTSC console (2A03, 2C02) and the PAL one (2A07, 2C07), as far as
+  * modelled: the PPU's 312 lines with no skipped dot, 3.2 PPU dots per CPU cycle (four dots
+  * every fifth cycle, after the access), the frame counter's steps (blargg's pal_apu_tests),
+  * and the noise and DMC period tables. */
+case class NesTiming(pal: Boolean) {
+  /** The frame counter's four steps from its reset; the 4-step IRQ flag is set from the cycle
+    * before the fourth to the one after, when the counter wraps. */
+  val steps = if (pal) Seq(8313, 16627, 24939, 33253) else Seq(7457, 14913, 22371, 29829)
+  /** The 5-step mode's fifth step; it wraps a cycle later. */
+  val fifthStep = if (pal) 41565 else 37281
+  val noisePeriods = if (pal) Seq(4, 8, 14, 30, 60, 88, 118, 148, 188, 236, 354, 472, 708, 944, 1890, 3778)
+                     else Seq(4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068)
+  val dmcRates = if (pal) Seq(398, 354, 316, 298, 276, 236, 210, 198, 176, 148, 132, 118, 98, 78, 66, 50)
+                 else Seq(428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54)
+  /** The pre-render line; on NTSC its last dot is skipped on odd frames while rendering. */
+  val preLine = if (pal) 311 else 261
+  val oddFrameSkip = !pal
+  /** PPU dots in each CPU cycle, repeating. */
+  val dotsPerCycle = if (pal) Seq(3, 3, 3, 3, 4) else Seq(3)
+}
+object NesTiming {
+  val ntsc = NesTiming(pal = false)
+  val pal = NesTiming(pal = true)
 }
 
 /** The CPU's NMI and IRQ inputs: the PPU drives `nmi`, the APU `irq`. `Ricoh2A03.InterruptPlugin`
@@ -94,7 +121,7 @@ class NesOpenBusPlugin extends FiberPlugin {
   * happen on odd cycles, OAM writes on even ones, and a DMC fetch takes a read cycle from a
   * running OAM copy. Each cycle the unit decides from its state at the start of the cycle, then
   * the DMC's tick can schedule or cancel a fetch, then the register writes land. */
-class NesApuPlugin extends FiberPlugin {
+class NesApuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
   var buttons: Bits = null
   /** The mixed output, `NesMixer`'s scale, from the state at the start of the cycle. */
   var audio: UInt = null
@@ -133,34 +160,36 @@ class NesApuPlugin extends FiberPlugin {
     // ---- Frame counter and length counters: the tick ----------------------------------------
     val resetNow = counterReset === 1
     val count = resetNow ? U(0, 16 bits) | frameCounter + 1
-    val half = (resetNow && fiveStep) || (fiveStep ? (count === 14913 || count === 37281) | (count === 14913 || count === 29829))
-    val irqSet = !fiveStep && count >= 29828 && count <= 29830 && !irqInhibit
+    val Seq(step1, step2, step3, step4) = timing.steps
+    val step5 = timing.fifthStep
+    val half = (resetNow && fiveStep) || (fiveStep ? (count === step2 || count === step5) | (count === step2 || count === step4))
+    val irqSet = !fiveStep && count >= step4 - 1 && count <= step4 + 1 && !irqInhibit
     val lengthClocked = Vec(length.zip(halt).map { case (l, h) => (half && l =/= 0 && !h) ? (l - 1) | l })
     val lengthTicked = Vec((0 until 4).map(i => (loadValid(i) && lengthClocked(i) === loadBefore(i)) ? loadValue(i) | lengthClocked(i)))
     halt := newHalt
     loadValid.foreach(_ := False)
     val irqTicked = frameIrq || irqSet
-    frameCounter := ((fiveStep ? (count === 37282) | (count === 29830)) ? U(0, 16 bits) | count)
+    frameCounter := ((fiveStep ? (count === step5 + 1) | (count === step4 + 1)) ? U(0, 16 bits) | count)
     counterReset := (counterReset =/= 0) ? (counterReset - 1) | counterReset
     length := lengthTicked
 
     // ---- Tone channels: the tick ----------------------------------------------------------------
-    val quarter = (resetNow && fiveStep) || count === 7457 || count === 14913 || count === 22371 || count === (fiveStep ? U(37281) | U(29829))
+    val quarter = (resetNow && fiveStep) || count === step1 || count === step2 || count === step3 || count === (fiveStep ? U(step5) | U(step4))
     val pulse1 = new PulseUnit(first = true)
     val pulse2 = new PulseUnit(first = false)
     val triangle = new TriangleUnit
-    val noise = new NoiseUnit
+    val noise = new NoiseUnit(timing.noisePeriods)
     pulse1.tick(quarter, half)
     pulse2.tick(quarter, half)
     triangle.tick(quarter, lengthClocked(2) =/= 0)
     noise.tick(quarter)
 
     // ---- DMC ----------------------------------------------------------------------------------
-    val dmcRates = Vec(Seq(428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54).map(r => U(r - 1, 9 bits)))
+    val dmcRates = Vec(timing.dmcRates.map(r => U(r - 1, 9 bits)))
     val dmc = new Area {
       val irq, irqEnable, loop = RegInit(False)
-      val period = Reg(UInt(9 bits)).init(427)
-      val timer = Reg(UInt(9 bits)).init(427)
+      val period = Reg(UInt(9 bits)).init(timing.dmcRates(0) - 1)
+      val timer = Reg(UInt(9 bits)).init(timing.dmcRates(0) - 1)
       val sampleAddress = Reg(UInt(16 bits)).init(0)
       val sampleLength = Reg(UInt(12 bits)).init(0)
       val address = Reg(UInt(16 bits)).init(0)

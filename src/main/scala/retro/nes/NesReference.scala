@@ -17,10 +17,10 @@ import retro.r2a03.{R2A03Bus, R2A03Reference}
   * dummy and alignment cycles, side effects included (4016/4017 only on the halt cycle). Reads
   * happen on get cycles (odd cycle numbers), OAM writes on put cycles; when both run, the DMC
   * read takes a get cycle from the OAM copy, its halt and dummy cycles overlapping the copy. */
-class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
+class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: NesTiming = NesTiming.ntsc) {
   val ram = Array.fill(0x800)(0)
   val prgRam = Array.fill(0x2000)(0)
-  val ppu = new NesPpuReference(cart)
+  val ppu = new NesPpuReference(cart, timing)
   var openBus = 0
   /** CPU cycles since power-on. */
   var cycles = 0L
@@ -33,7 +33,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
   val pulse1 = new NesPulse(first = true)
   val pulse2 = new NesPulse(first = false)
   val triangle = new NesTriangle
-  val noise = new NesNoise
+  val noise = new NesNoise(timing.noisePeriods)
   /** The mixed output (see `NesMixer`) as the previous cycle left the APU. */
   var sample = 0
   /** Called with `sample` once per CPU cycle. */
@@ -75,14 +75,16 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
       counterReset -= 1
       if (counterReset == 0) { frameCounter = 0; if (fiveStep) { quarterFrame(); halfFrame() } }
     }
-    if (frameCounter == 7457 || frameCounter == 14913 || frameCounter == 22371 || frameCounter == (if (fiveStep) 37281 else 29829)) quarterFrame()
+    val Seq(step1, step2, step3, step4) = timing.steps
+    val step5 = timing.fifthStep
+    if (frameCounter == step1 || frameCounter == step2 || frameCounter == step3 || frameCounter == (if (fiveStep) step5 else step4)) quarterFrame()
     if (!fiveStep) {
-      if (frameCounter == 14913 || frameCounter == 29829) halfFrame()
-      if (frameCounter >= 29828 && frameCounter <= 29830 && !irqInhibit) frameIrq = true
-      if (frameCounter == 29830) frameCounter = 0
+      if (frameCounter == step2 || frameCounter == step4) halfFrame()
+      if (frameCounter >= step4 - 1 && frameCounter <= step4 + 1 && !irqInhibit) frameIrq = true
+      if (frameCounter == step4 + 1) frameCounter = 0
     } else {
-      if (frameCounter == 14913 || frameCounter == 37281) halfFrame()
-      if (frameCounter == 37282) frameCounter = 0
+      if (frameCounter == step2 || frameCounter == step5) halfFrame()
+      if (frameCounter == step5 + 1) frameCounter = 0
     }
     pulse1.cycle(); pulse2.cycle(); triangle.cycle(length(2) > 0); noise.cycle()
     for (i <- 0 until 4) {
@@ -93,7 +95,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
   }
 
   // ---- DMC: its timer, sample buffer, memory reader and IRQ (no sound output yet) -----------
-  private val dmcRates = Array(428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54)
+  private val dmcRates = timing.dmcRates.toArray
   var dmcIrq = false
   private var dmcIrqEnable, dmcLoop = false
   private var dmcPeriod = dmcRates(0) - 1
@@ -193,7 +195,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
     cart.cpuCycle()
     val v = access
     openBus = v
-    for (_ <- dotsBefore until 3) ppu.tick()
+    for (_ <- dotsBefore until timing.dotsPerCycle((cycles % timing.dotsPerCycle.size).toInt)) ppu.tick()
     cycles += 1
     v
   }
