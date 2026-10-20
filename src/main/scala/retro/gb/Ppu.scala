@@ -147,15 +147,13 @@ class PpuPlugin(postBoot: Boolean = false)
     wyHitTicked := wyHit
     countScanned := objCount
     when(lineStart) {
-      when(lyTicked === 0) {
-        wyHitTicked := False
-        s0.winY := 0xFF
-      }
+      when(lyTicked === 0) { wyHitTicked := False }
       s0.transfer := False
       s0.active := False
       countScanned := 0
     }
-    when(visible && lyTicked === wy && lcdc(5)) { wyHitTicked := True }
+    when(!on) { s0.winY := 0xFF }
+    when(visible && xTicked < Gb.oamEnd && lyTicked === wy && lcdc(5)) { wyHitTicked := True }
 
     val height = lcdc(2) ? U(16, 8 bits) | U(8, 8 bits)
     val scan = for (j <- 0 until 2) yield new Area {
@@ -190,7 +188,7 @@ class PpuPlugin(postBoot: Boolean = false)
       s0.fSt := 0
       s0.insertBg := False
       s0.noInsertGlitch := False
-      s0.wxTriggered := False
+      when(firstLineTicked) { s0.wxTriggered := False }
       s0.abortObj := False
       s0.duringObjFetch := False
       s0.objDone := 0
@@ -273,6 +271,7 @@ class PpuPlugin(postBoot: Boolean = false)
       }
       val st0 = s2.st
       val stepping = s2.sleep === 0
+      val wyHitD = if (i >= 4) wyHit4 else wyHitTicked
 
       // State 0: the window check.
       val win = new Area {
@@ -280,7 +279,7 @@ class PpuPlugin(postBoot: Boolean = false)
         a := s2
         val p7 = (s2.pos + 7).asUInt.resize(8)
         val p6 = (s2.pos + 6).asUInt.resize(8)
-        val check = st0 === 0 && !s2.wxTriggered && wyHitTicked && lcdcD(5)
+        val check = st0 === 0 && !s2.wxTriggered && wyHitD && lcdcD(5)
         val m7 = wxD === p7
         val m6 = wxD === p6 && !wxJustChanged
         val atZero = s2.pos === -7 || (s2.pos === -16 && scxD(2 downto 0) =/= 0) || (s2.pos >= -15 && s2.pos <= -8)
@@ -384,7 +383,7 @@ class PpuPlugin(postBoot: Boolean = false)
       val push = new Area {
         val data1 = (pre.fSt === 5) ? vData | pre.data1
         val p7 = pre.pos.resize(10) + 7
-        val insert = wyHitTicked && !lcdcD(5) && !pre.noInsertGlitch && p7 >= 0 && wxD === p7.asUInt.resize(8)
+        val insert = wyHitD && !lcdcD(5) && !pre.noInsertGlitch && p7 >= 0 && wxD === p7.asUInt.resize(8)
         def apply(): Unit = {
           adv.fSt := 6
           when(pre.bgSize === 0) {
@@ -480,7 +479,12 @@ class PpuPlugin(postBoot: Boolean = false)
         pixel.payload := render.shade
         when(render.r.pos === 160) {
           n.active := False
-          n.wxTriggered := False
+          // With WX = 166 the window is on from the next line's start (DMG, SameBoy).
+          val wx166 = wyHitD && lcdcD(5) && wxD === 166
+          val winY = (lyTicked === Gb.visibleLines - 1) ? U(0xFF, 8 bits) | adv.winY
+          n.wxTriggered := wx166
+          n.winY := winY + wx166.asUInt
+          when(wx166) { n.winTileX := 1 }
           fill := (if (dry) False else render.r.lcdX < 160)
         } otherwise {
           n.st := 0
@@ -489,6 +493,8 @@ class PpuPlugin(postBoot: Boolean = false)
       }
     }.setCompositeName(this, s"dot$i")
 
+    // After the scan, LY = WY is checked on the last dot, against WY as of the last M-cycle.
+    lazy val wyHit4 = wyHitTicked || transferPart && lyTicked === wy && dots(2).lcdcOut(5)
     val dots = scala.collection.mutable.ArrayBuffer[Area { val n: PpuDot; val lcdcOut: UInt; val pixel: Flow[UInt]; val pixelX: UInt; val fill: Bool }]()
     for (i <- 1 to 7) dots += dot(if (i == 1) s0 else dots(i - 2).n, if (i == 1) lcdc else dots(i - 2).lcdcOut, i)
     // Mode 3 as the CPU sees it after dot `i`: the transfer has not ended 3 dots later.
@@ -609,6 +615,6 @@ class PpuPlugin(postBoot: Boolean = false)
     firstLine := firstLineTicked
     irqModeLast := irqMode
     transferMid := transferPart && transferAfter(2)
-    wyHit := wyHitTicked
+    wyHit := wyHit4
   }
 }

@@ -154,7 +154,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
 
   private def lineStart(): Unit = {
     firstLine = false
-    if (ly == 0) { wyHit = false; winY = -1 }
+    if (ly == 0) wyHit = false
     objCount = 0
     transfer = false
     pixActive = false
@@ -179,7 +179,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     dots += 4
     val vblank = on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1
     if (vblank) { frames += 1; onFrame(frame) }
-    if (!on) { x = 0; ly = 0; lineStart(); firstLine = true }
+    if (!on) { x = 0; ly = 0; lineStart(); firstLine = true; winY = -1 }
     else if (x == Gb.lineCycles - 1) { x = 0; ly = if (ly == Gb.frameLines - 1) 0 else ly + 1; lineStart() }
     else x += 1
 
@@ -196,7 +196,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       irqMode = 1
     }
     else if (on) {
-      if (ly == wy && (lcdc & 0x20) != 0) wyHit = true
+      if (x < Gb.oamEnd && ly == wy && (lcdc & 0x20) != 0) wyHit = true
       val scanMode = if (firstLine) 0 else 2
       // The mode 2 interrupt source is only on as the line starts (SameBoy's mode_for_interrupt):
       // in the line before's last M-cycle, or line 0's first. The first line's mode 0 before its
@@ -208,6 +208,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       } else {
         if (x == Gb.oamEnd) startTransfer()
         val transferBefore = transfer
+        val wyBefore = wy
         val active = Array.fill(8)(false)
         for (i <- 1 to 4) {
           dotNow = dots - 4 + i
@@ -216,6 +217,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
             applyScheduled()
           }
           for ((a, d) <- scheduled if i == writeDot(a, d) - 1) glitch(a, d)
+          // After the scan, LY = WY is checked on the last dot, against WY as of the last M-cycle.
+          if (i == 4 && ly == wyBefore && (lcdc & 0x20) != 0) wyHit = true
           if (pixActive) sbDot()
           wxJustChanged = false
           active(i) = pixActive
@@ -291,7 +294,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     obSize = 0
     lcdX = 0; pos = -16; pixActive = true
     fSt = 0; sbSt = 0; sbWait = 7
-    insertBg = false; noInsertGlitch = false; wxTriggered = false; abortObj = false; duringObjFetch = false
+    insertBg = false; noInsertGlitch = false; abortObj = false; duringObjFetch = false
+    if (firstLine) wxTriggered = false
     objDone = 0
   }
 
@@ -450,7 +454,10 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       if (pos == 160) {
         pixActive = false
         while (lcdX < 160) { if (!dry) frame(ly * 160 + lcdX) = lastShade; lcdX += 1 }
-        wxTriggered = false
+        // With WX = 166 the window is on from the next line's start (DMG, SameBoy).
+        if (ly == Gb.visibleLines - 1) winY = -1
+        wxTriggered = wyHit && (lcdc & 0x20) != 0 && wx == 166
+        if (wxTriggered) { winTileX = 1; winY += 1 }
       } else { sbSt = 0; sbWait = 0 }
   }
 
