@@ -257,8 +257,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // The next line's mode 2 interrupt rises with LY, except line 0's.
     if (on && x == Gb.lineCycles - 1 && ly < Gb.visibleLines - 1) irqMode = 2
     val vblankMode2 = ly == Gb.visibleLines && x == 0
-    def statFor(m: Int, lyc: Boolean = lycLine) = ((statSelect & 8) != 0 && lyc) || on && (((statSelect & 4) != 0 && (m == 2 || vblankMode2)) ||
-      ((statSelect & 2) != 0 && m == 1) || ((statSelect & 1) != 0 && m == 0))
+    def statFor(m: Int, lyc: Boolean = lycLine, sel: Int = statSelect) = ((sel & 8) != 0 && lyc) || on && (((sel & 4) != 0 && (m == 2 || vblankMode2)) ||
+      ((sel & 2) != 0 && m == 1) || ((sel & 1) != 0 && m == 0))
     val line = statFor(irqMode)
     // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written.
     // The glitch sees the sources as they are this M-cycle, LY = LYC also as held from the last.
@@ -272,6 +272,16 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // A halted CPU sees the STAT line as it was before this M-cycle's dots.
     statLate = stat && !(writeRise && !statLine) && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
     statLine = line
+    // LYC and STAT writes land after the dots, and can drop the STAT line before a source rises
+    // in the next M-cycle (SameBoy): an LYC write before mode 0 starts later than its third dot,
+    // a STAT write (a dot later) before mode 0 starts after its last dot or VBlank's mode 2.
+    val ending = irqMode == 3 && x >= Gb.oamEnd && ly < Gb.visibleLines
+    for ((a, d) <- scheduled if on) a match {
+      case Gb.LYC if compared => statLine = statLine && statFor(if (ending && mode == 0) 0 else irqMode, lyNow == d)
+      case Gb.STAT => statLine = statLine && (statFor(if (ending && !transfer) 0 else irqMode, sel = (d >> 3) & 0xF) ||
+        ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1 && (d & 0x20) != 0)
+      case _ =>
+    }
     statRiseInDots = stat && !(lycLine && (statSelect & 8) != 0) &&
       (irqMode == 2 && x == Gb.lineCycles - 1 || irqMode == 0 && (statSelect & 1) != 0 && transferEnding && !firstLine)
     (vblank, stat)

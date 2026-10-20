@@ -552,8 +552,8 @@ class PpuPlugin(postBoot: Boolean = false)
     val lycLineTicked = (on && compared) ? (lyNow === lyc) | lycLine
     // Entering VBlank also counts as the start of a mode 2 for the STAT interrupt.
     val vblankMode2 = lyTicked === Gb.visibleLines && xTicked === 0
-    def lineFor(m: UInt, lycHigh: Bool = lycLineTicked) = (statSelect(3) && lycHigh) || on && ((statSelect(2) && (m === 2 || vblankMode2)) ||
-      (statSelect(1) && m === 1) || (statSelect(0) && m === 0))
+    def lineFor(m: UInt, lycHigh: Bool = lycLineTicked, sel: UInt = statSelect) = (sel(3) && lycHigh) || on && ((sel(2) && (m === 2 || vblankMode2)) ||
+      (sel(1) && m === 1) || (sel(0) && m === 0))
     val line = lineFor(irqMode)
     // LY reads the next line in the last M-cycle of a line.
     val lyRead = (on && xTicked === Gb.lineCycles - 1) ? ((lyTicked === Gb.frameLines - 1) ? U(0, 8 bits) | lyTicked + 1) | lyNow
@@ -569,6 +569,18 @@ class PpuPlugin(postBoot: Boolean = false)
     val start = statLine || statSelect(3) && lycLine || writeRise
     val mid = vblankMode2 ? lineFor(0) | line
     val stat = !statLine && start || !start && mid || !mid && line
+    // LYC and STAT writes land after the dots, and can drop the STAT line before a source rises
+    // in the next M-cycle; see `PpuReference`.
+    val ending = irqMode === 3 && transferPart
+    val lineNext = Bool()
+    lineNext := line
+    when(slave.writeFire && on && slave.cmd.address === Gb.LYC && compared) {
+      lineNext := line && lineFor((ending && mode === 0) ? U(0, 2 bits) | irqMode, lyNow === slave.cmd.data)
+    }
+    when(statWrite && on) {
+      lineNext := line && (lineFor((ending && !transferAfter(4)) ? U(0, 2 bits) | irqMode, sel = slave.cmd.data(6 downto 3)) ||
+        lyTicked === Gb.visibleLines - 1 && xTicked === Gb.lineCycles - 1 && slave.cmd.data(5))
+    }
     irq(0) := vblank
     irq(1) := stat
     // A halted CPU sees the STAT line as it was before the dots.
@@ -607,7 +619,7 @@ class PpuPlugin(postBoot: Boolean = false)
       when(writes(a)) { r := wData }
     x := xTicked
     ly := lyTicked
-    statLine := line
+    statLine := lineNext
     coincidence := coincidenceTicked
     lycLine := lycLineTicked
     // An LYC write compares at once while LY is compared.
