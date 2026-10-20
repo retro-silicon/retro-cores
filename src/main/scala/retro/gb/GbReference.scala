@@ -42,6 +42,13 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   /** Bytes sent with the internal clock. */
   val serialOut = ArrayBuffer[Int]()
   val ppu = new PpuReference(vram, oam, postBoot)
+  val apu = new ApuReference(postBoot)
+  /** The APU's mixed output after each of the last M-cycle's two 2 MHz ticks: left, right, left, right. */
+  val audio = Array.fill(4)(0)
+  /** Gambatte's audio test verdict over this output (`AudioWindows`). */
+  val audioWindows = new AudioWindows
+  /** For cosimulation: called with the two samples (left, right, left, right) of each M-cycle. */
+  var onAudio: Array[Int] => Unit = null
   // OAM DMA
   var dmaRegister = 0xFF
   var dmaStartIn, dmaSource, dmaIndex = 0
@@ -77,6 +84,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     case Gb.TMA => tma
     case Gb.TAC => 0xF8 | tac
     case Gb.DMA => dmaRegister
+    case _ if a >= 0xFF10 && a < 0xFF40 => apu.read(a - 0xFF10)
     case _ if a >= Gb.LCDC && a <= Gb.WX => ppu.read(a)
     case _ if a >= 0xFF00 => 0xFF
     case _ => external(a)
@@ -145,11 +153,20 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     else if (Gb.timerTap(counterBefore, tac) && !Gb.timerTap(counter, tac)) { overflowed = tima == 0xFF; tima = (tima + 1) & 0xFF }
     // Serial
     serialEdge(counterBefore)
+    // APU: the frame sequencer steps on falling edges of the counter's bit 12, then two 2 MHz ticks.
+    apu.counter = counter
+    if ((counterBefore & 0x1000) != 0 && (counter & 0x1000) == 0) apu.divEvent()
+    else if ((counterBefore & 0x1000) == 0 && (counter & 0x1000) != 0) apu.divSecondaryEvent()
+    for (k <- 0 to 1) {
+      apu.tick(); audio(2 * k) = apu.left; audio(2 * k + 1) = apu.right
+      audioWindows.sample(apu.left, apu.right)
+    }
+    if (onAudio != null) onAudio(audio)
     // PPU. A write to its registers lands during its dots (`PpuReference.writeDots`).
     if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
     val (vblank, stat) = ppu.tick()
     if (onPpuTick != null) onPpuTick()
-    if (vblank) iflag |= 1 << Gb.Irq.VBLANK.index
+    if (vblank) { iflag |= 1 << Gb.Irq.VBLANK.index; audioWindows.vblank() }
     if (stat) { iflag |= 1 << Gb.Irq.STAT.index; if (onStatIrq != null) onStatIrq() }
     // OAM DMA
     dmaCopying = dmaStartIn == 1 || dmaActive
@@ -189,6 +206,8 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     // a read returns the byte DMA reads, and a write replaces the byte being copied into OAM, or
     // for a source in A000-FDFF ANDs into it (Gambatte's oamdma tests). Neither reaches the bus.
     val conflict = dmaCopying && a >= 0 && a < 0xFE00 && isVram(a) == isVram(dmaRaw)
+    if (a >= 0) apu.addressBus = a
+    apu.pc = cpu.pc
     val v = if (conflict) dmaByte else if (a >= 0) peek(a) else 0
     if (conflict) for (_ <- wdata)
       oam(dmaRaw & 0xFF) = if (dmaRaw >= 0xA000 && !isVram(dmaRaw)) dmaByte & d else d
@@ -216,7 +235,11 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
           internalClock = (d & 1) != 0
           bits = if (shifted) 7 else 8
           if (active && internalClock) serialOut += sb
-        case Gb.DIV => counter = 0
+        case Gb.DIV =>
+          counter = 0
+          apu.counter = 0
+          if ((counterTicked & 0x1000) != 0) apu.divEvent(duringDivWrite = true)
+        case _ if a >= 0xFF10 && a < 0xFF40 => apu.write(a - 0xFF10, d)
         case Gb.TIMA => if (!reloading) { tima = d; overflowed = false }
         case Gb.TMA => tma = d; if (reloading) tima = d
         case Gb.TAC => tac = d & 7
@@ -229,5 +252,29 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
       if (a == Gb.DIV) serialEdge(counterTicked)
     }
     v
+  }
+}
+
+/** How Gambatte's test runner judges its audio tests (`_outaudio0`, `_outaudio1`): it runs the
+  * emulator in calls that end at a VBlank or after a frame's 35112 samples (2 MHz), until 15
+  * frames' worth of samples are spent, and checks whether the last call's output was constant.
+  * Feed it each sample and each VBlank; `done` is then set and `varied` is that last call's
+  * verdict. */
+class AudioWindows {
+  var done, varied = false
+  private var first = 0
+  private var changed = false
+  private var count = 0
+  private var left = 15L * 35112
+  def sample(l: Int, r: Int): Unit = {
+    val v = l << 16 ^ r
+    if (count == 0) first = v else if (v != first) changed = true
+    count += 1
+    if (count == 35112) vblank()
+  }
+  def vblank(): Unit = if (!done && count > 0) {
+    left -= count
+    if (left < 0) { done = true; varied = changed }
+    changed = false; count = 0
   }
 }

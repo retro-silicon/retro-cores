@@ -60,6 +60,9 @@ class GameBoySim extends AnyFunSuite {
       var lastY = 0
       val rtlFrames, refFrames = ArrayBuffer[Array[Int]]()
       ref.ppu.onFrame = f => refFrames += f.clone()
+      val audio = dut.host[ApuPlugin].audio
+      val rtlAudio, refAudio = ArrayBuffer[Int]()
+      ref.onAudio = a => refAudio ++= a
 
       val rnd = new Random(seed)
       var pressed = 0
@@ -70,6 +73,7 @@ class GameBoySim extends AnyFunSuite {
         if (done.toBoolean) {
           buttonLog += pressed
           if (!refReset) { cpu.reset(); refReset = true }
+          rtlAudio ++= audio.map(_.toInt)
         }
         if (io.cmd.valid.toBoolean && io.cmd.write.toBoolean && io.cmd.address.toInt >= 0x8000) mem(io.cmd.address.toInt) = io.cmd.data.toInt
         if (tx.valid.toBoolean) serial += tx.payload.toInt
@@ -94,6 +98,10 @@ class GameBoySim extends AnyFunSuite {
           .map(i => s"(${i % 160},${i / 160}) rtl ${rtlFrames(k)(i)} ref ${refFrames(k)(i)}").mkString(", ")
         assert(differ == 0, s"frame $k: $differ pixels differ, first $firstDiffs")
       }
+      val samples = rtlAudio.size min refAudio.size
+      val audioDiff = (0 until samples).find(i => rtlAudio(i) != refAudio(i))
+      for (i <- audioDiff)
+        fail(s"audio: M-cycle ${i / 4}, value ${i % 4}: rtl ${rtlAudio.slice(i, i + 8)} ref ${refAudio.slice(i, i + 8)}")
       result = Result(seen.toMap, serial.toList, ref, frames)
       simSuccess()
     }
@@ -106,14 +114,20 @@ class GameBoySim extends AnyFunSuite {
     m
   }
 
-  /** Debugging aid: cosimulate a 32 KB ROM without an MBC, named by GBROM, for GBSTEPS instructions. */
+  /** Debugging aid: cosimulate 32 KB ROMs without an MBC, named by GBROM (':'-separated), for
+    * GBSTEPS instructions each. Prints a line per ROM and fails if any does. */
   test("ROM from GBROM") {
-    val path = sys.env.getOrElse("GBROM", cancel("set GBROM to a 32 KB ROM"))
-    val rom = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path)).map(_ & 0xFF)
-    val c = Array.fill(0x10000)(0)
-    for (i <- 0 until (rom.length min 0x8000)) c(i) = rom(i)
+    val paths = sys.env.getOrElse("GBROM", cancel("set GBROM to a 32 KB ROM")).split(':').filter(_.nonEmpty)
     val steps = sys.env.getOrElse("GBSTEPS", "200000").toInt
-    cosim(c, steps, seed = 1, maxCycles = steps * 20L)
+    val failed = paths.filter { path =>
+      val rom = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path)).map(_ & 0xFF)
+      val c = Array.fill(0x10000)(0)
+      for (i <- 0 until (rom.length min 0x8000)) c(i) = rom(i)
+      val error = scala.util.Try(cosim(c, steps, seed = 1, maxCycles = steps * 20L)).failed.toOption
+      println(s"${if (error.isEmpty) "MATCH" else "DIFFER"} $path ${error.map(_.getMessage.take(600)).getOrElse("")}")
+      error.nonEmpty
+    }
+    assert(failed.isEmpty, s"${failed.length} of ${paths.length} differ")
   }
 
   test("timer interrupts and serial output") {

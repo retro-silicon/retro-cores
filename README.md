@@ -204,8 +204,7 @@ Result on the RTL: 114 of the 134 ROMs pass, including all of Blargg's `cpu_inst
 CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, eleven of the twelve PPU
 tests (mode 3 lengths with objects and SCX, VRAM/OAM locking, LCD-on timing), Blargg's `oam_bug`
 (the DMG OAM corruption bug), and the MBC1 and MBC5 tests. The other 19 are registered as
-ignored with the reason: nine are for other models (DMG-0, MGB, SGB), `boot_hwio` needs the APU
-registers, MBC2 and the MBC1 multicart are not modelled, and `oam_bug`'s `7-timing_effect` alone
+ignored with the reason: nine are for other models (DMG-0, MGB, SGB), MBC2 and the MBC1 multicart are not modelled, and `oam_bug`'s `7-timing_effect` alone
 runs far past its budget (part 7 of the combined `oam_bug` ROM, which passes, checks the same CRC).
 `intr_1_2_timing` fails since line 0's mode 2 interrupt reaches a running CPU an M-cycle late,
 as Mealybug's tests need; the two are not reconciled yet.
@@ -230,12 +229,13 @@ on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped):
 | Suite | Pass | Fail |
 |---|---|---|
 | Mealybug Tearoom Tests | 15 | 9 |
-| Gambatte | 1592 | 192 |
+| Gambatte | 1726 | 147 |
 | GBMicrotest | 464 | 49 |
-| wilbertpol's Mooneye | 91 | 3 |
+| wilbertpol's Mooneye | 92 | 3 |
 | AGE | 7 | 7 |
 | Scribbltests | 5 | 0 |
-| SameSuite | 1 | 0 |
+| SameSuite | 3 | 0 |
+| Blargg's dmg_sound | 13 | 0 |
 | Bully, little-things, Strikethrough, TurtleTests | 2 | 3 |
 
 The pixel transfer is a port of SameBoy's DMG FIFO and fetcher, which passes the same 15
@@ -243,8 +243,10 @@ Mealybug DMG tests; `PpuReference` lists the timing it pins down (register write
 a cycle's dots, mode 3 ending 3 dots before the last pixel, when a halted or running CPU sees a
 STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`OamDmaPlugin`). The reference
 model has no MBC, so the 40 Gambatte OAM DMA tests that bank-switch or push to cartridge RAM
-pass only on the RTL. Most of what still fails is one of: sound (no APU yet, 39 Gambatte
-tests), tests SameBoy fails too, mid-line timing that depends on the post-boot PPU phase, and
+pass only on the RTL. The APU (`ApuReference`, a port of SameBoy's `apu.c`, and `ApuPlugin`)
+passes 153 of the 155 sound tests (Gambatte's, blargg's dmg_sound, SameSuite's DMG ones); Gambatte's
+audio tests are judged the way its test runner does (`AudioWindows`). Most of what still fails is
+one of: tests SameBoy fails too, mid-line timing that depends on the post-boot PPU phase, and
 cycle-exact corner cases of HALT and of interrupts raised in an instruction's last cycle.
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
@@ -461,11 +463,11 @@ docs/EXTENDING.md            adding an instruction, a plugin or a CPU
 
 Done: scaffold, framework layer, the SM83 instruction set with interrupts, extension guide, CPU
 and SoC unified in one plugin host, Game Boy SoC (RAMs, IF/IE, timer, serial, PPU, joypad, OAM
-DMA, cartridge with MBC1/MBC5) with system cosim.
+DMA, cartridge with MBC1/MBC5, APU) with system cosim.
 
 Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mooneye's CPU,
 interrupt, timer, serial and OAM DMA acceptance tests, Mooneye's PPU tests but one, Blargg's OAM
-corruption bug tests, dmg-acid2 pixel for pixel, and 1829 ROMs of the c-sp collection, 15 of
+corruption bug tests, dmg-acid2 pixel for pixel, and 2327 ROMs of the c-sp collection, 15 of
 Mealybug's 24 DMG tests among them (see *Hardware test ROMs*).
 
 NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
@@ -473,4 +475,4 @@ NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference m
 the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM/MMC3) cosimulated against it on those
 ROMs, audio included.
 
-Next: the APU, MBC2, MBC3 and STOP on the Game Boy; on the NES, more mappers.
+Next: MBC2, MBC3 and STOP on the Game Boy; on the NES, more mappers.

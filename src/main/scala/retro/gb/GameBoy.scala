@@ -344,6 +344,7 @@ object GameBoy {
     new InterruptControllerPlugin(if (postBoot) Gb.PostBoot.iflag else 0),
     new TimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
     new SerialPlugin,
+    new ApuPlugin(postBoot),
     new PpuPlugin(postBoot),
     new JoypadPlugin
   ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil) ++ cartridge.map(new CartridgePlugin(_))

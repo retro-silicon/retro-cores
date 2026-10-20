@@ -16,7 +16,10 @@ import scala.jdk.CollectionConverters._
   *    (Mooneye's old `ED`) executes;
   *  - Gambatte: after 15 frames' time, the hex digits in the ROM's name drawn as tiles at the
   *    top left (`_dmg08_out<hex>`), or the frame matching `<name>_dmg08.png`;
+  *  - Gambatte's audio tests (`_outaudio0/1`): the output stays constant, or changes, in the
+  *    last frame's time;
   *  - GBMicrotest: FF82 = 01 for a pass, FF for a failure;
+  *  - blargg's dmg_sound: A000 = 00 under the DE B0 61 signature;
   *  - Scribbltests, Bully, Strikethrough, firstwhite, TurtleTests, MBC3 Tester: the frame
   *    matching the DMG screenshot after a fixed time.
   * ROMs for other models, or needing hardware not built (APU, MBC2/3, button presses) are listed
@@ -32,6 +35,10 @@ object GbSuites {
   case class Screenshot(pngs: Seq[File], opcode: Option[Int]) extends Check
   case class HexOut(digits: String) extends Check
   case object Micro extends Check
+  /** Gambatte's audio tests: in the last frame's time the output must change (`sound`) or not. */
+  case class Audio(sound: Boolean) extends Check
+  /** Blargg's newer tests: A001-A003 = DE B0 61 and A000 the result, 00 for a pass. */
+  case object Blargg extends Check
 
   case class Rom(suite: String, name: String, file: File, check: Check, mcycles: Long, skip: Option[String] = None)
 
@@ -45,7 +52,7 @@ object GbSuites {
   private def sibling(f: File, name: String) = Some(new File(f.getParentFile, name)).filter(_.isFile)
   private def name(f: File) = root.toPath.relativize(f.toPath).toString.take(root.toPath.relativize(f.toPath).toString.lastIndexOf('.'))
 
-  def roms: Seq[Rom] = mealybug ++ age ++ gambatte ++ micro ++ wilbertpol ++ same ++ screenshots
+  def roms: Seq[Rom] = mealybug ++ age ++ gambatte ++ micro ++ wilbertpol ++ same ++ blargg ++ screenshots
 
   def mealybug = files("mealybug-tearoom-tests", ".gb").map { f =>
     val pngs = Seq("_dmg_blob.png", "_dmg_b.png").flatMap(s => sibling(f, base(f) + s))
@@ -67,7 +74,8 @@ object GbSuites {
     val png = Seq("_dmg08_cgb04c.png", "_dmg08.png").flatMap(p => sibling(f, s + p)).headOption
     out.map { o =>
       val digits = o.takeWhile(c => Character.digit(c, 16) >= 0)
-      Rom("gambatte", name(f), f, HexOut(digits), time, if (o.startsWith("audio")) Some("needs the APU") else None)
+      if (o.startsWith("audio")) Rom("gambatte", name(f), f, Audio(o.drop(5).startsWith("1")), time + 2 * frameCycles)
+      else Rom("gambatte", name(f), f, HexOut(digits), time)
     } ++ png.map(p => Rom("gambatte", name(f) + " (png)", f, Screenshot(Seq(p), None), time))
   }
 
@@ -82,7 +90,6 @@ object GbSuites {
     val skip =
       if (!n.startsWith("mooneye-test-suite-wilbertpol/acceptance") && !n.startsWith("mooneye-test-suite-wilbertpol/emulator-only")) Some("not an acceptance test")
       else if (!dmg) Some("another Game Boy model")
-      else if (n.contains("boot_hwio")) Some("needs the APU registers")
       else if (n.contains("/mbc2")) Some("MBC2 not modelled")
       else if (n.contains("multicart")) Some("MBC1 multicart wiring not modelled")
       else None
@@ -91,8 +98,15 @@ object GbSuites {
 
   def same = files("same-suite", ".gb").map { f =>
     val n = name(f)
-    val skip = if (n.contains("/apu/")) Some("needs the APU") else if (!n.contains("/interrupt/")) Some("CGB or SGB test") else None
+    // Of the APU tests only the two not using the CGB's PCM registers pass on a DMG.
+    val skip = if (n.contains("/apu/")) { if (base(f).startsWith("div_write_trigger") && !base(f).contains("volume")) None else Some("CGB PCM registers") }
+      else if (!n.contains("/interrupt/")) Some("CGB or SGB test") else None
     Rom("samesuite", n, f, Fibonacci(LdBB), 600 * frameCycles, skip)
+  }
+
+  /** dmg_sound's singles and the combined ROM (which repeats forever, so it is judged at 36 s). */
+  def blargg = files("blargg/dmg_sound", ".gb").map { f =>
+    Rom("blargg", name(f), f, Blargg, (if (f.getName == "dmg_sound.gb") 36 * 60 else 30 * 60).toLong * frameCycles)
   }
 
   def screenshots: Seq[Rom] = {
@@ -118,6 +132,10 @@ object GbSuites {
     def pc: Int
     def frame: Array[Int]
     def hram(address: Int): Int
+    /** Cartridge RAM, offset from A000. */
+    def cart(offset: Int): Int
+    def audioVaried: Boolean
+    def audioDone: Boolean
   }
 
   /** Gambatte's digit tiles: 8 x 8, '#' black, '.' white. */
@@ -176,9 +194,20 @@ object GbSuites {
         case _ if end => Some(Outcome(false, "timeout", cycles))
         case _ => None
       }
+    case Audio(sound) if v.audioDone || end =>
+      Some(Outcome(v.audioDone && v.audioVaried == sound, if (!v.audioDone) "no audio" else if (v.audioVaried) "sound" else "silence", cycles))
+    case Blargg if frameEnd || end =>
+      val signed = v.cart(1) == 0xDE && v.cart(2) == 0xB0 && v.cart(3) == 0x61
+      if (signed && v.cart(0) == 0) Some(Outcome(true, "A000 = 00", cycles))
+      else if (signed && v.cart(0) != 0x80) Some(Outcome(false, f"A000 = ${v.cart(0)}%02X: " + text(v), cycles))
+      else if (end) Some(Outcome(false, if (signed) "timeout: " + text(v) else "timeout", cycles))
+      else None
     case _ if end => Some(Outcome(false, "timeout", cycles))
     case _ => None
   }
+
+  /** Blargg's result text from A004 on. */
+  def text(v: View) = Iterator.from(4).take(200).map(v.cart).takeWhile(_ != 0).map(c => if (c == 10) ' ' else c.toChar).mkString.trim
 
   def opcodeOf(rom: Rom): Int = rom.check match {
     case Fibonacci(o) => o
@@ -192,6 +221,7 @@ object GbSuites {
     if (image.length > 0x8000) return Outcome(false, "too large for the model", 0)
     val cart = Array.fill(0x10000)(0xFF)
     for (i <- image.indices) cart(i) = image(i)
+    val cart0 = cart
     val gb = new GbReference(cart, externalDma = true)
     gb.cpu.reset()
     val view = new View {
@@ -199,6 +229,9 @@ object GbSuites {
       def pc = gb.cpu.pc
       def frame = gb.ppu.frame
       def hram(a: Int) = gb.hram(a)
+      def cart(o: Int) = cart0(0xA000 + o)
+      def audioVaried = gb.audioWindows.varied
+      def audioDone = gb.audioWindows.done
     }
     var frameEnd = false
     gb.ppu.onFrame = _ => frameEnd = true
@@ -211,7 +244,7 @@ object GbSuites {
       // Without the LCD no frames complete; a frame's time counts instead.
       if (cycles >= nextFrame) { nextFrame += frameCycles; if (!gb.ppu.on) frameEnd = true }
       val hit = gb.cpu.opcode == op
-      if (hit || frameEnd || cycles >= rom.mcycles) outcome = judge(rom, view, hit, frameEnd, cycles >= rom.mcycles, cycles)
+      if (hit || frameEnd || gb.audioWindows.done || cycles >= rom.mcycles) outcome = judge(rom, view, hit, frameEnd, cycles >= rom.mcycles, cycles)
       frameEnd = false
     }
     // A failing ROM's screen shows why; it is drawn in the frames after the verdict.
@@ -238,14 +271,21 @@ object GbSuites {
       val lcdc = dut.host[PpuPlugin].lcdcReg
       val ir = dut.host[SequencerPlugin].logic.ir
       val hramMem = dut.host.list[RamPlugin].find(_.ramName == "hram").get.logic.mem
+      val cartRam = Option(dut.host[CartridgePlugin].logic.ram).map(_.mem)
+      val cartBytes = spec.ramBytes max 1
       val rf = dut.host[RegFilePlugin].regs.byReg
       import Sm83Regs._
       val buf = Array.fill(160 * 144)(0)
+      val audio = dut.host[ApuPlugin].audio
+      val windows = new AudioWindows
       val view = new View {
         def fib = Seq(B, C, D, E, H, L).map(rf(_).toInt)
         def pc = rf(PC).toInt
         def frame = buf
         def hram(a: Int) = hramMem.getBigInt(a).toInt
+        def cart(o: Int) = cartRam.map(_.getBigInt(o % cartBytes).toInt).getOrElse(0xFF)
+        def audioVaried = windows.varied
+        def audioDone = windows.done
       }
       var cycles = 0L
       var nextFrame = frameCycles.toLong
@@ -256,12 +296,18 @@ object GbSuites {
         if (outcome == null || cycles < shownAt) {
           LcdPixels.capture(lcd, buf)
           val y = lcd.y.toInt
-          var frameEnd = lastY == Gb.visibleLines - 1 && y == Gb.visibleLines
+          val vblank = lastY == Gb.visibleLines - 1 && y == Gb.visibleLines
+          var frameEnd = vblank
           lastY = y
           cycles += 1
           if (cycles >= nextFrame) { nextFrame += frameCycles; if ((lcdc.toInt & 0x80) == 0) frameEnd = true }
+          if (rom.check.isInstanceOf[Audio]) {
+            windows.sample(audio(0).toInt, audio(1).toInt)
+            windows.sample(audio(2).toInt, audio(3).toInt)
+            if (vblank) windows.vblank()
+          }
           val hit = op >= 0 && ir.toInt == op
-          if (outcome == null && (hit || frameEnd || cycles >= rom.mcycles))
+          if (outcome == null && (hit || frameEnd || windows.done || cycles >= rom.mcycles))
             for (o <- judge(rom, view, hit, frameEnd, cycles >= rom.mcycles, cycles)) {
               outcome = o.copy(frame = buf)
               shownAt = if (o.passed) cycles else cycles + 2 * frameCycles
