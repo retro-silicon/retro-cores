@@ -505,9 +505,10 @@ class PpuPlugin(postBoot: Boolean = false)
     // dots in the transfer's first M-cycle). The first line after the LCD is turned on has no
     // mode 2.
     val scanMode = firstLineTicked ? U(0, 2 bits) | U(2, 2 bits)
-    // The first line's mode 0 before its transfer is no STAT interrupt source, and its mode 0
-    // interrupt sees the transfer as it was before the dots.
-    val scanIrqMode = firstLineTicked ? U(3, 2 bits) | U(2, 2 bits)
+    // The mode 2 interrupt source is only on as the line starts: in the line before's last
+    // M-cycle, or line 0's first. The first line's mode 0 before its transfer is no source
+    // either, and its mode 0 interrupt sees the transfer as it was before the dots.
+    val scanIrqMode = (!firstLineTicked && xTicked === 0 && lyTicked === 0) ? U(2, 2 bits) | U(3, 2 bits)
     val mode, irqMode, irqModeBefore = UInt(2 bits)
     mode := 0
     irqMode := 0
@@ -549,8 +550,7 @@ class PpuPlugin(postBoot: Boolean = false)
     // after the last M-cycle; see `PpuReference`.
     val statWrite = slave.writeFire && slave.cmd.address === Gb.STAT
     val glitchMode2 = !(irqModeLast === 2 && x === Gb.lineCycles - 1 && statSelect(0) && !statSelect(2))
-    val glitchModeOff = irqModeLast === 2 && x =/= Gb.lineCycles - 1 && !(x === 0 && ly === 0) ||
-      firstLine && x <= Gb.oamEnd || ly === Gb.frameLines - 1 && x === Gb.lineCycles - 1
+    val glitchModeOff = ly === Gb.frameLines - 1 && x === Gb.lineCycles - 1
     val writeRise = statWrite && on && (lycLine || !glitchModeOff && irqModeLast =/= 3 && (irqModeLast =/= 2 || glitchMode2))
     val start = statLine || statSelect(3) && lycLine || writeRise
     val mid = vblankMode2 ? lineFor(0) | line

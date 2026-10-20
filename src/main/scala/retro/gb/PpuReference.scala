@@ -166,12 +166,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // enabled (SameBoy).
     val glitchSelect = if (!scheduled.exists(_._1 == Gb.STAT)) 0
       else if (irqMode == 2 && x == Gb.lineCycles - 1 && (statSelect & 5) == 1) 0xB else 0xF
-    // The mode 2 source is only on as the line starts (SameBoy's mode_for_interrupt).
-    // Neither is the first line's mode 0 before its transfer, after the LCD is turned on, nor
-    // VBlank's in line 153's last M-cycle.
-    val glitchMode = if (irqMode == 2 && x != Gb.lineCycles - 1 && !(x == 0 && ly == 0) ||
-      firstLine && x <= Gb.oamEnd ||
-      ly == Gb.frameLines - 1 && x == Gb.lineCycles - 1) -1 else irqMode
+    // The sources as of the last M-cycle, except VBlank's in line 153's last M-cycle.
+    val glitchMode = if (ly == Gb.frameLines - 1 && x == Gb.lineCycles - 1) -1 else irqMode
     dots += 4
     val vblank = on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1
     if (vblank) { frames += 1; onFrame(frame) }
@@ -191,8 +187,10 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     else if (on) {
       if (ly == wy && (lcdc & 0x20) != 0) wyHit = true
       val scanMode = if (firstLine) 0 else 2
-      // The first line's mode 0 before its transfer is no STAT interrupt source.
-      val scanIrqMode = if (firstLine) 3 else 2
+      // The mode 2 interrupt source is only on as the line starts (SameBoy's mode_for_interrupt):
+      // in the line before's last M-cycle, or line 0's first. The first line's mode 0 before its
+      // transfer is no source either.
+      val scanIrqMode = if (!firstLine && x == 0 && ly == 0) 2 else 3
       if (x < Gb.oamEnd) {
         scan(2 * x); scan(2 * x + 1)
         mode = scanMode; irqMode = scanIrqMode
