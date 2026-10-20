@@ -161,6 +161,17 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   }
 
   private def tickDots(): (Boolean, Boolean) = {
+    // A STAT write on the DMG first enables every STAT interrupt source for a dot, as things
+    // stood after the last M-cycle, except mode 2's at the end of HBlank when only mode 0's was
+    // enabled (SameBoy).
+    val glitchSelect = if (!scheduled.exists(_._1 == Gb.STAT)) 0
+      else if (irqMode == 2 && x == Gb.lineCycles - 1 && (statSelect & 5) == 1) 0xB else 0xF
+    // The mode 2 source is only on as the line starts (SameBoy's mode_for_interrupt).
+    // Neither is the first line's mode 0 before its transfer, after the LCD is turned on, nor
+    // VBlank's in line 153's last M-cycle.
+    val glitchMode = if (irqMode == 2 && x != Gb.lineCycles - 1 && !(x == 0 && ly == 0) ||
+      firstLine && x <= Gb.oamEnd ||
+      ly == Gb.frameLines - 1 && x == Gb.lineCycles - 1) -1 else irqMode
     dots += 4
     val vblank = on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1
     if (vblank) { frames += 1; onFrame(frame) }
@@ -229,12 +240,14 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       ((statSelect & 2) != 0 && m == 1) || ((statSelect & 1) != 0 && m == 0))
     val line = statFor(irqMode)
     // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written.
-    val start = statLine || (statSelect & 8) != 0 && lycHeld
+    val writeRise = on && (((glitchSelect & 8) != 0 && lycHeld) || ((glitchSelect & 4) != 0 && glitchMode == 2) ||
+      ((glitchSelect & 2) != 0 && glitchMode == 1) || ((glitchSelect & 1) != 0 && glitchMode == 0))
+    val start = statLine || (statSelect & 8) != 0 && lycHeld || writeRise
     // Entering VBlank, LY = LYC is compared before the mode changes.
     val mid = if (vblankMode2) statFor(0) else line
     val stat = !statLine && start || !start && mid || !mid && line
     // A halted CPU sees the STAT line as it was before this M-cycle's dots.
-    statLate = stat && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
+    statLate = stat && !(writeRise && !statLine) && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
     statLine = line
     (vblank, stat)
   }

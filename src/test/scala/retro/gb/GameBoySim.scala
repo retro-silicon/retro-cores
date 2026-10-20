@@ -106,6 +106,16 @@ class GameBoySim extends AnyFunSuite {
     m
   }
 
+  /** Debugging aid: cosimulate a 32 KB ROM without an MBC, named by GBROM, for GBSTEPS instructions. */
+  test("ROM from GBROM") {
+    val path = sys.env.getOrElse("GBROM", cancel("set GBROM to a 32 KB ROM"))
+    val rom = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path)).map(_ & 0xFF)
+    val c = Array.fill(0x10000)(0)
+    for (i <- 0 until (rom.length min 0x8000)) c(i) = rom(i)
+    val steps = sys.env.getOrElse("GBSTEPS", "200000").toInt
+    cosim(c, steps, seed = 1, maxCycles = steps * 20L)
+  }
+
   test("timer interrupts and serial output") {
     val main = Seq(
       0xF3, //             DI

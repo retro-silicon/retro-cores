@@ -101,6 +101,8 @@ class PpuPlugin(postBoot: Boolean = false)
     // The LY = LYC interrupt line: while LY is not compared (the flag reads 0) it holds its value.
     val lycLine = RegInit(False)
     val firstLine = RegInit(False)
+    /** The last M-cycle's mode for the STAT interrupt. */
+    val irqModeLast = Reg(UInt(2 bits)) init 0
     val on = lcdc(7)
 
     val objY, objX = Vec.fill(10)(Reg(UInt(8 bits)) init 0)
@@ -540,13 +542,20 @@ class PpuPlugin(postBoot: Boolean = false)
     val lyRead = (on && xTicked === Gb.lineCycles - 1) ? ((lyTicked === Gb.frameLines - 1) ? U(0, 8 bits) | lyTicked + 1) | lyNow
     // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written;
     // entering VBlank, LY = LYC is compared before the mode changes.
-    val start = statLine || statSelect(3) && lycLine
+    // A STAT write on the DMG first enables every STAT interrupt source for a dot, as things stood
+    // after the last M-cycle; see `PpuReference`.
+    val statWrite = slave.writeFire && slave.cmd.address === Gb.STAT
+    val glitchMode2 = !(irqModeLast === 2 && x === Gb.lineCycles - 1 && statSelect(0) && !statSelect(2))
+    val glitchModeOff = irqModeLast === 2 && x =/= Gb.lineCycles - 1 && !(x === 0 && ly === 0) ||
+      firstLine && x <= Gb.oamEnd || ly === Gb.frameLines - 1 && x === Gb.lineCycles - 1
+    val writeRise = statWrite && on && (lycLine || !glitchModeOff && irqModeLast =/= 3 && (irqModeLast =/= 2 || glitchMode2))
+    val start = statLine || statSelect(3) && lycLine || writeRise
     val mid = vblankMode2 ? lineFor(0) | line
     val stat = !statLine && start || !start && mid || !mid && line
     irq(0) := vblank
     irq(1) := stat
     // A halted CPU sees the STAT line as it was before the dots.
-    if (statLateHalted != null) statLateHalted := stat && !lineFor(irqModeBefore, lycLineTicked || lycLine)
+    if (statLateHalted != null) statLateHalted := stat && !(writeRise && !statLine) && !lineFor(irqModeBefore, lycLineTicked || lycLine)
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
     regs.read(lcdc, Gb.LCDC)
@@ -583,6 +592,7 @@ class PpuPlugin(postBoot: Boolean = false)
     // An LYC write compares at once while LY is compared.
     when(slave.writeFire && slave.cmd.address === Gb.LYC && on && compared) { lycLine := lyNow === slave.cmd.data }
     firstLine := firstLineTicked
+    irqModeLast := irqMode
     wyHit := wyHitTicked
   }
 }
