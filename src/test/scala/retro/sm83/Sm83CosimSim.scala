@@ -112,7 +112,8 @@ class Sm83CosimSim extends AnyFunSuite {
     val prog = Seq(0x31, 0xFE, 0xFF, 0xFB, 0x76, 0xEA, 0x00, 0xC0, 0x18, 0xFE)
     val r = cosim(image(0 -> prog, 0x48 -> Seq(0x3E, 0x5A, 0xD9)), 10, seed = 3, waitStates = false, irqAt = Map(40L -> 0x02))
     assert(r.mem(0xC000) == 0x5A)
-    assert(r.seen(Sm83.DISPATCH) == 1 && r.seen(0x76) == 1)
+    // With IME not yet on, HALT's fetch decodes as HALT CHECK.
+    assert(r.seen(Sm83.DISPATCH) == 1 && r.seen.getOrElse(Sm83.HALT_CHECK, 0) == 1)
   }
 
   // Memory filled entirely with implemented opcodes: every byte, operand or not, decodes, so

@@ -23,7 +23,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   private def isVram(a: Int) = a >= 0x8000 && a < 0xA000
   private val requestLog = Array.fill(64)(0)
   private var cycles = 0L
-  val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => { iflag &= ~(1 << i); if (onAck != null) onAck(i) })
+  val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => { iflag &= ~(1 << i); acked = 1 << i; if (onAck != null) onAck(i) })
 
   val vram = if (postBoot) Gb.PostBoot.vram(external) else Array.fill(0x2000)(0)
   val wram = Array.fill(0x2000)(0)
@@ -97,6 +97,8 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   /** Called when the STAT interrupt is requested, for tracing. */
   var onStatIrq: () => Unit = null
   var onAck: Int => Unit = null
+  /** The request the CPU acknowledged in the last M-cycle. */
+  private var acked = 0
   var onPpuTick: () => Unit = null
 
   private var iduAddress = -1
@@ -166,8 +168,11 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
     val (vblank, stat) = ppu.tick()
     if (onPpuTick != null) onPpuTick()
-    if (vblank) { iflag |= 1 << Gb.Irq.VBLANK.index; audioWindows.vblank() }
-    if (stat) { iflag |= 1 << Gb.Irq.STAT.index; if (onStatIrq != null) onStatIrq() }
+    // An acknowledge also clears the request if it rises in the next M-cycle before the dots.
+    val cleared = acked & ~(if (ppu.statRiseInDots) 1 << Gb.Irq.STAT.index else 0) & (1 << Gb.Irq.STAT.index | 1 << Gb.Irq.VBLANK.index)
+    acked = 0
+    if (vblank) { iflag |= 1 << Gb.Irq.VBLANK.index & ~cleared; audioWindows.vblank() }
+    if (stat) { iflag |= 1 << Gb.Irq.STAT.index & ~cleared; if (onStatIrq != null) onStatIrq() }
     // OAM DMA
     dmaCopying = dmaStartIn == 1 || dmaActive
     if (dmaCopying) {

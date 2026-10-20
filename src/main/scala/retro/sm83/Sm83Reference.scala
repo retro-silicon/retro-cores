@@ -124,13 +124,13 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
 
   /** The instruction-ending fetch, with the interrupt check. HALT's fetch (`halt`) keeps the CPU
     * halted, PC unchanged, while nothing is pending. */
-  private def fetch(imeOp: Int = NONE, increment: Boolean = true, halt: Boolean = false): Unit = {
+  private def fetch(imeOp: Int = NONE, increment: Boolean = true, halt: Boolean = false, runView: Boolean = false): Unit = {
     val k = cycle
     if (increment && !halt) bus.idu(pc)
     val opcode = read(pc)
     val r = requests(k)
     // Bits 8-12 are requests a halted CPU does not see yet, bits 16-20 ones a running CPU does not.
-    val reqs = if (halt) r & 0x1F & ~(r >> 8) else r & 0x1F & ~(r >> 16)
+    val reqs = if (halt && !runView) r & 0x1F & ~(r >> 8) else r & 0x1F & ~(r >> 16)
     if (increment && !(halt && reqs == 0)) pc = (pc + 1) & 0xFFFF
     val effective = imeOp == RETI || ((ime || imeNext) && imeOp != DI)
     val dispatch = effective && reqs != 0
@@ -149,6 +149,7 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
     var imeOp = NONE
     var increment = true
     var halt = false
+    var runView = false
     ir match {
       case Sm83.DISPATCH =>
         bus.idu(pc); idle(); pc = (pc - 1) & 0xFFFF
@@ -159,6 +160,15 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
         val reqs = requests(k) & 0x1F
         pc = if (reqs == 0) 0 else { val i = Integer.numberOfTrailingZeros(reqs); ack(i); 0x40 + 8 * i }
       case 0x00 | 0x10 => // NOP; STOP is not modelled and runs as a NOP, as in the RTL
+      case 0x76 if !ime && (requests(cycle - 1) & 0x1F) != 0 =>
+        // With IME off and an interrupt already pending as HALT is fetched, HALT is just that
+        // fetch: the next one does not increment PC, so the next byte runs twice (the HALT bug;
+        // gbmicrotest halt_bug, AGE halt-prefetch, SameBoy).
+        increment = false
+      case 0x76 if !ime =>
+        // Otherwise the next M-cycle fetches as a running CPU would: with an interrupt pending by
+        // then, as above; with none, the CPU halts.
+        increment = false; halt = true; runView = true
       case 0x76 =>
         idle()
         // Entered with an interrupt pending, HALT does not wait and its fetch does not increment
@@ -244,7 +254,7 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
         return (log.toList, (cycle - start).toInt)
       case _ =>
     }
-    fetch(imeOp, increment, halt)
+    fetch(imeOp, increment, halt, runView)
     (log.toList, (cycle - start).toInt)
   }
 

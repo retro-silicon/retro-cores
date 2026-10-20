@@ -102,6 +102,14 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
     lateLines += ((line, halted, b))
     b
   }
+  private val ackLines = ArrayBuffer[(IrqLine, Bool)]()
+  /** A request raised this M-cycle before the dots, which the CPU's acknowledge in the last
+    * M-cycle still clears. Retain `irqLock` before calling it. */
+  def ackClears(line: IrqLine): Bool = {
+    val b = Bool().setCompositeName(this, s"irq_${line.name}_ackClears")
+    ackLines += line -> b
+    b
+  }
 
   val early = during setup new Area {
     val requests, lateHalted, lateRunning = Bits(5 bits)
@@ -124,13 +132,16 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
     val enable = Reg(Bits(8 bits)).init(0).simPublic()
 
     irqLock.await()
-    val raised = (0 until 5).map(i => lines.filter(_._1.index == i).map(_._2).foldLeft(False: Bool)(_ || _)).asBits()
+    def any(ls: collection.Seq[(IrqLine, Bool)], i: Int) = ls.filter(_._1.index == i).map(_._2).foldLeft(False: Bool)(_ || _)
+    val ackedLast = Reg(Bits(5 bits)) init 0
+    val raised = (0 until 5).map(i => any(lines, i) && !(ackedLast(i) && any(ackLines, i))).asBits()
     val ticked = flags | raised
     new RetroBusSlaveFactory(ifSlave, idleBits = 0xFF).read(ticked, Gb.IF)
     new RetroBusSlaveFactory(ieSlave).readAndWrite(enable, Gb.IE)
     val written = ifSlave.writeFire ? ifSlave.cmd.data(4 downto 0).asBits | ticked
     val acked = early.ack.valid ? UIntToOh(early.ack.payload, 5) | B(0, 5 bits)
     flags := written & ~acked
+    ackedLast := acked
     early.requests := ticked & enable(4 downto 0)
     def lateOf(halted: Boolean) = (0 until 5).map(i => lateLines.filter(l => l._1.index == i && l._2 == halted).map(_._3).foldLeft(False: Bool)(_ || _)).asBits()
     early.lateHalted := lateOf(true) & ~flags

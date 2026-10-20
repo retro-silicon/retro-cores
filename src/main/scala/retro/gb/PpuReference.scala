@@ -24,7 +24,8 @@ package retro.gb
   *  - the mode 2 interrupt of lines 1 to 143 rises in the line before's last M-cycle, with LY;
   *    line 0's an M-cycle later (Mealybug's line_0_fix, Gambatte's m2int tests);
   *  - a halted CPU sees a STAT interrupt raised after the M-cycle's first dot an M-cycle late
-  *    (`statLate`);
+  *    (two dots before a running CPU does: on the first line after the LCD is turned on, the
+  *    transfer as it was after the last M-cycle's second dot; `statLate`);
   *  - LY reads the next line in the last M-cycle of a line, and 0 from the second M-cycle of
   *    line 153, where LY = LYC also drops for one M-cycle;
   *  - the LY = LYC flag is only updated while the LCD is on, and stays on the STAT interrupt line
@@ -58,6 +59,14 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   /** The mode the STAT interrupt sees. */
   var irqMode = 0
   private var statLine = false
+  /** The transfer after this M-cycle's second dot. */
+  private var transferMid = false
+  /** The transfer was on before this M-cycle's dots. */
+  private var transferEnding = false
+  /** This M-cycle's STAT interrupt rose during its dots, after an acknowledge in the last
+    * M-cycle: the mode 0 interrupt as the transfer ends in them, and the mode 2 interrupt of
+    * lines 1 to 143. The others rise before the dots, where the acknowledge still clears them. */
+  var statRiseInDots = false
 
   // Objects found by the OAM scan.
   val objY, objX, objIndex = Array.fill(10)(0)
@@ -161,13 +170,12 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   }
 
   private def tickDots(): (Boolean, Boolean) = {
-    // A STAT write on the DMG first enables every STAT interrupt source for a dot, as things
-    // stood after the last M-cycle, except mode 2's at the end of HBlank when only mode 0's was
-    // enabled (SameBoy).
+    // A STAT write on the DMG first enables every STAT interrupt source for a dot, except mode
+    // 2's at the end of HBlank when only mode 0's was enabled (SameBoy).
     val glitchSelect = if (!scheduled.exists(_._1 == Gb.STAT)) 0
       else if (irqMode == 2 && x == Gb.lineCycles - 1 && (statSelect & 5) == 1) 0xB else 0xF
-    // The sources as of the last M-cycle, except VBlank's in line 153's last M-cycle.
-    val glitchMode = if (ly == Gb.frameLines - 1 && x == Gb.lineCycles - 1) -1 else irqMode
+    // Line 0's mode 2 interrupt, which the STAT write glitch sees an M-cycle late.
+    val line0Mode2 = irqMode == 2 && ly == 0 && x == 0
     dots += 4
     val vblank = on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1
     if (vblank) { frames += 1; onFrame(frame) }
@@ -175,6 +183,9 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     else if (x == Gb.lineCycles - 1) { x = 0; ly = if (ly == Gb.frameLines - 1) 0 else ly + 1; lineStart() }
     else x += 1
 
+    val transferMidBefore = transferMid
+    transferMid = false
+    transferEnding = false
     mode = 0
     irqMode = 0
     // The STAT interrupt's mode before this M-cycle's dots, for a halted CPU.
@@ -197,7 +208,6 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       } else {
         if (x == Gb.oamEnd) startTransfer()
         val transferBefore = transfer
-        irqModeBefore = if (x == Gb.oamEnd) scanIrqMode else if (transfer) 3 else 0
         val active = Array.fill(8)(false)
         for (i <- 1 to 4) {
           dotNow = dots - 4 + i
@@ -219,6 +229,12 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
           restore(saved)
         }
         def transferAfter(i: Int) = transferBefore && active(i + 3)
+        // A halted CPU sees the STAT line two dots earlier than a running one: on the first line,
+        // as the transfer was after the last M-cycle's second dot.
+        irqModeBefore = if (x == Gb.oamEnd) scanIrqMode
+          else if (if (firstLine) transferMidBefore else transferBefore) 3 else 0
+        transferMid = transferAfter(2)
+        transferEnding = transferBefore
         irqMode = if (x == Gb.oamEnd) scanIrqMode
           // The first line's mode 0 interrupt sees the transfer as it was before the dots.
           else if (if (firstLine) transferBefore else transferAfter(2)) 3 else 0
@@ -242,8 +258,10 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       ((statSelect & 2) != 0 && m == 1) || ((statSelect & 1) != 0 && m == 0))
     val line = statFor(irqMode)
     // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written.
-    val writeRise = on && (((glitchSelect & 8) != 0 && lycHeld) || ((glitchSelect & 4) != 0 && glitchMode == 2) ||
-      ((glitchSelect & 2) != 0 && glitchMode == 1) || ((glitchSelect & 1) != 0 && glitchMode == 0))
+    // The glitch sees the sources as they are this M-cycle, LY = LYC also as held from the last.
+    val glitchMode2 = irqMode == 2 && !(ly == 0 && x == 0) || line0Mode2
+    val writeRise = on && (((glitchSelect & 8) != 0 && (lycHeld || lycLine)) || ((glitchSelect & 4) != 0 && glitchMode2) ||
+      ((glitchSelect & 2) != 0 && irqMode == 1) || ((glitchSelect & 1) != 0 && irqMode == 0))
     val start = statLine || (statSelect & 8) != 0 && lycHeld || writeRise
     // Entering VBlank, LY = LYC is compared before the mode changes.
     val mid = if (vblankMode2) statFor(0) else line
@@ -251,6 +269,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // A halted CPU sees the STAT line as it was before this M-cycle's dots.
     statLate = stat && !(writeRise && !statLine) && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
     statLine = line
+    statRiseInDots = stat && !(lycLine && (statSelect & 8) != 0) &&
+      (irqMode == 2 && x == Gb.lineCycles - 1 || irqMode == 0 && (statSelect & 1) != 0 && transferEnding && !firstLine)
     (vblank, stat)
   }
 
