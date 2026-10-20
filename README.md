@@ -225,10 +225,10 @@ on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped):
 | Suite | Pass | Fail |
 |---|---|---|
 | Mealybug Tearoom Tests | 15 | 9 |
-| Gambatte | 1539 | 245 |
-| GBMicrotest | 431 | 82 |
-| wilbertpol's Mooneye | 89 | 5 |
-| AGE | 6 | 8 |
+| Gambatte | 1592 | 192 |
+| GBMicrotest | 464 | 49 |
+| wilbertpol's Mooneye | 91 | 3 |
+| AGE | 7 | 7 |
 | Scribbltests | 5 | 0 |
 | SameSuite | 1 | 0 |
 | Bully, little-things, Strikethrough, TurtleTests | 2 | 3 |
@@ -238,7 +238,9 @@ Mealybug DMG tests; `PpuReference` lists the timing it pins down (register write
 a cycle's dots, mode 3 ending 3 dots before the last pixel, when a halted or running CPU sees a
 STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`OamDmaPlugin`). The reference
 model has no MBC, so the 40 Gambatte OAM DMA tests that bank-switch or push to cartridge RAM
-pass only on the RTL.
+pass only on the RTL. Most of what still fails is one of: sound (no APU yet, 39 Gambatte
+tests), tests SameBoy fails too, mid-line timing that depends on the post-boot PPU phase, and
+cycle-exact corner cases of HALT and of interrupts raised in an instruction's last cycle.
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
 VexiiRiscv: the plugin, fiber, database and pipeline APIs it uses all live in SpinalHDL's own
