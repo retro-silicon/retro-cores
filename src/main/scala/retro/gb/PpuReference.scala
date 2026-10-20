@@ -191,13 +191,15 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     else if (on) {
       if (ly == wy && (lcdc & 0x20) != 0) wyHit = true
       val scanMode = if (firstLine) 0 else 2
+      // The first line's mode 0 before its transfer is no STAT interrupt source.
+      val scanIrqMode = if (firstLine) 3 else 2
       if (x < Gb.oamEnd) {
         scan(2 * x); scan(2 * x + 1)
-        mode = scanMode; irqMode = scanMode
+        mode = scanMode; irqMode = scanIrqMode
       } else {
         if (x == Gb.oamEnd) startTransfer()
         val transferBefore = transfer
-        irqModeBefore = if (x == Gb.oamEnd) scanMode else if (transfer) 3 else 0
+        irqModeBefore = if (x == Gb.oamEnd) scanIrqMode else if (transfer) 3 else 0
         val active = Array.fill(8)(false)
         for (i <- 1 to 4) {
           dotNow = dots - 4 + i
@@ -219,7 +221,9 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
           restore(saved)
         }
         def transferAfter(i: Int) = transferBefore && active(i + 3)
-        irqMode = if (x == Gb.oamEnd) scanMode else if (transferAfter(2)) 3 else 0
+        irqMode = if (x == Gb.oamEnd) scanIrqMode
+          // The first line's mode 0 interrupt sees the transfer as it was before the dots.
+          else if (if (firstLine) transferBefore else transferAfter(2)) 3 else 0
         mode = if (transferAfter(3)) 3 else 0
         transfer = transferAfter(4)
       }

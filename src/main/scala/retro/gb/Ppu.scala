@@ -505,6 +505,9 @@ class PpuPlugin(postBoot: Boolean = false)
     // dots in the transfer's first M-cycle). The first line after the LCD is turned on has no
     // mode 2.
     val scanMode = firstLineTicked ? U(0, 2 bits) | U(2, 2 bits)
+    // The first line's mode 0 before its transfer is no STAT interrupt source, and its mode 0
+    // interrupt sees the transfer as it was before the dots.
+    val scanIrqMode = firstLineTicked ? U(3, 2 bits) | U(2, 2 bits)
     val mode, irqMode, irqModeBefore = UInt(2 bits)
     mode := 0
     irqMode := 0
@@ -515,16 +518,16 @@ class PpuPlugin(postBoot: Boolean = false)
         irqMode := 1
       } elsewhen (xTicked < Gb.oamEnd) {
         mode := scanMode
-        irqMode := scanMode
+        irqMode := scanIrqMode
       } otherwise {
         when(transferAfter(3)) { mode := 3 }
-        when(xTicked === Gb.oamEnd) { irqMode := scanMode } elsewhen (transferAfter(2)) { irqMode := 3 }
+        when(xTicked === Gb.oamEnd) { irqMode := scanIrqMode } elsewhen (firstLineTicked ? s0.transfer | transferAfter(2)) { irqMode := 3 }
       }
       // The next line's mode 2 interrupt rises with LY, except line 0's.
       when(xTicked === Gb.lineCycles - 1 && lyTicked < Gb.visibleLines - 1) { irqMode := 2 }
     }
     irqModeBefore := irqMode
-    when(transferPart) { irqModeBefore := (xTicked === Gb.oamEnd) ? scanMode | (s0.transfer ? U(3, 2 bits) | U(0, 2 bits)) }
+    when(transferPart) { irqModeBefore := (xTicked === Gb.oamEnd) ? scanIrqMode | (s0.transfer ? U(3, 2 bits) | U(0, 2 bits)) }
     // LY reads 0 from line 153's second M-cycle.
     val lyNow = (lyTicked === Gb.frameLines - 1 && xTicked >= 1) ? U(0, 8 bits) | lyTicked
     // LY = LYC is only compared while the LCD is on, and stays on the interrupt line when off.
