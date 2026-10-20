@@ -190,6 +190,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
   private def cycle(access: => Int): Int = {
     for (_ <- 0 until dotsBefore) ppu.tick()
     apuCycle()
+    cart.cpuCycle()
     val v = access
     openBus = v
     for (_ <- dotsBefore until 3) ppu.tick()
@@ -208,7 +209,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
       val bit = if (strobe) buttons & 1 else { val b = shift & 1; shift = (shift >> 1) | 0x80; b }
       (openBus & 0xE0) | bit
     case a if a < 0x6000 => openBus
-    case a if a < 0x8000 => prgRam(a & 0x1FFF)
+    case a if a < 0x8000 => cart.lowRead(a, prgRam, openBus)
     case a => cart.prg(cart.prgIndex(a))
   }
   def store(address: Int, value: Int): Unit = {
@@ -245,7 +246,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2) {
       if (irqInhibit) frameIrq = false
       counterReset = if ((cycles & 1) == 0) 3 else 4
     case a if a < 0x6000 =>
-    case a if a < 0x8000 => prgRam(a & 0x1FFF) = value
+    case a if a < 0x8000 => cart.lowWrite(a, value, prgRam)
     case a => cart.cpuWrite(a, value, cycles)
   }
 

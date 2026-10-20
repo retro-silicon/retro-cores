@@ -360,7 +360,7 @@ case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: In
   require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   def discrete = NesCartridge.discrete.contains(mapper)
   require(prgBytes % 0x4000 == 0 && isPow2(chrBytes))
-  require(!(mapper == 4 || discrete) || isPow2(prgBytes), s"mapper $mapper's PRG must be a power of 2")
+  require(!(Seq(4, 9, 10, 69).contains(mapper) || discrete) || isPow2(prgBytes), s"mapper $mapper's PRG must be a power of 2")
 }
 object NesCartSpec {
   def of(c: NesCartridge) = NesCartSpec(c.prg.length, c.chr.length, c.chrRam, c.mapper, c.verticalMirroring)
@@ -456,9 +456,67 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
         val reload, irq = RegInit(False)
       }
     }
+    // MMC2/MMC4: PRG bank, the four CHR banks (FD then FE, low table then high), mirroring; and
+    // on the fast clock the two latches (True: FE) and the change waiting for the next address.
+    val mmc2 = (spec.mapper == 9 || spec.mapper == 10) generate new Area {
+      val prgBank = Reg(UInt(4 bits)).init(0)
+      val banks = Vec.fill(4)(Reg(UInt(5 bits)).init(0))
+      val horizontal = RegInit(False)
+      val banksAfter = CombInit(banks)
+      val horizontalAfter = CombInit(horizontal)
+      when(prgSlave.writeFire) {
+        switch(prgSlave.cmd.address(14 downto 12)) {
+          is(2) { prgBank := d(3 downto 0) }
+          is(3, 4, 5, 6) { banksAfter((prgSlave.cmd.address(14 downto 12) - 3).resize(2)) := d(4 downto 0) }
+          is(7) { horizontalAfter := d(0) }
+          default {}
+        }
+      }
+      banks := banksAfter; horizontal := horizontalAfter
+      val latchState = new ClockingArea(RetroCore.clocks.get.fast) {
+        val latch = Vec.fill(2)(RegInit(True))
+        val pending = RegInit(False)
+        val pendingTable, pendingFe = Reg(Bool()).init(False)
+      }
+      /** The latches the next dot's fetch reads with, and the ones the CPU access's 2007 read
+        * does; set by `ppuBus`. */
+      val nextLatch, accessLatch = Vec.fill(2)(Bool())
+    }
+    // FME-7: the command, the registers it addresses (as this cycle's access leaves them for the
+    // PPU's CHR banks and mirroring), and the IRQ counter, which counts before the access.
+    val fme7 = (spec.mapper == 69) generate new Area {
+      val command = Reg(UInt(4 bits)).init(0)
+      val regs = Vec.fill(16)(Reg(UInt(8 bits)).init(0))
+      val regsAfter = CombInit(regs)
+      val counter = Reg(UInt(16 bits)).init(0)
+      val irq = RegInit(False)
+      val ticked = (regs(13)(7)) ? (counter - 1) | counter
+      val counterAfter = CombInit(ticked)
+      val irqAfter = CombInit(irq || (regs(13)(7) && regs(13)(0) && counter === 0))
+      when(prgSlave.writeFire) {
+        switch(prgSlave.cmd.address(14 downto 13)) {
+          is(0) { command := d(3 downto 0) }
+          is(1) {
+            regsAfter(command) := d
+            switch(command) {
+              is(13) { irqAfter := False }
+              is(14) { counterAfter(7 downto 0) := d }
+              is(15) { counterAfter(15 downto 8) := d }
+              default {}
+            }
+          }
+          default {}
+        }
+      }
+      regs := regsAfter; counter := counterAfter; irq := irqAfter
+      /** What 6000-7FFF shows: RAM selected and enabled, RAM disabled (open bus), else a ROM bank. */
+      val ramOn = regs(8)(7 downto 6) === 3
+      val ramOff = regs(8)(6) && !regs(8)(7)
+    }
     /** The cartridge's IRQ output as this cycle leaves it (MMC3), set by `ppuBus`. */
     val irq = Bool()
-    if (spec.mapper != 4) irq := False
+    if (spec.mapper == 69) irq := fme7.irqAfter
+    else if (spec.mapper != 4) irq := False
 
     val prg = Mem.fill(spec.prgBytes)(UInt(8 bits)).setName("cart_prg").simPublic()
     for (c <- image) prg.init(c.prg.map(U(_, 8 bits)).toSeq)
@@ -483,6 +541,17 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
           default { bank := U(banks8 - 1, 8 bits) }
         }
         bank.resize(log2Up(banks8)) @@ pa(12 downto 0)
+      } else if (spec.mapper == 69) {
+        val banks8 = spec.prgBytes >> 13
+        val bank = (pa(14 downto 13) === 3) ? U(banks8 - 1, 8 bits) | fme7.regs((U(9, 4 bits) + pa(14 downto 13)))(5 downto 0).resize(8)
+        bank.resize(log2Up(banks8)) @@ pa(12 downto 0)
+      } else if (spec.mapper == 9) {
+        val banks8 = spec.prgBytes >> 13
+        val bank = (pa(14 downto 13) === 0) ? mmc2.prgBank.resize(8) | (U(banks8 - 4, 8 bits) + pa(14 downto 13))
+        bank.resize(log2Up(banks8)) @@ pa(12 downto 0)
+      } else if (spec.mapper == 10) {
+        val bank = pa(14) ? U(banks - 1, 8 bits) | mmc2.prgBank.resize(8)
+        if (banks == 1) pa(13 downto 0) else bank.resize(log2Up(banks)) @@ pa(13 downto 0)
       } else if (spec.discrete) {
         val bank16 = UInt(8 bits)
         spec.mapper match {
@@ -499,18 +568,33 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     prgSlave.rdata := MidCycleRead(prg, prgIndex)
     val prgRam = Mem.fill(0x2000)(UInt(8 bits)).setName("cart_prg_ram").simPublic()
     prgRam.init(Seq.fill(0x2000)(U(0, 8 bits)))
-    ramSlave.rdata := MidCycleRead(prgRam, ramSlave.cmd.address(12 downto 0))
-    prgRam.write(ramSlave.cmd.address(12 downto 0), ramSlave.cmd.data, ramSlave.writeFire)
+    val ramData = MidCycleRead(prgRam, ramSlave.cmd.address(12 downto 0))
+    if (spec.mapper == 69) {
+      val banks8 = spec.prgBytes >> 13
+      val romData = MidCycleRead(prg, fme7.regs(8)(5 downto 0).resize(log2Up(banks8)) @@ ramSlave.cmd.address(12 downto 0))
+      val openBus = host[NesOpenBusPlugin].logic.get.latch
+      ramSlave.rdata := fme7.ramOn ? ramData | (fme7.ramOff ? openBus | romData)
+      prgRam.write(ramSlave.cmd.address(12 downto 0), ramSlave.cmd.data, ramSlave.writeFire && fme7.ramOn)
+    } else {
+      ramSlave.rdata := ramData
+      prgRam.write(ramSlave.cmd.address(12 downto 0), ramSlave.cmd.data, ramSlave.writeFire)
+    }
 
     val chr = Mem.fill(spec.chrBytes)(UInt(8 bits)).setName("cart_chr").simPublic()
     if (spec.chrRam) chr.init(Seq.fill(spec.chrBytes)(U(0, 8 bits)))
     else for (c <- image) chr.init(c.chr.map(U(_, 8 bits)).toSeq)
-    /** CHR index of a PPU address; `after` uses the registers as this cycle's access leaves them. */
-    def chrIndex(a: UInt, after: Boolean = false): UInt = {
+    /** CHR index of a PPU address; `after` uses the registers as this cycle's access leaves them.
+      * `latches`: MMC2/MMC4's latches to use. */
+    def chrIndex(a: UInt, after: Boolean = false, latches: Vec[Bool] = null): UInt = {
       val (bank0, bank1, ctrl) = if (after) (chrBank0After, chrBank1After, controlAfter) else (chrBank0, chrBank1, control)
       val i = spec.mapper match {
         case 3 => bank0(1 downto 0) @@ a(12 downto 0)
         case 66 => (if (after) latchAfter else latch)(1 downto 0) @@ a(12 downto 0)
+        case 69 => (if (after) fme7.regsAfter else fme7.regs)(a(12 downto 10).resize(4)) @@ a(9 downto 0)
+        case 9 | 10 =>
+          val banks = if (after) mmc2.banksAfter else mmc2.banks
+          val l = if (latches != null) latches else mmc2.accessLatch
+          banks((a(12) ## (a(12) ? l(1) | l(0))).asUInt) @@ a(11 downto 0)
         case 11 => (if (after) latchAfter else latch)(7 downto 4) @@ a(12 downto 0)
         case 1 => ctrl(4) ? ((a(12) ? bank1 | bank0) @@ a(11 downto 0)) | (bank0(4 downto 1) @@ a(12 downto 0))
         case 4 =>
@@ -527,6 +611,8 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
         if (spec.mapper == 1) (if (after) controlAfter else control)(1 downto 0)
         else if (spec.mapper == 4) B"1" ## (if (after) mmc3.horizontalAfter else mmc3.horizontal)
         else if (spec.mapper == 7) B"0" ## (if (after) latchAfter else latch)(4)
+        else if (spec.mapper == 9 || spec.mapper == 10) B"1" ## (if (after) mmc2.horizontalAfter else mmc2.horizontal)
+        else if (spec.mapper == 69) { val m = (if (after) fme7.regsAfter else fme7.regs)(12); (!m(1)) ## m(0) }
         else B(if (spec.verticalMirroring) 2 else 3, 2 bits)
       val i = UInt(11 bits)
       switch(mirroring) {
@@ -546,7 +632,8 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     * clock. Returns the two ports' data. */
   def chrPorts(dotAddress: UInt, dotAfter: Bool, address: UInt, data: UInt, enable: Bool, write: Bool): (UInt, UInt) = {
     val l = logic.get
-    val dotIndex = dotAfter ? l.chrIndex(dotAddress, after = true) | l.chrIndex(dotAddress)
+    val dotLatches = if (spec.mapper == 9 || spec.mapper == 10) l.mmc2.nextLatch else null
+    val dotIndex = dotAfter ? l.chrIndex(dotAddress, after = true, dotLatches) | l.chrIndex(dotAddress, latches = dotLatches)
     val index = l.chrIndex(address)
     if (spec.chrRam) {
       val accessData = l.chr.readWriteSync(index, data, enable, write)
@@ -554,12 +641,44 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
       (bypass ? RegNext(data) | l.chr.readSync(dotIndex), accessData)
     } else (l.chr.readSync(dotIndex), l.chr.readSync(index, enable))
   }
-  /** The PPU's bus as MMC3's scanline counter sees it, from the PPU's fast clock area, once per
-    * dot: whether the dot drove an address and that address's A12, and when `accessPhase` (the
-    * CPU access follows this dot), the access's two possible events (the 2007 access, then v
-    * after it when not rendering), which come after the mapper writes. `after`: this dot comes
-    * after the CPU cycle's access, so it sees its latch and enable writes. */
-  def ppuBus(dot: (Bool, Bool), access: Seq[(Bool, Bool)], accessPhase: Bool, after: Bool): Unit = if (spec.mapper == 4) {
+  /** The PPU's bus as the mapper sees it (MMC3's scanline counter, MMC2/MMC4's latches), from
+    * the PPU's fast clock area, once per dot: whether the dot drove an address and the address,
+    * and when `accessPhase` (the CPU access follows this dot), the access's two possible events
+    * (the 2007 access, then v after it when not rendering), which come after the mapper writes.
+    * `after`: this dot comes after the CPU cycle's access, so it sees its latch and enable
+    * writes. */
+  def ppuBus(dot: (Bool, UInt), access: Seq[(Bool, UInt)], accessPhase: Bool, after: Bool): Unit = {
+    if (spec.mapper == 4) mmc3Bus(dot, access, accessPhase, after)
+    if (spec.mapper == 9 || spec.mapper == 10) mmc2Bus(dot, access)
+  }
+  private def mmc2Bus(dot: (Bool, UInt), access: Seq[(Bool, UInt)]): Unit = {
+    val m = logic.mmc2
+    val r = m.latchState
+    case class S(latch: Vec[Bool], pending: Bool, table: Bool, fe: Bool)
+    // An address applies the waiting change, then may set a new one.
+    def event(s: S, valid: Bool, a: UInt): S = {
+      val latch = CombInit(s.latch)
+      when(valid && s.pending) { latch(s.table.asUInt) := s.fe }
+      val low = a(11 downto 3) === (0xFD8 >> 3) || a(11 downto 3) === (0xFE8 >> 3)
+      val exact = if (spec.mapper == 9) !a(12) && a(2 downto 0) =/= 0 else False
+      val hit = valid && !a(13) && low && !exact
+      S(latch, hit || (s.pending && !valid), valid ? a(12) | s.table, valid ? a(5) | s.fe)
+    }
+    def applied(s: S): Vec[Bool] = {
+      val latch = CombInit(s.latch)
+      when(s.pending) { latch(s.table.asUInt) := s.fe }
+      latch
+    }
+    val start = S(r.latch, r.pending, r.pendingTable, r.pendingFe)
+    val dotted = event(start, dot._1, dot._2)
+    m.accessLatch := applied(dotted)
+    val end = access.foldLeft(dotted)((s, e) => event(s, e._1, e._2))
+    r.latch := end.latch; r.pending := end.pending; r.pendingTable := end.table; r.pendingFe := end.fe
+    m.nextLatch := applied(end)
+  }
+  private def mmc3Bus(dotA: (Bool, UInt), accessA: Seq[(Bool, UInt)], accessPhase: Bool, after: Bool): Unit = {
+    val dot = (dotA._1, dotA._2(12))
+    val access = accessA.map(e => (e._1, e._2(12)))
     val m = logic.mmc3
     val r = m.counterState
     case class S(a12: Bool, low: UInt, counter: UInt, reload: Bool, irq: Bool)
@@ -582,7 +701,6 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     r.a12 := s.a12; r.lowDots := s.low; r.counter := s.counter; r.reload := s.reload; r.irq := s.irq
     logic.irq := s.irq
   }
-
   /** A nametable address (2000-3FFF) to an index into the console's 2 KB of VRAM. With
     * `afterAccess`, a mirroring change written by this cycle's CPU access already applies. */
   def ciramIndex(address: UInt, afterAccess: Boolean = false): UInt = logic.ciramIndex(address, afterAccess)

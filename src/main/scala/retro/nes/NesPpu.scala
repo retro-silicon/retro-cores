@@ -158,7 +158,7 @@ class NesPpuPlugin extends FiberPlugin {
     }
 
     /** One dot, given what it fetches (`fetchAddresses` of `s`) from CIRAM and CHR. */
-    def dot(s: NesPpuState, pal: Vec[UInt], ciramValue: UInt, chrValue: UInt): (NesPpuState, Flow[NesPixel], (Bool, Bool)) = {
+    def dot(s: NesPpuState, pal: Vec[UInt], ciramValue: UInt, chrValue: UInt): (NesPpuState, Flow[NesPixel], (Bool, UInt)) = {
       val o = NesPpuState()
       o := s
       val px = Flow(NesPixel())
@@ -223,10 +223,15 @@ class NesPpuPlugin extends FiberPlugin {
       val spBits = (si < s.spCount) ? (s.spAttr(si)(6) ? chrValue.reversed | chrValue) | U(0, 8 bits)
       // The address bus as the cartridge sees it (`NesCartridge.ppuBus`): fetches, sprite
       // pattern fetches (unused slots fetch tile FF), and the garbage nametable fetches.
-      val busValid, busHigh = CombInit(False)
+      val busValid = CombInit(False)
+      val busAddress = CombInit(U(0x2000, 14 bits))
+      val (ciramAddress, chrAddress) = fetchAddresses(s)
       when(renderLine) {
-        when(fetching && !phase(0)) { busValid := True; busHigh := phase(2) && s.ctrl(4) }
-        when(spriteFetch) { busValid := True; busHigh := h16 ? ((si < s.spCount) ? tile(0) | True) | s.ctrl(3) }
+        when(fetching && !phase(0)) { busValid := True; busAddress := phase(2) ? chrAddress.resize(14) | ciramAddress }
+        when(spriteFetch) {
+          busValid := True
+          busAddress := (si < s.spCount) ? chrAddress.resize(14) | (h16 ? U(0x1FF0, 14 bits) | (U"0" @@ s.ctrl(3).asUInt @@ U(0xFF0, 12 bits)))
+        }
         when((d >= 257 && d <= 320 && !sprite(2) && !sprite(0)) || d === 337 || d === 339) { busValid := True }
       }
 
@@ -317,11 +322,11 @@ class NesPpuPlugin extends FiberPlugin {
         o.line := pre ? U(0, 9 bits) | (line + 1)
         when(pre) { o.oddFrame := !s.oddFrame }
       } otherwise { o.dot := d + 1 }
-      (o, px, (busValid, busHigh))
+      (o, px, (busValid, busAddress))
     }
 
     // ---- The CPU access ----------------------------------------------------------------------
-    def access(s: NesPpuState): (NesPpuState, Seq[(Bool, Bool)]) = {
+    def access(s: NesPpuState): (NesPpuState, Seq[(Bool, UInt)]) = {
       val o = NesPpuState()
       o := s
       val register = slave.cmd.address(2 downto 0)
@@ -418,7 +423,7 @@ class NesPpuPlugin extends FiberPlugin {
       o.dataHold.allowOverride() := read7
       val data7 = read7 && !toPalette || register === 7 && slave.writeFire
       val vChanged = read7 || (register === 7 && slave.writeFire) || (register === 6 && slave.writeFire && s.w)
-      (o, Seq((data7, a(12)), (vChanged && !renderingNow, o.v(12))))
+      (o, Seq((data7, a), (vChanged && !renderingNow, o.v(13 downto 0))))
     }
 
     // ---- A dot, and in phase 1 the access after it ---------------------------------------------
@@ -460,7 +465,7 @@ class NesPpuPlugin extends FiberPlugin {
     oam.write(oamWrite.address, oamWrite.data, oamWrite.enable && accessPhase && slave.writeFire, oamWriteMask)
     when(paletteWrite.enable && accessPhase && slave.writeFire) { palette(paletteWrite.address) := paletteWrite.data }
 
-    cart.ppuBus(dotBus, accessBus.map { case (valid, high) => (valid && accessPhase, high) }, accessPhase, phase === 2)
+    cart.ppuBus(dotBus, accessBus.map { case (valid, address) => (valid && accessPhase, address) }, accessPhase, phase === 2)
     pixel := px
     /** The pixel as one value (valid, y, x, color from the MSB), so a sim reads it in one go. */
     val pixelTap = (px.valid ## px.y ## px.x ## px.color).setName("ppu_pixel_tap").simPublic()
