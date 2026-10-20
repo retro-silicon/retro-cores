@@ -31,7 +31,8 @@ package retro.nes
   * bank 1, PRG bank). A write with bit 7 set resets the shift register and sets PRG mode 3. A
   * write in the cycle after another one is ignored (the second write of a read-modify-write
   * instruction). PRG RAM is always enabled. */
-case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mapper: Int, verticalMirroring: Boolean) {
+case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mapper: Int, verticalMirroring: Boolean,
+                        mmc3Alternate: Boolean = false) {
   require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   def prgMask = prg.length - 1
   def chrMask = chr.length - 1
@@ -48,7 +49,9 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
     * and the scanline counter: latch (C000), reload request (C001), enable (E001; E000
     * disables and acknowledges). The counter is clocked by rises of PPU A12 after it was low for
     * `a12Filter` dots; on a clock it reloads when 0 or asked to, else decrements, then raises
-    * the IRQ when it is 0 and enabled (the Sharp MMC3's behavior). */
+    * the IRQ when it is 0 and enabled (the Sharp MMC3's behavior). With `mmc3Alternate` (the
+    * MMC3 revision A, NEC's MMC3 and MMC6) the IRQ is raised only when the counter got to 0 by
+    * decrementing or by a reload after C001, not by reloading 0 when it was already 0. */
   val mmc3Banks = Array(0, 2, 4, 5, 6, 7, 0, 1)
   var bankSelect, mmc3Mirroring = 0
   var irqLatch, irqCounter = 0
@@ -147,8 +150,9 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
   } else if (mapper == 4) {
     val high = (address & 0x1000) != 0
     if (high && !a12 && dot - a12Fell >= NesCartridge.a12Filter) {
+      val raise = !mmc3Alternate || irqCounter != 0 || irqReload
       if (irqCounter == 0 || irqReload) irqCounter = irqLatch else irqCounter -= 1
-      if (irqCounter == 0 && irqEnabled) irq = true
+      if (irqCounter == 0 && irqEnabled && raise) irq = true
       irqReload = false
     }
     if (!high && a12) a12Fell = dot

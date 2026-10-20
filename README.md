@@ -120,9 +120,12 @@ on hardware depend on CPU-PPU alignment.
 MMC3 (mapper 4) clocks its scanline counter on PPU A12 rising edges after A12 has been low for
 10 dots, with the Sharp chip's IRQ behavior (a counter reloaded to 0 fires). The cartridge
 sees every PPU bus address the 2C02 drives: unused sprite slots, the garbage nametable fetches
-at dots 257-320, 337 and 339, and 2006/2007 accesses outside rendering. Of blargg's
-mmc3_test, mmc3_test_2 and mmc3_irq_tests (18 ROMs) three fail, which test other chips (MMC6,
-MMC3 revision A and the alternate MMC3 behavior).
+at dots 257-320, 337 and 339, and 2006/2007 accesses outside rendering. `mmc3Alternate` on
+the cartridge (and `NesCartSpec`) selects the other chips' rule (MMC3 revision A, NEC's MMC3,
+MMC6): the IRQ fires only when the counter got to 0 by decrementing or by a reload after a
+C001 write. iNES headers don't say which chip a board has, so the test runner picks it from the
+ROM's name. All 18 ROMs of blargg's mmc3_test, mmc3_test_2 and mmc3_irq_tests pass, on the
+model and the RTL.
 The discrete boards (mappers 2, 7, 11, 34, 66, 180; no bus conflicts) have no self-checking
 test ROMs here yet: the 240p Test Suite (UxROM and BNROM builds, GPL) boots to its menu on the
 model and matches it on the RTL, checked by hand. MMC2 and MMC4 (9, 10) switch CHR banks by

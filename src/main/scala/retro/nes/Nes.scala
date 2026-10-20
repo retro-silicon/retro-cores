@@ -383,16 +383,17 @@ class NesApuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
   }
 }
 
-/** What an iNES cartridge needs in hardware: sizes, mapper (`NesCartridge.mappers`) and
-  * mirroring. */
-case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: Int, verticalMirroring: Boolean) {
+/** What an iNES cartridge needs in hardware: sizes, mapper (`NesCartridge.mappers`),
+  * mirroring, and for MMC3 which IRQ behavior (`NesCartridge.mmc3Alternate`). */
+case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: Int, verticalMirroring: Boolean,
+                       mmc3Alternate: Boolean = false) {
   require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   def discrete = NesCartridge.discrete.contains(mapper)
   require(prgBytes % 0x4000 == 0 && isPow2(chrBytes))
   require(!(Seq(4, 9, 10, 69).contains(mapper) || discrete) || isPow2(prgBytes), s"mapper $mapper's PRG must be a power of 2")
 }
 object NesCartSpec {
-  def of(c: NesCartridge) = NesCartSpec(c.prg.length, c.chr.length, c.chrRam, c.mapper, c.verticalMirroring)
+  def of(c: NesCartridge) = NesCartSpec(c.prg.length, c.chr.length, c.chrRam, c.mapper, c.verticalMirroring, c.mmc3Alternate)
 }
 
 /** The cartridge: PRG ROM at 8000-FFFF, 8 KB of PRG RAM at 6000 (test ROMs report there), CHR
@@ -718,7 +719,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
         (valid && !high && s.a12) ? U(0, 4 bits) | s.low,
         clock ? next | s.counter,
         !clock && s.reload,
-        s.irq || (clock && next === 0 && enabled))
+        s.irq || (clock && next === 0 && enabled && (if (spec.mmc3Alternate) s.counter =/= 0 || s.reload else True)))
     }
     val start = S(r.a12, r.lowDots, r.counter, r.reload, r.irq)
     val ticked = start.copy(low = (start.low === 15) ? start.low | (start.low + 1))

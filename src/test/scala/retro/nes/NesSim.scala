@@ -26,12 +26,12 @@ object NesRtl {
   /** Runs `file` until its test reports a result (see `NesRoms.verdict`) or `budget` frames.
     * Throws on the first difference between the RTL and the model. */
   def cosim(file: File, budget: Int): Result = {
-    val spec = NesCartSpec.of(NesCartridge.load(file))
+    val spec = NesCartSpec.of(NesRoms.cartridge(file))
     var result: Result = null
     val timing = NesRoms.timing(file)
     compile(spec, timing).doSimUntilVoid { dut =>
-      dut.host[NesCartridgePlugin].load(NesCartridge.load(file))
-      val ref = new NesReference(NesCartridge.load(file), timing = timing)
+      dut.host[NesCartridgePlugin].load(NesRoms.cartridge(file))
+      val ref = new NesReference(NesRoms.cartridge(file), timing = timing)
       val crcs = NesRoms.expectedCrcs(file)
       dut.host[NesApuPlugin].buttons #= 0
       val resetButton = dut.host[NesInterruptsPlugin].logic.get.button
@@ -158,7 +158,7 @@ object NesRomReport extends App {
   implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
   val roms = NesRoms.all.filter { case (name, _) => args.isEmpty || args.exists(name.contains) }
   // Compile each cartridge configuration once, before the runs share it.
-  roms.map { case (_, file) => (NesCartSpec.of(NesCartridge.load(file)), NesRoms.timing(file)) }.distinct.foreach { case (s, t) => NesRtl.compile(s, t) }
+  roms.map { case (_, file) => (NesCartSpec.of(NesRoms.cartridge(file)), NesRoms.timing(file)) }.distinct.foreach { case (s, t) => NesRtl.compile(s, t) }
   val start = System.nanoTime()
   val results = Future.sequence(roms.map { case (name, file) => Future {
     val t = System.nanoTime()

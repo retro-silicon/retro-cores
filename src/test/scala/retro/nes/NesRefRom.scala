@@ -23,6 +23,12 @@ object NesRoms {
   /** The console a ROM is for: PAL for blargg's pal_apu_tests, NTSC otherwise (iNES headers
     * rarely say). */
   def timing(file: File): NesTiming = if (file.getPath.contains("pal_apu_tests")) NesTiming.pal else NesTiming.ntsc
+  /** The cartridge in `file`; the MMC3 tests for revision A, MMC6 and the alternate behavior get
+    * `mmc3Alternate` (iNES headers don't say which MMC3 a board has). */
+  def cartridge(file: File): NesCartridge = {
+    val c = NesCartridge.load(file)
+    c.copy(mmc3Alternate = c.mapper == 4 && Seq("MMC3_rev_A", "MMC6", "MMC3_alt").exists(file.getName.contains))
+  }
 
   sealed trait Verdict
   case object Running extends Verdict
@@ -160,7 +166,7 @@ object NesMixerCheck extends App {
   var ok = true
   for ((name, limit) <- hardware) {
     val file = new File(NesRoms.dir, s"apu_mixer/$name.nes")
-    val nes = new NesReference(NesCartridge.load(file))
+    val nes = new NesReference(NesRoms.cartridge(file))
     val audio = new NesAudio
     nes.onSample = audio.add
     while ((nes.prgRam(0) >= 0x80 || nes.prgRam(1) != 0xDE) && nes.ppu.frames < 3000) nes.runFrames(1)
@@ -181,7 +187,7 @@ object NesRefRom extends App {
   val dots = sys.env.getOrElse("DOTS", "2").toInt
   var passed, total = 0
   for ((name, file) <- NesRoms.all if args.isEmpty || args.exists(name.contains)) {
-    val nes = new NesReference(NesCartridge.load(file), dots, NesRoms.timing(file))
+    val nes = new NesReference(NesRoms.cartridge(file), dots, NesRoms.timing(file))
     val crcs = NesRoms.expectedCrcs(file)
     val audio = if (sys.env.contains("WAV")) Some(new NesAudio) else None
     for (a <- audio) nes.onSample = a.add
