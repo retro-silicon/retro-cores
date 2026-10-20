@@ -38,6 +38,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   // Serial
   var sb, bits = 0
   var active, internalClock = false
+  var serialClock = ((counter >> Gb.serialClockBit) & 1) == 1
   /** Bytes sent with the internal clock. */
   val serialOut = ArrayBuffer[Int]()
   val ppu = new PpuReference(vram, oam, postBoot)
@@ -116,6 +117,19 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   def write(address: Int, value: Int): Unit = cycle(Some(value), address)
   override def idle(): Unit = cycle(None, -1)
 
+  /** Shifts the serial port on a falling edge of the timer counter's serial clock bit. */
+  private def serialEdge(counterBefore: Int): Unit =
+    if (((counterBefore >> (Gb.serialClockBit - 1)) & 1) == 1 && ((counter >> (Gb.serialClockBit - 1)) & 1) == 0) serialToggle()
+  /** The serial clock: a flip-flop toggled by falling edges of the bit below; the port shifts as it falls. */
+  private def serialToggle(): Unit = {
+    serialClock = !serialClock
+    if (!serialClock && active && internalClock) {
+      sb = ((sb << 1) | 1) & 0xFF
+      bits -= 1
+      if (bits == 0) { active = false; iflag |= 1 << Gb.Irq.SERIAL.index }
+    }
+  }
+
   private def cycle(wdata: Option[Int], a: Int): Int = {
     buttons = buttonsAt(cycles)
     def writes(addr: Int) = wdata.isDefined && a == addr
@@ -130,11 +144,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     if (overflowed) { tima = tma; overflowed = false; reloading = true; iflag |= 1 << Gb.Irq.TIMER.index }
     else if (Gb.timerTap(counterBefore, tac) && !Gb.timerTap(counter, tac)) { overflowed = tima == 0xFF; tima = (tima + 1) & 0xFF }
     // Serial
-    if (active && internalClock && ((counterBefore >> Gb.serialClockBit) & 1) == 1 && ((counter >> Gb.serialClockBit) & 1) == 0) {
-      sb = ((sb << 1) | 1) & 0xFF
-      bits -= 1
-      if (bits == 0) { active = false; iflag |= 1 << Gb.Irq.SERIAL.index }
-    }
+    serialEdge(counterBefore)
     // PPU. A write to its registers lands during its dots (`PpuReference.writeDots`).
     if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
     val (vblank, stat) = ppu.tick()
@@ -197,9 +207,14 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
         case Gb.P1 => select = (d >> 4) & 3
         case Gb.SB => sb = d
         case Gb.SC =>
+          // Writing SC drops the serial clock: a running transfer shifts, and that bit counts
+          // towards the new one (SameBoy).
+          val shifted = serialClock && active && internalClock
+          serialClock = false
+          if (shifted) sb = ((sb << 1) | 1) & 0xFF
           active = (d & 0x80) != 0
           internalClock = (d & 1) != 0
-          bits = 8
+          bits = if (shifted) 7 else 8
           if (active && internalClock) serialOut += sb
         case Gb.DIV => counter = 0
         case Gb.TIMA => if (!reloading) { tima = d; overflowed = false }
@@ -211,6 +226,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
       }
       // Resetting DIV or changing TAC can drop the selected bit: that is a falling edge too.
       if (Gb.timerTap(counterTicked, tacTicked) && !Gb.timerTap(counter, tac)) { overflowed = tima == 0xFF; tima = (tima + 1) & 0xFF }
+      if (a == Gb.DIV) serialEdge(counterTicked)
     }
     v
   }

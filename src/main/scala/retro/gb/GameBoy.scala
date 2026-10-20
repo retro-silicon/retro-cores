@@ -165,16 +165,16 @@ abstract class GbPeripheral(mapping: AddressMapping, irqs: IrqLine*) extends Fib
   * then sees, or writes over, the ticked state (see `Gb`). On overflow TIMA reads 0x00 for one
   * M-cycle (A); the next tick loads TMA and requests the interrupt (B), which a halted CPU sees
   * an M-cycle later. Writing TIMA during A cancels both. During B a TIMA write is ignored and a TMA write also lands in TIMA. */
-class TimerPlugin(resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
+class TimerPlugin(val resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
   private var lateHalted: Bool = null
   override def withController(ctrl: IrqService): Unit = ctrl match {
     case c: InterruptControllerPlugin => lateHalted = c.late(Gb.Irq.TIMER, halted = true)
     case _ =>
   }
 
-  /** The 16-bit counter, and its value after this M-cycle's tick: other peripherals (serial)
-    * divide their clocks from it. */
-  val counter, tickedCounter = Handle[UInt]()
+  /** The 16-bit counter, its value after this M-cycle's tick, and after this M-cycle's DIV
+    * write: other peripherals (serial) divide their clocks from it. */
+  val counter, tickedCounter, nextCounter = Handle[UInt]()
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val counter = Reg(UInt(16 bits)).init(resetCounter).simPublic()
     TimerPlugin.this.counter.load(counter)
@@ -216,6 +216,7 @@ class TimerPlugin(resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb.DIV
     def writes(a: Int) = slave.writeFire && slave.cmd.address === a
     val data = slave.cmd.data
     val counterNext = writes(Gb.DIV) ? U(0, 16 bits) | ticked.counter
+    nextCounter.load(counterNext)
     val tacNext = writes(Gb.TAC) ? data(2 downto 0) | tac
     // Resetting DIV or changing TAC can drop the selected bit: that is a falling edge too.
     val glitch = tap(ticked.counter, tac) && !tap(counterNext, tacNext)
@@ -253,12 +254,19 @@ class SerialPlugin extends GbPeripheral(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
     val internalClock = RegInit(False)
     val bits = Reg(UInt(4 bits)) init 0
 
-    // The tick.
-    val shift = active && internalClock && timer.counter.get(Gb.serialClockBit) && !timer.tickedCounter.get(Gb.serialClockBit)
-    val done = shift && bits === 1
+    // The serial clock: a flip-flop toggled by falling edges of the counter's bit below it, also
+    // when a DIV write resets the counter. The port shifts as it falls.
+    val clock = RegInit(Bool(((timer.resetCounter >> Gb.serialClockBit) & 1) == 1))
+    val below = Gb.serialClockBit - 1
+    def fall(a: UInt, b: UInt) = a(below) && !b(below)
+    val shift = active && internalClock && clock && fall(timer.counter, timer.tickedCounter)
+    val clockTicked = clock ^ fall(timer.counter, timer.tickedCounter)
+    val divShift = active && internalClock && clockTicked && fall(timer.tickedCounter, timer.nextCounter)
+    val done = (shift || divShift) && bits === 1
     val sbTicked = shift ? (sb(6 downto 0) @@ U"1") | sb
-    val activeTicked = active && !done
+    val activeTicked = active && !(shift && bits === 1)
     irq(0) := done
+    when(fall(timer.counter, timer.tickedCounter) || fall(timer.tickedCounter, timer.nextCounter)) { clock := !clock }
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
     regs.read(sbTicked, Gb.SB)
@@ -267,15 +275,20 @@ class SerialPlugin extends GbPeripheral(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
 
     def writes(a: Int) = slave.writeFire && slave.cmd.address === a
     val data = slave.cmd.data
-    sb := sbTicked
-    active := activeTicked
-    when(shift) { bits := bits - 1 }
+    sb := divShift ? (sbTicked(6 downto 0) @@ U"1") | sbTicked
+    active := activeTicked && !done
+    when(shift || divShift) { bits := bits - 1 }
     tx.valid := False
     tx.payload := sbTicked
+    // Writing SC drops the serial clock: a running transfer shifts, and that bit counts towards
+    // the new one (SameBoy).
     when(writes(Gb.SC)) {
+      val shifted = clockTicked && activeTicked && internalClock
+      clock := False
+      when(shifted) { sb := sbTicked(6 downto 0) @@ U"1" }
       active := data(7)
       internalClock := data(0)
-      bits := 8
+      bits := shifted ? U(7, 4 bits) | U(8, 4 bits)
       tx.valid := data(7) && data(0)
     }
     when(writes(Gb.SB)) { sb := data }
