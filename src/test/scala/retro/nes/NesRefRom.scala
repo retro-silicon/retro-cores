@@ -8,7 +8,7 @@ import javax.imageio.ImageIO
 object NesRoms {
   val dir = new File("roms/nes-test-roms")
 
-  /** Every mapper 0/1/3/4 test ROM under `roms/nes-test-roms`, by path relative to it. */
+  /** Every test ROM under `roms/nes-test-roms` for a supported mapper, by path relative to it. */
   def all: Seq[(String, File)] = {
     def walk(f: File): Seq[File] = if (f.isDirectory) f.listFiles().sortBy(_.getName).toSeq.flatMap(walk) else Seq(f)
     if (!dir.isDirectory) Nil
@@ -16,7 +16,7 @@ object NesRoms {
       .filter { case (_, f) =>
         val h = java.nio.file.Files.readAllBytes(f.toPath).take(8).map(_ & 0xFF)
         val mapper = (h(6) >> 4) | (h(7) & 0xF0)
-        Seq(0, 1, 3, 4).contains(mapper)
+        NesCartridge.mappers.contains(mapper)
       }
   }
 

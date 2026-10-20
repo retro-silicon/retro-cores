@@ -1,7 +1,13 @@
 package retro.nes
 
 /** An iNES image: PRG ROM, CHR ROM (or 8 KB of CHR RAM when it has none), mapper and nametable
-  * mirroring, plus the mapper's registers. Mappers supported: 0 (NROM), 1 (MMC1) and 3 (CNROM).
+  * mirroring, plus the mapper's registers. Mappers supported: 0 (NROM), 1 (MMC1), 3 (CNROM), 4
+  * (MMC3), and the discrete-logic boards whose one register is written anywhere in 8000-FFFF
+  * (`discrete`): 2 (UxROM: 16 KB bank at 8000, last bank at C000), 180 (the reverse: first bank
+  * at 8000, the selected one at C000), 7 (AxROM: 32 KB bank in bits 0-3, one-screen mirroring
+  * from bit 4), 34 (BNROM: 32 KB bank), 66 (GxROM: 32 KB bank in bits 4-5, 8 KB CHR bank in
+  * bits 0-1) and 11 (Color Dreams: 32 KB bank in bits 0-1, 8 KB CHR bank in bits 4-7). None of
+  * them models bus conflicts.
   * Like most emulators, every cartridge gets 8 KB of PRG RAM at 6000, which test ROMs use to
   * report results.
   *
@@ -11,7 +17,7 @@ package retro.nes
   * write in the cycle after another one is ignored (the second write of a read-modify-write
   * instruction). PRG RAM is always enabled. */
 case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mapper: Int, verticalMirroring: Boolean) {
-  require(Seq(0, 1, 3, 4).contains(mapper), s"mapper $mapper is not supported")
+  require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   def prgMask = prg.length - 1
   def chrMask = chr.length - 1
 
@@ -37,9 +43,13 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
   private var a12 = false
   private var a12Fell = 0L
 
+  /** The discrete boards' register. */
+  var latch = 0
+
   /** A CPU write to 8000-FFFF in CPU cycle `cycle`. */
   def cpuWrite(address: Int, value: Int, cycle: Long): Unit = mapper match {
     case 3 => chrBank0 = value & 3
+    case m if NesCartridge.discrete.contains(m) => latch = value
     case 4 => (address & 0xE001) match {
       case 0x8000 => bankSelect = value
       case 0x8001 => mmc3Banks(bankSelect & 7) = value
@@ -94,6 +104,16 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
       case _ => banks - 1
     }
     (bank % banks) << 13 | address & 0x1FFF
+  } else if (NesCartridge.discrete.contains(mapper)) {
+    val banks16 = prg.length >> 14
+    val bank16 = mapper match {
+      case 2 => if ((address & 0x4000) == 0) latch else banks16 - 1
+      case 180 => if ((address & 0x4000) == 0) 0 else latch
+      case _ =>
+        val bank32 = mapper match { case 7 => latch & 0x0F; case 34 => latch; case 66 => latch >> 4 & 3; case _ => latch & 3 }
+        bank32 << 1 | address >> 14 & 1
+    }
+    (bank16 % banks16) << 14 | address & 0x3FFF
   } else {
     val bank = if (mapper != 1) address >> 14 & 1 else (control >> 2 & 3) match {
       case 0 | 1 => (prgBank & 0x0E) | (address >> 14 & 1)
@@ -108,6 +128,8 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
     val a = address & 0x1FFF
     val i = mapper match {
       case 3 => chrBank0 << 13 | a
+      case 66 => (latch & 3) << 13 | a
+      case 11 => (latch >> 4) << 13 | a
       case 1 if (control & 0x10) == 0 => (chrBank0 & 0x1E) << 12 | a
       case 1 => (if (a < 0x1000) chrBank0 else chrBank1) << 12 | a & 0xFFF
       case 4 =>
@@ -121,7 +143,8 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
   /** Nametable address (2000-3FFF) to an index into the 2 KB of console VRAM. */
   def ciram(address: Int): Int = {
     val a = address & 0xFFF
-    val mirroring = if (mapper == 1) control & 3 else if (mapper == 4) 2 + mmc3Mirroring else if (verticalMirroring) 2 else 3
+    val mirroring = if (mapper == 1) control & 3 else if (mapper == 4) 2 + mmc3Mirroring
+      else if (mapper == 7) latch >> 4 & 1 else if (verticalMirroring) 2 else 3
     mirroring match {
       case 0 => a & 0x3FF
       case 1 => 0x400 | a & 0x3FF
@@ -132,6 +155,9 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
 }
 
 object NesCartridge {
+  /** The boards with one register written anywhere in 8000-FFFF, besides CNROM. */
+  val discrete = Seq(2, 7, 11, 34, 66, 180)
+  val mappers = Seq(0, 1, 3, 4) ++ discrete
   /** PPU dots A12 must stay low before a rise clocks MMC3's counter. */
   val a12Filter = 10
   def load(image: Array[Int]): NesCartridge = {

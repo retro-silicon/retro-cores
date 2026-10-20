@@ -354,12 +354,13 @@ class NesApuPlugin extends FiberPlugin {
   }
 }
 
-/** What an iNES cartridge needs in hardware: sizes, mapper (0 NROM, 1 MMC1, 3 CNROM, 4 MMC3)
-  * and mirroring. */
+/** What an iNES cartridge needs in hardware: sizes, mapper (`NesCartridge.mappers`) and
+  * mirroring. */
 case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: Int, verticalMirroring: Boolean) {
-  require(Seq(0, 1, 3, 4).contains(mapper), s"mapper $mapper is not supported")
+  require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
+  def discrete = NesCartridge.discrete.contains(mapper)
   require(prgBytes % 0x4000 == 0 && isPow2(chrBytes))
-  require(mapper != 4 || isPow2(prgBytes), "MMC3 PRG must be a power of 2")
+  require(!(mapper == 4 || discrete) || isPow2(prgBytes), s"mapper $mapper's PRG must be a power of 2")
 }
 object NesCartSpec {
   def of(c: NesCartridge) = NesCartSpec(c.prg.length, c.chr.length, c.chrRam, c.mapper, c.verticalMirroring)
@@ -367,8 +368,8 @@ object NesCartSpec {
 
 /** The cartridge: PRG ROM at 8000-FFFF, 8 KB of PRG RAM at 6000 (test ROMs report there), CHR
   * ROM or RAM for the PPU, the nametable mirroring, and the mapper's registers as
-  * `NesCartridge` models them: CNROM's CHR bank (any write to 8000-FFFF), or MMC1's shift
-  * register, control, CHR and PRG banks. Memories are `simPublic`: a sim loads an image with
+  * `NesCartridge` models them: CNROM's CHR bank (any write to 8000-FFFF), MMC1's shift
+  * register, control, CHR and PRG banks, MMC3's, or the discrete boards' one register. Memories are `simPublic`: a sim loads an image with
   * `load` instead of recompiling per ROM. `image` builds the ROMs in (synthesis needs them). */
 class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = None) extends FiberPlugin {
   val logic = during setup new Area {
@@ -389,6 +390,11 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     chrBank0After := chrBank0; chrBank1After := chrBank1; prgBankAfter := prgBank; controlAfter := control
     val d = prgSlave.cmd.data
     if (spec.mapper == 3) when(prgSlave.writeFire) { chrBank0After := d(1 downto 0).resize(5) }
+    /** The discrete boards' register. */
+    val latch = Reg(UInt(8 bits)).init(0)
+    val latchAfter = CombInit(latch)
+    if (spec.discrete) when(prgSlave.writeFire) { latchAfter := d }
+    latch := latchAfter
     if (spec.mapper == 1) {
       val shift = Reg(UInt(5 bits)).init(0)
       val shiftCount = Reg(UInt(3 bits)).init(0)
@@ -477,6 +483,16 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
           default { bank := U(banks8 - 1, 8 bits) }
         }
         bank.resize(log2Up(banks8)) @@ pa(12 downto 0)
+      } else if (spec.discrete) {
+        val bank16 = UInt(8 bits)
+        spec.mapper match {
+          case 2 => bank16 := pa(14) ? U(banks - 1, 8 bits) | latch
+          case 180 => bank16 := pa(14) ? latch | U(0, 8 bits)
+          case m =>
+            val bank32 = m match { case 7 => latch(3 downto 0); case 34 => latch(6 downto 0); case 66 => latch(5 downto 4); case _ => latch(1 downto 0) }
+            bank16 := (bank32 @@ pa(14)).resized
+        }
+        if (banks == 1) pa(13 downto 0) else bank16.resize(log2Up(banks)) @@ pa(13 downto 0)
       } else if (banks == 1) pa(13 downto 0)
       else if (isPow2(banks)) prgBank16.resize(log2Up(banks)) @@ pa(13 downto 0)
       else Vec((0 until 16).map(b => U(b % banks, log2Up(banks) bits)))(prgBank16) @@ pa(13 downto 0)
@@ -494,6 +510,8 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
       val (bank0, bank1, ctrl) = if (after) (chrBank0After, chrBank1After, controlAfter) else (chrBank0, chrBank1, control)
       val i = spec.mapper match {
         case 3 => bank0(1 downto 0) @@ a(12 downto 0)
+        case 66 => (if (after) latchAfter else latch)(1 downto 0) @@ a(12 downto 0)
+        case 11 => (if (after) latchAfter else latch)(7 downto 4) @@ a(12 downto 0)
         case 1 => ctrl(4) ? ((a(12) ? bank1 | bank0) @@ a(11 downto 0)) | (bank0(4 downto 1) @@ a(12 downto 0))
         case 4 =>
           val (select, regs) = if (after) (mmc3.bankSelectAfter, mmc3.banksAfter) else (mmc3.bankSelect, mmc3.banks)
@@ -508,6 +526,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
       val mirroring =
         if (spec.mapper == 1) (if (after) controlAfter else control)(1 downto 0)
         else if (spec.mapper == 4) B"1" ## (if (after) mmc3.horizontalAfter else mmc3.horizontal)
+        else if (spec.mapper == 7) B"0" ## (if (after) latchAfter else latch)(4)
         else B(if (spec.verticalMirroring) 2 else 3, 2 bits)
       val i = UInt(11 bits)
       switch(mirroring) {
