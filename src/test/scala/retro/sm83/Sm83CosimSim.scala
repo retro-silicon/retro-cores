@@ -30,7 +30,7 @@ class Sm83CosimSim extends AnyFunSuite {
       assert(rtlRegs == ref.regs, s"$ctx: registers\n  rtl $rtlRegs\n  ref ${ref.regs}")
       seen(e.opcode) += 1
       // A halted M-cycle retires as HALTED; it does not count towards the instruction budget.
-      if (e.opcode != Sm83.HALTED) checked += 1
+      if (e.opcode != Sm83.HALTED && e.opcode != Sm83.JUST_HALTED) checked += 1
     }
   }
 

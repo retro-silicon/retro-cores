@@ -105,7 +105,9 @@ object Interrupts {
   val HALT_BUG = Cond("INT.haltbug")
   /** Set on HALT's waiting fetch: while nothing is pending, IR reloads `Sm83.HALTED` instead
     * of the fetched opcode, so the CPU keeps fetching at PC without executing anything. 1: the
-    * halted CPU's view of the requests; 2: the running CPU's (`Sm83.HALT_CHECK`). */
+    * halted CPU's view of the requests; 2: the running CPU's (`Sm83.HALT_CHECK`); 3: none, in
+    * the first halted M-cycle (a just-halted CPU samples the requests only at its start, as
+    * HALT is fetched, in SameBoy). */
   val HALT_WAIT = CtrlKey("HALT_WAIT", 2)
   /** PC after HALT's waiting fetch: PC + 1 once an interrupt is pending, else PC. */
   val HALT_PC = Value("INT.haltPC")
@@ -140,6 +142,8 @@ object Sm83 {
   /** HALT fetched with IME off and nothing pending: the next fetch checks as a running CPU would,
     * running the next byte twice if an interrupt is pending by then, else the CPU halts. */
   val HALT_CHECK = 0x203
+  /** The halted M-cycle after HALT CHECK: it sees no requests (SameBoy). */
+  val JUST_HALTED = 0x204
   /** Opcodes the SM83 does not define: they lock it up. */
   val unused = Set(0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD)
 
@@ -293,7 +297,7 @@ object Sm83 {
       val pending = requests =/= 0
       // The fetch's interrupt check leaves out requests raised too late in the M-cycle for it.
       val halted = seq.ctrl(Interrupts.HALT_WAIT) === 1
-      val fetchPending = (requests & ~(halted ? lateHalted | lateRunning)) =/= 0
+      val fetchPending = (requests & ~(halted ? lateHalted | lateRunning)) =/= 0 && seq.ctrl(Interrupts.HALT_WAIT) =/= 3
       val enabled = ime || imeNext
       val effective = imeOp === Interrupts.RETI || (enabled && imeOp =/= Interrupts.DI)
       val dispatch = effective && fetchPending
@@ -302,7 +306,8 @@ object Sm83 {
       // HALT with IME off and an interrupt pending does not wait: it is the HALT bug's fetch alone.
       seq.addFetchOverride(seq.rdata === 0x76 && pending && !effective, U(HALT_BUG, 10 bits))
       seq.addFetchOverride(seq.rdata === 0x76 && !pending && !effective, U(HALT_CHECK, 10 bits))
-      seq.addFetchOverride(seq.ctrl(Interrupts.HALT_WAIT) =/= 0 && !fetchPending, U(HALTED, 10 bits))
+      seq.addFetchOverride(seq.ctrl(Interrupts.HALT_WAIT) =/= 0 && !fetchPending,
+        (seq.ctrl(Interrupts.HALT_WAIT) === 2) ? U(JUST_HALTED, 10 bits) | U(HALTED, 10 bits))
       seq.addFetchOverride(dispatch, U(DISPATCH, 10 bits))
       val pc = host[RegFileService].read(PC)
       seq.addSource(Interrupts.HALT_PC, fetchPending ? (pc + 1) | pc)
@@ -472,9 +477,12 @@ object Sm83 {
     // pending, the next fetch does not increment PC: the HALT bug with IME off, and with IME on
     // the dispatch returns to the HALT (AGE ei-halt). With IME off, HALT's fetch is overridden to
     // HALT BUG or HALT CHECK, which checks again in the next M-cycle (Gambatte late_m0irq_halt).
+    // The first halted M-cycle (HALT's own wait, or JUST HALTED after HALT CHECK) sees no requests.
     val haltWait = MCycleSpec.fetch(PC).assign(PC -> Interrupts.HALT_PC).set(Interrupts.HALT_WAIT, 1)
-    op("HALT", 0x76, idle.branchIf(Interrupts.HALT_BUG, 2), haltWait, MCycleSpec.fetch(PC))
+    val haltBlind = MCycleSpec.fetch(PC).assign(PC -> Interrupts.HALT_PC).set(Interrupts.HALT_WAIT, 3)
+    op("HALT", 0x76, idle.branchIf(Interrupts.HALT_BUG, 2), haltBlind, MCycleSpec.fetch(PC))
     op("HALTED", HALTED, haltWait)
+    op("JUST HALTED", JUST_HALTED, haltBlind)
     op("HALT BUG", HALT_BUG, MCycleSpec.fetch(PC))
     op("HALT CHECK", HALT_CHECK, MCycleSpec.fetch(PC).set(Interrupts.HALT_WAIT, 2))
     for (o <- unused) op(f"LOCKUP $o%02X", o, idle.branchIf(Interrupts.LOCKED, 0), fetch) // the fetch is never reached

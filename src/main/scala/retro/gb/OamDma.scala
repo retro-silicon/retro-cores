@@ -99,7 +99,8 @@ class OamDmaPlugin extends FiberPlugin {
 
   val halting = during build new Area {
     // Halted in this M-cycle and the last (`GbReference`).
-    val now = host[SequencerPlugin].logic.ir === retro.sm83.Sm83.HALTED
+    val ir = host[SequencerPlugin].logic.ir
+    val now = ir === retro.sm83.Sm83.HALTED || ir === retro.sm83.Sm83.JUST_HALTED
     logic.halted := now && RegNext(now, False)
   }
 
