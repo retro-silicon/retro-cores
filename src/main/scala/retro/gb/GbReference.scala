@@ -170,7 +170,8 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     // A CPU halted in this M-cycle and the last stops OAM DMA (SameBoy).
     val dmaStopped = cpu.halted && haltedBefore
     haltedBefore = cpu.halted
-    ppu.dmaBusy = dmaStartIn != 0 || dmaActive || dmaLast
+    // The PPU sees the DMA from its first copy cycle, not from the DMA write (Gambatte).
+    ppu.dmaBusy = dmaActive || dmaLast
     ppu.dmaHalted = dmaStopped
     ppu.dmaDest = if (dmaActive) dmaIndex else -1
     if (!dmaStopped) dmaLast = false
@@ -217,13 +218,13 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     // OAM DMA bus conflicts (SameBoy, DMG): while DMA copies, the CPU's accesses to the bus it
     // reads from (VRAM, or the external bus for everything else below FE00) meet DMA's access:
     // a read returns the byte DMA reads, and a write replaces the byte being copied into OAM, or
-    // for a source in A000-FDFF ANDs into it (Gambatte's oamdma tests). Neither reaches the bus.
+    // for a source in C000-FDFF (WRAM) ANDs into it (Gambatte). Neither reaches the bus.
     val conflict = dmaCopying && a >= 0 && a < 0xFE00 && isVram(a) == isVram(dmaRaw)
     if (a >= 0) apu.addressBus = a
     apu.pc = cpu.pc
     val v = if (conflict) dmaByte else if (a >= 0) peek(a) else 0
     if (conflict) for (_ <- wdata)
-      oam(dmaRaw & 0xFF) = if (dmaRaw >= 0xA000 && !isVram(dmaRaw)) dmaByte & d else d
+      oam(dmaRaw & 0xFF) = if (dmaRaw >= 0xC000) dmaByte & d else d
     if (onIoAccess != null && a >= 0xFF00 && (a < 0xFF80 || a == 0xFFFF)) onIoAccess(wdata.isDefined, a, wdata.getOrElse(v))
     for (_ <- wdata if !conflict) {
       val (counterTicked, tacTicked) = (counter, tac)

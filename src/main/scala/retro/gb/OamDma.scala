@@ -25,8 +25,8 @@ import spinal.lib.misc.plugin._
   *
   * Bus conflicts (`conflicts`): while the DMA copies, a CPU access to the bus the DMA reads from
   * (VRAM, or the external bus for everything else below FE00) goes nowhere: a read returns the
-  * byte being copied, and a write replaces it in OAM, or for a source in A000-FDFF ANDs into it
-  * (Gambatte's oamdma tests). FEA0-FEFF reads FF. */
+  * byte being copied, and a write replaces it in OAM, or for a source in WRAM (C000-FDFF) ANDs
+  * into it (Gambatte). FEA0-FEFF reads FF. */
 class OamDmaPlugin extends FiberPlugin {
   val readLock, writeLock = Handle[Bool]()
   /** The 8-byte OAM row the PPU's scan reads this M-cycle, 0 when it reads none (row 0 is never
@@ -63,7 +63,8 @@ class OamDmaPlugin extends FiberPlugin {
 
     // A copy's last M-cycle: the DMA still counts as running in the next.
     val last = RegInit(False)
-    val busy = startIn =/= 0 || active || last
+    // The PPU sees the DMA from its first copy cycle, not from the DMA write (Gambatte).
+    val busy = active || last
     val halted = Bool()
 
     // The tick: a DMA started two M-cycles ago takes over from any running one. A halted CPU
@@ -120,7 +121,7 @@ class OamDmaPlugin extends FiberPlugin {
     val conflict = copying && cmd.valid && cmd.address < 0xFE00 && isVram(cmd.address) === isVram(raw)
     logic.intercept.hit := conflict || copying && cmd.valid && cmd.address >= 0xFEA0 && cmd.address < 0xFF00
     logic.intercept.data := conflict ? data | U(0xFF, 8 bits)
-    val anded = raw >= 0xA000 && !isVram(raw)
+    val anded = raw >= 0xC000
     when(conflict && cmd.write) { logic.oam(at) := anded ? (data & cmd.data) | cmd.data }
   }
 
