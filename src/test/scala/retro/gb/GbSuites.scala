@@ -79,8 +79,19 @@ object GbSuites {
     } ++ png.map(p => Rom("gambatte", name(f) + " (png)", f, Screenshot(Seq(p), None), time))
   }
 
+  /** GBMicrotest ROMs whose sources (aappleby/GBMicrotest) never write a verdict to FF82: scratch
+    * programs and experiments rather than tests, which no Game Boy passes. */
+  val microNoVerdict = Set("000-oam_lock", "000-write_to_x8000", "001-vram_unlocked", "002-vram_locked",
+    "004-tima_boot_phase", "004-tima_cycle_timer", "007-lcd_on_stat", "400-dma", "500-scx-timing",
+    "800-ppu-latch-scx", "801-ppu-latch-scy", "802-ppu-latch-tileselect", "803-ppu-latch-bgdisplay",
+    "audio_testbench", "cpu_bus_1", "dma_basic", "flood_vram", "lcdon_write_timing", "ly_while_lcd_off",
+    "minimal", "mode2_stat_int_to_oam_unlock", "oam_sprite_trashing", "poweron", "ppu_scx_vs_bgp",
+    "ppu_sprite_testbench", "ppu_spritex_vs_scx", "ppu_win_vs_wx", "ppu_wx_early", "temp", "toggle_lcdc",
+    "wave_write_to_0xC003")
+
   def micro = files("gbmicrotest", ".gb").map { f =>
-    Rom("gbmicrotest", name(f), f, Micro, (if (f.getName == "is_if_set_during_ime0.gb") 30 else 4) * frameCycles)
+    val skip = if (microNoVerdict(base(f))) Some("not a test: writes no verdict") else None
+    Rom("gbmicrotest", name(f), f, Micro, (if (f.getName == "is_if_set_during_ime0.gb") 30 else 4) * frameCycles, skip)
   }
 
   def wilbertpol = files("mooneye-test-suite-wilbertpol", ".gb").map { f =>
