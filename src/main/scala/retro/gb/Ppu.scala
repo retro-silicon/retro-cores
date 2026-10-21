@@ -58,6 +58,8 @@ case class PpuDot() extends Bundle {
   val slot = UInt(4 bits)
   val oTile, oFlags, objLo = UInt(8 bits)
   val lastShade = UInt(2 bits)
+  /** The OAM bus's Y byte as the scan last read it, or the last object tile number (`PpuReference.yBus`). */
+  val yBus = UInt(8 bits)
 }
 
 /** The DMG PPU: LCDC, STAT, SCY, SCX, LY, LYC, BGP, OBP0, OBP1, WY, WX, the VBlank and STAT
@@ -116,13 +118,17 @@ class PpuPlugin(postBoot: Boolean = false)
     val objIndex = Vec.fill(10)(Reg(UInt(6 bits)) init 0)
     val objCount = Reg(UInt(4 bits)) init 0
     val wyHit = RegInit(False)
+    /** The first frame after the LCD is turned on is not shown: it is drawn white (SameBoy). */
+    val blankFrame = RegInit(False)
     val st = Reg(PpuDot())
     st.transfer init False
     st.active init False
     st.winY init 0xFF
+    st.yBus init 0
 
     // ---- The tick: line and frame sequencing ---------------------------------------------
     val vblank = on && ly === Gb.visibleLines - 1 && x === Gb.lineCycles - 1
+    when(!on) { blankFrame := True } elsewhen (vblank) { blankFrame := False }
     val lineStart = !on || x === Gb.lineCycles - 1
     val xTicked = UInt(7 bits)
     val lyTicked = UInt(8 bits)
@@ -158,12 +164,29 @@ class PpuPlugin(postBoot: Boolean = false)
     when(visible && xTicked < Gb.oamEnd && lyTicked === wy && lcdc(5)) { wyHitTicked := True }
 
     val height = lcdc(2) ? U(16, 8 bits) | U(8, 8 bits)
+    // Entries are read two dots apart, on odd dots: each M-cycle reads the one before's second
+    // entry, then its own first. During OAM DMA the scan sees the OAM bus as it last read it
+    // (or the last object tile number mode 3 read); a halted CPU stops the DMA, and the scan
+    // then reads OAM but finds nothing (SameBoy).
+    val xBus = Reg(UInt(8 bits)) init 0
+    val fresh = !dma.busy || dma.halted
     val scan = for (j <- 0 until 2) yield new Area {
-      val entry = (xTicked(4 downto 0) @@ U(j, 1 bits)).resize(6)
+      val entry = ((xTicked(4 downto 0) @@ U(0, 1 bits)).resize(6) - (1 - j)).resize(6)
+      val valid = visible && (if (j == 0) xTicked =/= 0 && xTicked <= Gb.oamEnd else xTicked < Gb.oamEnd)
       def byte(k: Int) = dma.oamRead((entry @@ U(k, 2 bits)).resize(8))
-      val y = byte(0)
+      val yIn, xIn = UInt(8 bits)
+      val y = (valid && fresh) ? byte(0) | yIn
+      val xv = (valid && fresh) ? byte(1) | xIn
       val line = lyTicked + 16
-      val hit = visible && xTicked < Gb.oamEnd && line >= y && line < y + height
+      val hit = valid && !(dma.busy && dma.halted) && !firstLineTicked && line >= y && line < y + height
+    }
+    scan(0).yIn := st.yBus
+    scan(0).xIn := xBus
+    scan(1).yIn := scan(0).y
+    scan(1).xIn := scan(0).xv
+    when(visible && xTicked <= Gb.oamEnd) {
+      s0.yBus := scan(1).y
+      xBus := scan(1).xv
     }
     // Slots are filled in OAM order; the second entry of the clock goes after the first.
     val slot0 = countScanned
@@ -171,8 +194,8 @@ class PpuPlugin(postBoot: Boolean = false)
     val slot1 = slot0 + take0.asUInt
     val take1 = scan(1).hit && slot1 < 10
     for ((take, slot, j) <- Seq((take0, slot0, 0), (take1, slot1, 1))) when(take) {
-      objY(slot.resized) := scan(j).byte(0)
-      objX(slot.resized) := scan(j).byte(1)
+      objY(slot.resized) := scan(j).y
+      objX(slot.resized) := scan(j).xv
       objIndex(slot.resized) := scan(j).entry
     }
     objCount := slot1 + take1.asUInt
@@ -447,8 +470,9 @@ class PpuPlugin(postBoot: Boolean = false)
         val slot = OHToUInt(OHMasking.first(hits))
         val entry = objIndex(slot.resized)
         n.slot := slot.resized
-        n.oTile := (if (dry) U(0, 8 bits) else dma.oamRead((entry @@ U(2, 2 bits)).resize(8)))
-        n.oFlags := (if (dry) U(0, 8 bits) else dma.oamRead((entry @@ U(3, 2 bits)).resize(8)))
+        n.oTile := (if (dry) U(0, 8 bits) else dma.objRead((entry @@ U(2, 2 bits)).resize(8)))
+        n.oFlags := (if (dry) U(0, 8 bits) else dma.objRead((entry @@ U(3, 2 bits)).resize(8)))
+        n.yBus := n.oTile
         n.st := 4
         n.sleep := 1
       } elsewhen (st1 === 4) {
@@ -507,12 +531,12 @@ class PpuPlugin(postBoot: Boolean = false)
     for (i <- 0 until 4) {
       lcd.valid(i) := dots(i).pixel.valid
       lcd.x(i) := dots(i).pixelX
-      lcd.shade(i) := dots(i).pixel.payload
+      lcd.shade(i) := blankFrame ? U(0, 2 bits) | dots(i).pixel.payload
     }
     lcd.y := lyTicked
     lcd.fill := (0 until 4).map(dots(_).fill).orR
     lcd.fillX := dots(3).n.lcdX
-    lcd.fillShade := dots(3).n.lastShade
+    lcd.fillShade := blankFrame ? U(0, 2 bits) | dots(3).n.lastShade
 
     // STAT reads the mode after the third dot, the STAT interrupt after the second (before the
     // dots in the transfer's first M-cycle). The first line after the LCD is turned on has no
@@ -534,7 +558,8 @@ class PpuPlugin(postBoot: Boolean = false)
         mode := scanMode
         irqMode := scanIrqMode
       } otherwise {
-        when(transferAfter(3)) { mode := 3 }
+        // The first line's mode 3 ends for the CPU two dots later.
+        when(firstLineTicked ? transferAfter(1) | transferAfter(3)) { mode := 3 }
         when(xTicked === Gb.oamEnd) { irqMode := scanIrqMode } elsewhen (firstLineTicked ? s0.transfer | transferAfter(2)) { irqMode := 3 }
       }
       // The next line's mode 2 interrupt rises with LY, except line 0's.
@@ -615,7 +640,8 @@ class PpuPlugin(postBoot: Boolean = false)
     dma.scanRow.load((mode === 2 && xTicked < Gb.oamEnd - 1) ? (xTicked + 1).resize(5) | U(0, 5 bits))
 
     regs.read(coincidenceTicked, Gb.STAT, 2)
-    regs.read(mode, Gb.STAT, 0)
+    // The OAM scan reads as mode 0 while OAM DMA runs.
+    regs.read((mode === 2 && dma.busy) ? U(0, 2 bits) | mode, Gb.STAT, 0)
     regs.read(scy, Gb.SCY)
     regs.read(scx, Gb.SCX)
     regs.read(lyRead, Gb.LY)

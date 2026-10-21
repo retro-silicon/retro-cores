@@ -34,6 +34,14 @@ class OamDmaPlugin extends FiberPlugin {
   val scanRow = Handle[UInt]()
   /** A combinational read port into OAM for the PPU, which has its own path to it. */
   def oamRead(index: UInt): UInt = logic.oam(index)
+  /** A DMA runs this M-cycle, from its write to an M-cycle after its last byte: the PPU's scan
+    * sees the OAM bus unchanged. */
+  def busy: Bool = logic.busy
+  /** The CPU halted the DMA (SameBoy): the PPU's scan reads OAM but finds nothing. */
+  def halted: Bool = logic.halted
+  /** The PPU's object reads: while the DMA copies (its next byte 1 to 159) they see the bytes of
+    * the pair it writes (SameBoy). */
+  def objRead(index: UInt): UInt = logic.oam(logic.active ? ((logic.index & ~U(1, 8 bits)) | index(0).asUInt.resized) | index)
 
   val logic = during setup new Area {
     val bus = host[BusService]
@@ -53,9 +61,15 @@ class OamDmaPlugin extends FiberPlugin {
     val source = Reg(UInt(8 bits)) init 0
     val index = Reg(UInt(8 bits)) init 0
 
-    // The tick: a DMA started two M-cycles ago takes over from any running one.
-    val starting = startIn === 1
-    val copying = starting || active
+    // A copy's last M-cycle: the DMA still counts as running in the next.
+    val last = RegInit(False)
+    val busy = startIn =/= 0 || active || last
+    val halted = Bool()
+
+    // The tick: a DMA started two M-cycles ago takes over from any running one. A halted CPU
+    // stops it.
+    val starting = startIn === 1 && !halted
+    val copying = starting || active && !halted
     val from = starting ? register | source
     val at = starting ? U(0, 8 bits) | index
     val address = UInt(16 bits)
@@ -72,13 +86,21 @@ class OamDmaPlugin extends FiberPlugin {
     cpuWrite := oamSlave.writeFire
     when(copying || cpuWrite) { oam(copying ? at | oamIndex) := (copying ? data | oamSlave.cmd.data) }
 
-    when(startIn =/= 0) { startIn := startIn - 1 }
+    when(startIn =/= 0 && !halted) { startIn := startIn - 1 }
+    when(!halted) { last := False }
     when(copying) {
       source := from
       index := at + 1
       active := at =/= 159
+      last := at === 159
     }
     when(dmaSlave.writeFire) { startIn := 2 }
+  }
+
+  val halting = during build new Area {
+    // Halted in this M-cycle and the last (`GbReference`).
+    val now = host[SequencerPlugin].logic.ir === retro.sm83.Sm83.HALTED
+    logic.halted := now && RegNext(now, False)
   }
 
   /** Apart from `logic`, so the PPU can use `oamRead` before it loads the locks. */

@@ -53,6 +53,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   var dmaRegister = 0xFF
   var dmaStartIn, dmaSource, dmaIndex = 0
   var dmaActive, dmaCopying = false
+  private var dmaLast, haltedBefore = false
   // Joypad: pressed buttons (bits 0-3 Right Left Up Down, 4-7 A B Select Start) and P1 select.
   var buttons = 0
   /** The joypad inputs during M-cycle `k`, when a cosim drives them. */
@@ -166,6 +167,13 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     if (onAudio != null) onAudio(audio)
     // PPU. A write to its registers lands during its dots (`PpuReference.writeDots`).
     if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
+    // A CPU halted in this M-cycle and the last stops OAM DMA (SameBoy).
+    val dmaStopped = cpu.halted && haltedBefore
+    haltedBefore = cpu.halted
+    ppu.dmaBusy = dmaStartIn != 0 || dmaActive || dmaLast
+    ppu.dmaHalted = dmaStopped
+    ppu.dmaDest = if (dmaActive) dmaIndex else -1
+    if (!dmaStopped) dmaLast = false
     val (vblank, stat) = ppu.tick()
     if (onPpuTick != null) onPpuTick()
     // An acknowledge also clears the request if it rises in the next M-cycle before the dots.
@@ -174,7 +182,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     if (vblank) { iflag |= 1 << Gb.Irq.VBLANK.index & ~cleared; audioWindows.vblank() }
     if (stat) { iflag |= 1 << Gb.Irq.STAT.index & ~cleared; if (onStatIrq != null) onStatIrq() }
     // OAM DMA
-    dmaCopying = dmaStartIn == 1 || dmaActive
+    dmaCopying = (dmaStartIn == 1 || dmaActive) && !dmaStopped
     if (dmaCopying) {
       val from = if (dmaStartIn == 1) dmaRegister else dmaSource
       val at = if (dmaStartIn == 1) 0 else dmaIndex
@@ -186,9 +194,9 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
         case _ => 0xFF
       }
       dmaByte = oam(at); dmaRaw = from << 8 | at
-      dmaSource = from; dmaIndex = at + 1; dmaActive = at != 159
+      dmaSource = from; dmaIndex = at + 1; dmaActive = at != 159; dmaLast = at == 159
     }
-    if (dmaStartIn != 0) dmaStartIn -= 1
+    if (dmaStartIn != 0 && !dmaStopped) dmaStartIn -= 1
     // Joypad
     val lines = joypadLines
     if ((joypadPrevious & ~lines) != 0) iflag |= 1 << Gb.Irq.JOYPAD.index

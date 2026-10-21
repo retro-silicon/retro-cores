@@ -82,6 +82,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   /** Dots the current or last pixel transfer has taken. */
   var transferDots = 0
 
+  /** The first frame after the LCD is turned on is not shown: it is drawn white (SameBoy). */
+  private var blankFrame = false
   /** The last frame drawn, shades 0 (white) to 3, row-major 160 x 144. */
   val frame = Array.fill(160 * 144)(0)
   var frames = 0L
@@ -128,7 +130,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
 
   def read(a: Int): Int = a match {
     case Gb.LCDC => lcdc
-    case Gb.STAT => 0x80 | statSelect << 3 | (if (coincidence) 4 else 0) | mode
+    // The OAM scan reads as mode 0 while OAM DMA runs.
+    case Gb.STAT => 0x80 | statSelect << 3 | (if (coincidence) 4 else 0) | (if (mode == 2 && dmaBusy) 0 else mode)
     case Gb.SCY => scy
     case Gb.SCX => scx
     case Gb.LY => if (on && x == Gb.lineCycles - 1) (if (ly == Gb.frameLines - 1) 0 else ly + 1) else if (on && ly == Gb.frameLines - 1) 0 else lyNow
@@ -180,8 +183,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     val line0Mode2 = irqMode == 2 && ly == 0 && x == 0
     dots += 4
     val vblank = on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1
-    if (vblank) { frames += 1; onFrame(frame) }
-    if (!on) { x = 0; ly = 0; lineStart(); firstLine = true; winY = -1 }
+    if (vblank) { frames += 1; onFrame(frame); blankFrame = false }
+    if (!on) { x = 0; ly = 0; lineStart(); firstLine = true; winY = -1; blankFrame = true }
     else if (x == Gb.lineCycles - 1) { x = 0; ly = if (ly == Gb.frameLines - 1) 0 else ly + 1; lineStart() }
     else x += 1
 
@@ -204,8 +207,10 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       // in the line before's last M-cycle, or line 0's first. The first line's mode 0 before its
       // transfer is no source either.
       val scanIrqMode = if (!firstLine && x == 0 && ly == 0) 2 else 3
+      // Entries are read two dots apart, on odd dots: each M-cycle reads the one before's second.
+      if (x <= Gb.oamEnd && x > 0) scan(2 * x - 1)
       if (x < Gb.oamEnd) {
-        scan(2 * x); scan(2 * x + 1)
+        scan(2 * x)
         mode = scanMode; irqMode = scanIrqMode
       } else {
         if (x == Gb.oamEnd) startTransfer()
@@ -243,7 +248,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
         irqMode = if (x == Gb.oamEnd) scanIrqMode
           // The first line's mode 0 interrupt sees the transfer as it was before the dots.
           else if (if (firstLine) transferBefore else transferAfter(2)) 3 else 0
-        mode = if (transferAfter(3)) 3 else 0
+        // The first line's mode 3 ends for the CPU two dots later.
+        mode = if (transferAfter(if (firstLine) 1 else 3)) 3 else 0
         transfer = transferAfter(4)
       }
     }
@@ -298,10 +304,23 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
 
   def objHeight = if ((lcdc & 4) != 0) 16 else 8
 
+  /** OAM DMA runs this M-cycle (from its write to an M-cycle after its last byte). */
+  var dmaBusy = false
+  /** The CPU halted OAM DMA: the scan reads OAM but finds no object (SameBoy). */
+  var dmaHalted = false
+  /** The OAM byte DMA writes next while it copies (1 to 159), else -1: the PPU's object reads
+    * see that byte pair's bytes (SameBoy). */
+  var dmaDest = -1
+  private def oamRead(a: Int) = if (dmaDest > 0) oam((dmaDest & ~1) | (a & 1)) else oam(a)
+  // The OAM bus as the scan last read it: during OAM DMA the scan sees it unchanged (SameBoy).
+  private var yBus, xBus = 0
   private def scan(e: Int): Unit = {
-    val y = oam(4 * e)
+    if (!dmaBusy || dmaHalted) { yBus = oam(4 * e); xBus = oam(4 * e + 1) }
+    // The first line after the LCD is turned on finds no objects (SameBoy).
+    if (dmaBusy && dmaHalted || firstLine) return
+    val y = yBus
     if (objCount < 10 && ly + 16 >= y && ly + 16 < y + objHeight) {
-      objY(objCount) = y; objX(objCount) = oam(4 * e + 1); objIndex(objCount) = e
+      objY(objCount) = y; objX(objCount) = xBus; objIndex(objCount) = e
       objCount += 1
     }
   }
@@ -411,7 +430,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     if (draw && c != 0 && oprio != 0) draw = false
     val shade = if (draw) ((if (opal != 0) obp1 else obp0) >> (2 * op)) & 3 else (bgp >> (2 * c)) & 3
     if (lcdX < 160 && !dry) {
-      frame(ly * 160 + lcdX) = shade
+      frame(ly * 160 + lcdX) = if (blankFrame) 0 else shade
       if (onPixel != null) onPixel(ly, lcdX, dotNow)
     }
     lastShade = shade
@@ -456,7 +475,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       advance()
       fetchSlot = pendingObj
       val e = objIndex(fetchSlot)
-      oTile = oam(4 * e + 2); oFlags = oam(4 * e + 3)
+      oTile = oamRead(4 * e + 2); oFlags = oamRead(4 * e + 3)
+      yBus = oTile
       sbSt = 4; sbWait = 1
     case 4 =>
       sbObjLo = vram(objLine(fetchSlot)); sbSt = 5; sbWait = 1
@@ -472,7 +492,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       advance()
       if (pos == 160) {
         pixActive = false
-        while (lcdX < 160) { if (!dry) frame(ly * 160 + lcdX) = lastShade; lcdX += 1 }
+        while (lcdX < 160) { if (!dry) frame(ly * 160 + lcdX) = if (blankFrame) 0 else lastShade; lcdX += 1 }
         // With WX = 166 the window is on from the next line's start (DMG, SameBoy).
         if (ly == Gb.visibleLines - 1) winY = -1
         wxTriggered = wyHit && (lcdc & 0x20) != 0 && wx == 166
