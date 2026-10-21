@@ -32,7 +32,9 @@ object CartridgeSpec {
       case k if k >= 0x19 && k <= 0x1E => Mbc.Mbc5
       case k => throw new IllegalArgumentException(f"cartridge type $k%02X is not supported (ROM only, MBC1 and MBC5 are)")
     }
-    val romBytes = 0x8000 << (rom(0x148) & 0xFF)
+    // An image larger than its header says is taken whole, as emulators do (gbmicrotest
+    // mbc1_rom_banks is a 2 MB image with a 32 KB header).
+    val romBytes = (0x8000 << (rom(0x148) & 0xFF)) max (1 << log2Up(rom.length))
     val ramBytes = Seq(0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000)(rom(0x149) & 0xFF)
     CartridgeSpec(romBytes, if (mbc == Mbc.None) 0 else ramBytes, mbc)
   }
