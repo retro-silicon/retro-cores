@@ -41,6 +41,10 @@ object Gb {
   val oamBytes = 160
   /** The timer counter bit whose falling edges clock the serial port (8192 Hz). */
   val serialClockBit = 8
+  /** WRAM at power-up: on DMG, alternating 256-byte pages of 00 and FF, inverted in each 4 KB
+    * bank's upper half (Gambatte's dump, without its scattered bit flips). Gambatte's oamdma tests
+    * read it (DE00-DEFF reads FF). */
+  def wramInit(a: Int): Int = if (((a >> 8) ^ (a >> 11)) % 2 == 1) 0xFF else 0x00
 
   /** State the DMG boot ROM leaves behind when it jumps to the cartridge at 0x0100. The timer's
     * internal counter is the value that makes DIV read 0xAB there. */
@@ -356,7 +360,7 @@ object GameBoy {
   def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None,
               romDecoder: Boolean = false): Seq[Hostable] = Sm83.plugins(withTrace, romDecoder) ++ Seq(
     new RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000, lockable = true), // locked by the PPU
-    new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000), // E000-FDFF echoes C000-DDFF
+    new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000, init = Gb.wramInit), // E000-FDFF echoes C000-DDFF
     new OamDmaPlugin,
     new RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F),
     new OpenBusPlugin(SizeMapping(0xFEA0, 0x60), value = 0x00),

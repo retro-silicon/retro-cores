@@ -40,7 +40,8 @@ trait DirectRead {
   * @param midCycleRead read the bus port on the falling edge (`MidCycleRead`), so FPGA block RAM
   *                 holds it; `directRead` ports stay combinational. */
 class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0,
-                val lockable: Boolean = false, val midCycleRead: Boolean = false) extends FiberPlugin with DirectRead {
+                val lockable: Boolean = false, val midCycleRead: Boolean = false,
+                val init: Int => Int = _ => 0) extends FiberPlugin with DirectRead {
   val readLock, writeLock = Handle[Bool]()
   def directMappings = Seq(mapping)
   def directRead(address: UInt): UInt = logic.mem.readAsync(address(logic.width - 1 downto 0))
@@ -54,7 +55,7 @@ class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int,
 
     val width = log2Up(size)
     val mem = Mem.fill(1 << width)(UInt(bus.busConfig.dataWidth bits)).setName(s"ram_$ramName")
-    mem.init(Seq.fill(1 << width)(U(0, bus.busConfig.dataWidth bits)))
+    mem.init(Seq.tabulate(1 << width)(i => U(init(i), bus.busConfig.dataWidth bits)))
     mem.simPublic()
     val index = slave.cmd.address(width - 1 downto 0)
     slave.rdata := (if (midCycleRead) MidCycleRead(mem, index) else mem.readAsync(index))

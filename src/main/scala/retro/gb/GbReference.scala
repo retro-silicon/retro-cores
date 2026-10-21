@@ -26,7 +26,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => { iflag &= ~(1 << i); acked = 1 << i; if (onAck != null) onAck(i) })
 
   val vram = if (postBoot) Gb.PostBoot.vram(external) else Array.fill(0x2000)(0)
-  val wram = Array.fill(0x2000)(0)
+  val wram = Array.tabulate(0x2000)(Gb.wramInit)
   val oam = Array.fill(0x100)(0)
   val hram = Array.fill(0x80)(0)
   var ie = 0
