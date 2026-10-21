@@ -574,7 +574,10 @@ class PpuPlugin(postBoot: Boolean = false)
     val mid = vblankMode2 ? lineFor(0) | line
     // The glitch comes at the end of the write's M-cycle: after a held LY = LYC line dropped.
     val glitchLate = statWrite && on && lycLine && !lycLineTicked && statSelect(3) && !line && (irqMode === 0 || irqMode === 1 || glitchMode2)
-    val stat = !statLine && start || !start && mid || !mid && line || glitchLate
+    // As LY changes to 144, the mode 2 interrupt is requested if the STAT line is low, ahead of
+    // VBlank's own mode 2 source; the line does not rise.
+    val vblankEarly = on && lyTicked === Gb.visibleLines - 1 && xTicked === Gb.lineCycles - 1 && statSelect(2) && !line && !statLine
+    val stat = !statLine && start || !start && mid || !mid && line || glitchLate || vblankEarly
     // LYC and STAT writes land after the dots, and can drop the STAT line before a source rises
     // in the next M-cycle; see `PpuReference`.
     val ending = irqMode === 3 && transferPart

@@ -273,7 +273,10 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // The glitch comes at the end of the write's M-cycle: after a held LY = LYC line dropped.
     val glitchLate = on && lycHeld && !lycLine && (statSelect & 8) != 0 && !line &&
       (((glitchSelect & 4) != 0 && glitchMode2) || ((glitchSelect & 2) != 0 && irqMode == 1) || ((glitchSelect & 1) != 0 && irqMode == 0))
-    val stat = !statLine && start || !start && mid || !mid && line || glitchLate
+    // As LY changes to 144, the mode 2 interrupt is requested if the STAT line is low (SameBoy),
+    // ahead of VBlank's own mode 2 source; the line does not rise.
+    val vblankEarly = on && ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1 && (statSelect & 4) != 0 && !line && !statLine
+    val stat = !statLine && start || !start && mid || !mid && line || glitchLate || vblankEarly
     // A halted CPU sees the STAT line as it was before this M-cycle's dots.
     statLate = stat && !(writeRise && !statLine) && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
     statLine = line

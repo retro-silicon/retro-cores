@@ -251,9 +251,9 @@ on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped):
 | Suite | Pass | Fail |
 |---|---|---|
 | Mealybug Tearoom Tests | 15 | 9 |
-| Gambatte | 1787 | 86 |
-| GBMicrotest | 476 | 37 |
-| wilbertpol's Mooneye | 94 | 1 |
+| Gambatte | 1789 | 84 |
+| GBMicrotest | 479 | 34 |
+| wilbertpol's Mooneye | 95 | 0 |
 | AGE | 9 | 5 |
 | Scribbltests | 5 | 0 |
 | SameSuite | 3 | 0 |
@@ -489,7 +489,7 @@ DMA, cartridge with MBC1/MBC5, APU) with system cosim.
 
 Validated against hardware test ROMs: Blargg's CPU, timing and HALT tests and Mooneye's CPU,
 interrupt, timer, serial and OAM DMA acceptance tests, Mooneye's PPU tests but one, Blargg's OAM
-corruption bug tests, dmg-acid2 pixel for pixel, and 2404 ROMs of the c-sp collection, 15 of
+corruption bug tests, dmg-acid2 pixel for pixel, and 2410 ROMs of the c-sp collection, 15 of
 Mealybug's 24 DMG tests among them (see *Hardware test ROMs*).
 
 NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference model passing
