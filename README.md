@@ -104,11 +104,11 @@ console's output filters, and checks that the residual is no louder than in the 
 recordings in the nes-test-roms collection: square 0.8% (hardware 1.2%), triangle 1.5% (1.9%),
 noise 11.6% (10.8%), DMC 0.8% (2.8%).
 
-The model passes 148 of the 154 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
+The model passes 153 of the 156 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
 sprite_hit, sprite_overflow, cpu_interrupts_v2, instr_test, instr_timing, nes_cpu_test5,
 cpu_dummy_writes, cpu_exec_space, oam_stress, ppu_open_bus, sprdma_and_dmc_dma, apu_test,
 blargg_apu_2005.07.30, apu_mixer, apu_reset, cpu_reset, dmc_dma_during_read4, read_joy3,
-the MMC3 tests, pal_apu_tests and others; print-only tests are judged by the CRCs their source
+the MMC3 tests, pal_apu_tests, nmi_sync and others; print-only tests are judged by the CRCs their source
 lists). The rest of the nes-test-roms collection is demos, visual or interactive tests, or
 needs other mappers; instr_test-v3 and nes_instr_test are older versions of instr_test-v5.
 Left: LXA in instr_test 03-immediate, the all_instrs ROM that stops there and nes_cpu_test5's
@@ -181,8 +181,14 @@ PAL consoles (`NesTiming.pal`, for the 2A07 and 2C07) differ in the PPU's 312 li
 skipped dot, the frame counter's steps and the noise and DMC period tables, and run 3.2 PPU
 dots per CPU cycle: `cycleClocks = Seq(3, 3, 3, 3, 4)`, the fourth dot after the access. The
 runners pick PAL for blargg's pal_apu_tests (iNES headers rarely say), which all pass on the
-model and match on the RTL; seven of them fail with NTSC timing. Nothing here tests the PAL
-noise and DMC tables or the PPU-CPU alignment.
+model and match on the RTL; seven of them fail with NTSC timing. The PAL noise and DMC tables
+match the NESdev wiki's, but no test ROM checks them.
+
+blargg's nmi_sync demos check the CPU-PPU alignment: they synchronize to the PPU in NMI, then
+draw a line with a greyscale write to 2001 between reference sprites, and the readme says where
+hardware starts it (on NTSC at x=80 or 81 on alternate frames). The runners check that edge.
+PPUMASK's greyscale bit applies to a pixel as it leaves the PPU, two dots after it was made (as
+in Mesen): applied when the pixel was made, the line started 3 pixels late.
 
 On an ECP5-25F (Yosys, nextpnr) the NES with an NROM cartridge (32 KB PRG and 8 KB CHR ROM,
 built in) uses 30% of the logic cells (7.4k; Yosys maps 5.9k LUT4s), 1.6k flip-flops, 64 LUT

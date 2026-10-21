@@ -17,7 +17,7 @@ for d in ppu_vbl_nmi vbl_nmi_timing sprite_hit_tests_2005.10.05 sprite_overflow_
          instr_misc cpu_timing_test6 branch_timing_tests cpu_dummy_reads sprdma_and_dmc_dma \
          apu_test blargg_apu_2005.07.30 apu_mixer apu_reset dmc_dma_during_read4 cpu_reset \
          mmc3_test mmc3_test_2 mmc3_irq_tests blargg_nes_cpu_test5 cpu_dummy_writes cpu_exec_space read_joy3 \
-         pal_apu_tests; do
+         pal_apu_tests nmi_sync; do
   cp -r "roms/.nes-test-roms/$d" roms/nes-test-roms/
 done
 # These wait for someone to press buttons.

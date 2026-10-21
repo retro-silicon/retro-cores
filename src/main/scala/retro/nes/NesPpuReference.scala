@@ -29,6 +29,10 @@ class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
   /** Called with `frame` each time one completes (at VBlank). */
   var onFrame: Array[Int] => Unit = _ => ()
   private val back = Array.fill(256 * 240)(0)
+  /** The pixels of the last two dots (indices into `back`, -1 for none): PPUMASK's greyscale bit
+    * applies to a pixel as the PPU outputs it, two dots after it was made (Mesen). */
+  private var outPending0, outPending1 = -1
+  private def output(i: Int): Unit = if (i >= 0 && (mask & 1) != 0) back(i) &= 0x30
   /** Set by a 2002 read in the dot before VBlank starts: the flag is not set this frame. */
   private var suppress = false
   /** Dots left during which a 2007 read is ignored: one in the CPU cycle right after another
@@ -226,13 +230,17 @@ class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
     val index = if (bgPix == 0 && spPix == 0) 0
                 else if (spPix != 0 && (bgPix == 0 || !spBehind)) spPal << 2 | spPix
                 else bgPal << 2 | bgPix
-    back(line * 256 + x) = palette(index) & (if ((mask & 1) != 0) 0x30 else 0x3F)
+    back(line * 256 + x) = palette(index)
+    outPending0 = line * 256 + x
   }
 
   private def renderingNow = rendering && (line < 240 || line == timing.preLine)
   /** One dot. */
   def tick(): Unit = {
     dotCount += 1
+    output(outPending1)
+    outPending1 = outPending0
+    outPending0 = -1
     if (dataReadHold > 0) dataReadHold -= 1
     val visible = line < 240
     val pre = line == timing.preLine
@@ -269,7 +277,8 @@ class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
     } else if (visible && dot >= 1 && dot <= 256) {
       // Rendering off: the backdrop, or the palette entry v points at.
       val i = if ((v & 0x3F00) == 0x3F00) paletteIndex(v) else 0
-      back(line * 256 + dot - 1) = palette(i) & (if ((mask & 1) != 0) 0x30 else 0x3F)
+      back(line * 256 + dot - 1) = palette(i)
+      outPending0 = line * 256 + dot - 1
     }
     if (line == 241 && dot == 1) {
       if (!suppress) vblank = true

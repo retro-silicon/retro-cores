@@ -22,7 +22,7 @@ object NesRoms {
 
   /** The console a ROM is for: PAL for blargg's pal_apu_tests, NTSC otherwise (iNES headers
     * rarely say). */
-  def timing(file: File): NesTiming = if (file.getPath.contains("pal_apu_tests")) NesTiming.pal else NesTiming.ntsc
+  def timing(file: File): NesTiming = if (file.getPath.contains("pal_apu_tests") || file.getName.endsWith("_pal.nes")) NesTiming.pal else NesTiming.ntsc
   /** The cartridge in `file`; the MMC3 tests for revision A, MMC6 and the alternate behavior get
     * `mmc3Alternate` (iNES headers don't say which MMC3 a board has). */
   def cartridge(file: File): NesCartridge = {
@@ -39,10 +39,11 @@ object NesRoms {
     * from 6004; older ones leave the result in zero page F8 (1 = passed) and print to the
     * screen. `stableFrames` is how long F8 and the screen have been unchanged (some tests idle for 80
     * frames mid-run). */
-  def verdict(nes: NesReference, stableFrames: Int, crcs: Set[String] = Set()): Verdict = {
+  def verdict(nes: NesReference, stableFrames: Int, crcs: Set[String] = Set(), nmiSync: Boolean = false): Verdict = {
     val r = nes.prgRam
     lazy val lastLine = screenText(nes).linesIterator.toSeq.lastOption.getOrElse("")
-    if (crcs.nonEmpty && stableFrames > 120 && lastLine.matches("[0-9A-F]{8}")) Done(crcs(lastLine), if (crcs(lastLine)) 0 else 1, screenText(nes))
+    if (nmiSync) { if (nes.ppu.frames >= 60) nmiSyncVerdict(nes.ppu.frame) else Running }
+    else if (crcs.nonEmpty && stableFrames > 120 && lastLine.matches("[0-9A-F]{8}")) Done(crcs(lastLine), if (crcs(lastLine)) 0 else 1, screenText(nes))
     else if (r(1) == 0xDE && r(2) == 0xB0 && r(3) == 0x61) {
       if (r(0) >= 0x80) Running
       else Done(r(0) == 0, r(0), Iterator.from(4).map(r).takeWhile(_ != 0).map(_.toChar).mkString.trim)
@@ -59,6 +60,18 @@ object NesRoms {
       else if (text.toLowerCase.contains("all tests complete")) Done(true, 0, text)
       else Running
     } else Running
+  }
+
+  /** blargg's nmi_sync demos have no verdict: they draw a line by a greyscale write timed after
+    * synchronizing to the PPU in NMI, between reference lines of sprites (rows 119 and 123).
+    * The line must start where the readme says hardware starts it: on NTSC at the references'
+    * left edge or one pixel later (alternate frames); on PAL between the upper and lower one. */
+  def nmiSync(file: File) = file.getPath.contains("nmi_sync/demo_")
+  def nmiSyncVerdict(frame: Array[Int]): Verdict = {
+    def left(y: Int) = (0 until 256).find(x => frame(y * 256 + x) == 0x30).getOrElse(-1)
+    val (top, line, bottom) = (left(119), left(121), left(123))
+    val ok = top >= 0 && line >= top && line <= bottom + (if (top == bottom) 1 else 0)
+    Done(ok, if (ok) 0 else 1, s"line starts at x=$line, references at $top and $bottom")
   }
 
   /** A test asking for the reset button (status 81): blargg's tests want it pressed some time
@@ -189,6 +202,7 @@ object NesRefRom extends App {
   for ((name, file) <- NesRoms.all if args.isEmpty || args.exists(name.contains)) {
     val nes = new NesReference(NesRoms.cartridge(file), dots, NesRoms.timing(file))
     val crcs = NesRoms.expectedCrcs(file)
+    val nmiSync = NesRoms.nmiSync(file)
     val audio = if (sys.env.contains("WAV")) Some(new NesAudio) else None
     for (a <- audio) nes.onSample = a.add
     var verdict: NesRoms.Verdict = NesRoms.Running
@@ -203,7 +217,7 @@ object NesRefRom extends App {
       stable = if (f8 == lastF8) stable + 1 else 0
       lastF8 = f8
       button.frame(nes)
-      verdict = NesRoms.verdict(nes, stable, crcs)
+      verdict = NesRoms.verdict(nes, stable, crcs, nmiSync)
     }
     total += 1
     val text = verdict match {

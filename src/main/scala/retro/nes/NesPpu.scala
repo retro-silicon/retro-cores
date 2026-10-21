@@ -169,7 +169,6 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
       val pre = line === timing.preLine
       val rendering = s.mask(3) || s.mask(4)
       val renderLine = rendering && (visible || pre)
-      val grey = s.mask(0) ? U(0x30, 6 bits) | U(0x3F, 6 bits)
       val h16 = s.ctrl(5)
       def inRange(y: UInt) = line >= y && (line - y) < (h16 ? U(16, 5 bits) | U(8, 5 bits))
 
@@ -210,7 +209,7 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
       px.valid := visible && d >= 1 && d <= 256
       px.x := x
       px.y := line.resize(8 bits)
-      px.color := (renderLine ? pal(index) | pal(backdrop)) & grey
+      px.color := renderLine ? pal(index) | pal(backdrop)
 
       // Fetches: one CIRAM read and one CHR read at most.
       val fetching = (d >= 1 && d <= 256) || (d >= 321 && d <= 336)
@@ -432,7 +431,7 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
     val fill, fillFromChr = Bool()
     // What this dot fetches, read in the last clock.
     val ciramDot, chrDot = UInt(8 bits)
-    val (s1, px, dotBus) = dot(state, palette, ciramDot, chrDot)
+    val (s1, made, dotBus) = dot(state, palette, ciramDot, chrDot)
     val (s1a, accessBus) = access(s1)
     val next = NesPpuState()
     next := (accessPhase ? s1a | s1)
@@ -467,6 +466,15 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
     when(paletteWrite.enable && accessPhase && slave.writeFire) { palette(paletteWrite.address) := paletteWrite.data }
 
     cart.ppuBus(dotBus, accessBus.map { case (valid, address) => (valid && accessPhase, address) }, accessPhase, phase >= 2)
+    // The pixel leaves two dots after it was made, taking PPUMASK's greyscale bit as it is then
+    // (Mesen; blargg's nmi_sync demos time a greyscale write to the pixel).
+    val made1 = RegNext(made)
+    made1.valid.init(False)
+    val out = RegNext(made1)
+    out.valid.init(False)
+    val px = Flow(NesPixel())
+    px := out
+    px.color.allowOverride() := out.color & (state.mask(0) ? U(0x30, 6 bits) | U(0x3F, 6 bits))
     pixel := px
     /** The pixel as one value (valid, y, x, color from the MSB), so a sim reads it in one go. */
     val pixelTap = (px.valid ## px.y ## px.x ## px.color).setName("ppu_pixel_tap").simPublic()

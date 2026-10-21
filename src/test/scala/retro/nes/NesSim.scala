@@ -77,7 +77,7 @@ object NesRtl {
         val now = ref.ram(0xF8) << 16 | NesRoms.screenText(ref).hashCode & 0xFFFF
         stable = if (now == last) stable + 1 else 0
         last = now
-        verdict = NesRoms.verdict(ref, stable, crcs)
+        verdict = NesRoms.verdict(ref, stable, crcs, NesRoms.nmiSync(file))
         button.frame(ref)
       }
       // Audio: one sample per cycle from each side, compared in order.
