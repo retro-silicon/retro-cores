@@ -37,7 +37,7 @@ case class PpuDot() extends Bundle {
   val transfer, active = Bool()
   /** `PpuReference.sbStep`'s state, and dots to wait before its next step. */
   val st = UInt(4 bits)
-  val sleep = UInt(3 bits)
+  val sleep = UInt(4 bits)
   val pos = SInt(9 bits)
   val lcdX = UInt(8 bits)
   // FIFOs: entry 0 leaves first.
@@ -111,7 +111,9 @@ class PpuPlugin(postBoot: Boolean = false)
     /** The last M-cycle's mode for the STAT interrupt. */
     val irqModeLast = Reg(UInt(2 bits)) init 0
     /** The transfer after the last M-cycle's second dot (a halted CPU's view of the first line). */
-    val transferMid = Reg(Bool()) init False
+    val transfer3 = Reg(Bool()) init False
+    val wyPending = RegInit(False)
+    val wyLast = Reg(UInt(8 bits)) init 0
     val on = lcdc(7)
 
     val objY, objX = Vec.fill(10)(Reg(UInt(8 bits)) init 0)
@@ -152,7 +154,8 @@ class PpuPlugin(postBoot: Boolean = false)
     s0 := st
     val wyHitTicked = Bool()
     val countScanned = UInt(4 bits)
-    wyHitTicked := wyHit
+    // A WY match found after a WY write counts from the next M-cycle (`PpuReference`).
+    wyHitTicked := wyHit || wyPending && on
     countScanned := objCount
     when(lineStart) {
       when(lyTicked === 0) { wyHitTicked := False }
@@ -204,7 +207,8 @@ class PpuPlugin(postBoot: Boolean = false)
       s0.transfer := True
       s0.active := True
       s0.st := 0
-      s0.sleep := 7
+      // The first line after the LCD is turned on starts a dot later.
+      s0.sleep := firstLineTicked ? U(8, 4 bits) | U(7, 4 bits)
       s0.pos := -16
       s0.lcdX := 0
       for (k <- 0 until 8) s0.bg(k) := 0
@@ -398,7 +402,13 @@ class PpuPlugin(postBoot: Boolean = false)
         def address(high: Int) = ((tile @@ U(0, 4 bits)) + (row @@ U(high, 1 bits)).resized).resize(13)
       }
       val vAddr = UInt(13 bits)
-      vAddr := (b.fSt === 1) ? b.tileIdxAddr | b.tileDataAddr
+      // The fetcher takes the map and tile data selects and SCY when it reads VRAM (Gambatte).
+      val idxAddr = {
+        val map = ((!pre.wxTriggered && lcdcD(3)) || (pre.wxTriggered && lcdcD(6))) ? U(0x1C00, 13 bits) | U(0x1800, 13 bits)
+        map + (fetcherY(pre)(7 downto 3) @@ pre.tileIdxAddr(4 downto 0)).resized
+      }
+      val dataAddr = (!lcdcD(4) && !pre.curTile(7)).asUInt @@ pre.curTile @@ fetcherY(pre)(2 downto 0) @@ pre.tileDataAddr(0)
+      vAddr := (pre.fSt === 1) ? idxAddr | dataAddr
       when(st1 === 4) { vAddr := objRow.address(0) }
       when(st1 === 5) { vAddr := objRow.address(1) }
       val vData = if (dry) U(0, 8 bits) else vram.directRead(vAddr)
@@ -427,17 +437,13 @@ class PpuPlugin(postBoot: Boolean = false)
         is(0) {
           val wxT = pre.wxTriggered && lcdcD(5)
           adv.wxTriggered := wxT
-          val map = ((!wxT && lcdcD(3)) || (wxT && lcdcD(6))) ? U(0x1C00, 13 bits) | U(0x1800, 13 bits)
-          val y = wxT ? pre.winY | (lyTicked + scyD)
           val scrolled = (scxD.resize(10) + (pre.pos + 8).asUInt.resize(10))(7 downto 3)
-          val col = wxT ? pre.winTileX | ((pre.pos < -8) ? scxD(7 downto 3) | scrolled)
-          adv.tileIdxAddr := map + (y(7 downto 3) @@ col).resized
+          adv.tileIdxAddr := (wxT ? pre.winTileX | ((pre.pos < -8) ? scxD(7 downto 3) | scrolled)).resized
           adv.fSt := 1
         }
         is(1) { adv.curTile := vData; adv.fSt := 2 }
         is(2, 4) {
-          val upper = !lcdcD(4) && !pre.curTile(7)
-          adv.tileDataAddr := (upper.asUInt @@ pre.curTile @@ fetcherY(pre)(2 downto 0) @@ (pre.fSt === 4).asUInt)
+          adv.tileDataAddr := (pre.fSt === 4).asUInt.resized
           adv.fSt := pre.fSt + 1
         }
         is(3) { adv.data0 := vData; adv.fSt := 4 }
@@ -520,7 +526,8 @@ class PpuPlugin(postBoot: Boolean = false)
     }.setCompositeName(this, s"dot$i")
 
     // After the scan, LY = WY is checked on the last dot, against WY as of the last M-cycle.
-    lazy val wyHit4 = wyHitTicked || transferPart && lyTicked === wy && dots(2).lcdcOut(5)
+    lazy val wyMatch = transferPart && lyTicked === wy && dots(2).lcdcOut(5)
+    lazy val wyHit4 = wyHitTicked || wyMatch && wy === wyLast
     val dots = scala.collection.mutable.ArrayBuffer[Area { val n: PpuDot; val lcdcOut: UInt; val pixel: Flow[UInt]; val pixelX: UInt; val fill: Bool }]()
     for (i <- 1 to 7) dots += dot(if (i == 1) s0 else dots(i - 2).n, if (i == 1) lcdc else dots(i - 2).lcdcOut, i)
     // Mode 3 as the CPU sees it after dot `i`: the transfer has not ended 3 dots later.
@@ -544,7 +551,7 @@ class PpuPlugin(postBoot: Boolean = false)
     val scanMode = firstLineTicked ? U(0, 2 bits) | U(2, 2 bits)
     // The mode 2 interrupt source is only on as the line starts: in the line before's last
     // M-cycle, or line 0's first. The first line's mode 0 before its transfer is no source
-    // either, and its mode 0 interrupt sees the transfer as it was before the dots.
+    // either, and its mode 0 interrupt sees the transfer as it is after the first dot.
     val scanIrqMode = (!firstLineTicked && xTicked === 0 && lyTicked === 0) ? U(2, 2 bits) | U(3, 2 bits)
     val mode, irqMode, irqModeBefore = UInt(2 bits)
     mode := 0
@@ -558,17 +565,17 @@ class PpuPlugin(postBoot: Boolean = false)
         mode := scanMode
         irqMode := scanIrqMode
       } otherwise {
-        // The first line's mode 3 ends for the CPU two dots later.
-        when(firstLineTicked ? transferAfter(1) | transferAfter(3)) { mode := 3 }
-        when(xTicked === Gb.oamEnd) { irqMode := scanIrqMode } elsewhen (firstLineTicked ? s0.transfer | transferAfter(2)) { irqMode := 3 }
+        // The first line's mode 3 ends for the CPU a dot later.
+        when(firstLineTicked ? transferAfter(2) | transferAfter(3)) { mode := 3 }
+        when(xTicked === Gb.oamEnd) { irqMode := scanIrqMode } elsewhen (firstLineTicked ? transferAfter(1) | transferAfter(2)) { irqMode := 3 }
       }
       // The next line's mode 2 interrupt rises with LY, except line 0's.
       when(xTicked === Gb.lineCycles - 1 && lyTicked < Gb.visibleLines - 1) { irqMode := 2 }
     }
     irqModeBefore := irqMode
     // A halted CPU sees the STAT line two dots earlier than a running one: on the first line, as
-    // the transfer was after the last M-cycle's second dot.
-    when(transferPart) { irqModeBefore := (xTicked === Gb.oamEnd) ? scanIrqMode | ((firstLineTicked ? transferMid | s0.transfer) ? U(3, 2 bits) | U(0, 2 bits)) }
+    // the transfer was after the last M-cycle's third dot.
+    when(transferPart) { irqModeBefore := (xTicked === Gb.oamEnd) ? scanIrqMode | ((firstLineTicked ? transfer3 | s0.transfer) ? U(3, 2 bits) | U(0, 2 bits)) }
     // LY = LYC compares 0 from line 153's second M-cycle.
     val lyNow = (lyTicked === Gb.frameLines - 1 && xTicked >= 1) ? U(0, 8 bits) | lyTicked
     // LY = LYC is only compared while the LCD is on, and stays on the interrupt line when off.
@@ -663,7 +670,9 @@ class PpuPlugin(postBoot: Boolean = false)
     when(slave.writeFire && slave.cmd.address === Gb.LYC && on && compared) { lycLine := lyNow === slave.cmd.data }
     firstLine := firstLineTicked
     irqModeLast := irqMode
-    transferMid := transferPart && transferAfter(2)
+    transfer3 := transferPart && transferAfter(3)
     wyHit := wyHit4
+    wyPending := wyMatch && wy =/= wyLast
+    when(transferPart) { wyLast := wy }
   }
 }

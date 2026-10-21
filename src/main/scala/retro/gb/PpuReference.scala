@@ -23,9 +23,11 @@ package retro.gb
   *    size) land in the next M-cycle's dots (`lateWrite`);
   *  - the mode 2 interrupt of lines 1 to 143 rises in the line before's last M-cycle, with LY;
   *    line 0's an M-cycle later (Mealybug's line_0_fix, Gambatte's m2int tests);
+  *  - the first line after the LCD is turned on starts its transfer a dot later (Gambatte);
+  *  - a WY write is seen by the window a dot after other WY matches (SameBoy's scheduled check);
   *  - a halted CPU sees a STAT interrupt raised after the M-cycle's first dot an M-cycle late
   *    (two dots before a running CPU does: on the first line after the LCD is turned on, the
-  *    transfer as it was after the last M-cycle's second dot; `statLate`);
+  *    transfer as it was after the last M-cycle's third dot; `statLate`);
   *  - LY reads the next line in the last M-cycle of a line, and 0 all through line 153; LY = LYC
   *    compares 0 from line 153's second M-cycle, and drops in that M-cycle;
   *  - the LY = LYC flag is only updated while the LCD is on, and stays on the STAT interrupt line
@@ -59,8 +61,10 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   /** The mode the STAT interrupt sees. */
   var irqMode = 0
   private var statLine = false
-  /** The transfer after this M-cycle's second dot. */
-  private var transferMid = false
+  /** The transfer after this M-cycle's third dot. */
+  private var transfer3 = false
+  private var wyPending = false
+  private var wyLast = 0
   /** The transfer was on before this M-cycle's dots. */
   private var transferEnding = false
   /** This M-cycle's STAT interrupt rose during its dots, after an acknowledge in the last
@@ -187,9 +191,12 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     if (!on) { x = 0; ly = 0; lineStart(); firstLine = true; winY = -1; blankFrame = true }
     else if (x == Gb.lineCycles - 1) { x = 0; ly = if (ly == Gb.frameLines - 1) 0 else ly + 1; lineStart() }
     else x += 1
+    // A WY match found after a WY write takes effect from the next M-cycle (SameBoy's scheduled
+    // check, a dot after the others).
+    if (wyPending) { wyHit = on; wyPending = false }
 
-    val transferMidBefore = transferMid
-    transferMid = false
+    val transfer3Before = transfer3
+    transfer3 = false
     transferEnding = false
     mode = 0
     irqMode = 0
@@ -216,6 +223,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
         if (x == Gb.oamEnd) startTransfer()
         val transferBefore = transfer
         val wyBefore = wy
+        val wyEarlier = wyLast
+        wyLast = wyBefore
         val active = Array.fill(8)(false)
         for (i <- 1 to 4) {
           dotNow = dots - 4 + i
@@ -224,8 +233,13 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
             applyScheduled()
           }
           for ((a, d) <- scheduled if i == writeDot(a, d) - 1) glitch(a, d)
-          // After the scan, LY = WY is checked on the last dot, against WY as of the last M-cycle.
-          if (i == 4 && ly == wyBefore && (lcdc & 0x20) != 0) wyHit = true
+          // After the scan, LY = WY is checked on the last dot, against WY as of the last M-cycle;
+          // a match new since a WY write counts from the next M-cycle (`wyPending`).
+          if (i == 4) {
+            val hit = ly == wyBefore && (lcdc & 0x20) != 0
+            wyPending = hit && wyBefore != wyEarlier
+            if (hit && !wyPending) wyHit = true
+          }
           if (pixActive) sbDot()
           wxJustChanged = false
           active(i) = pixActive
@@ -240,16 +254,16 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
         }
         def transferAfter(i: Int) = transferBefore && active(i + 3)
         // A halted CPU sees the STAT line two dots earlier than a running one: on the first line,
-        // as the transfer was after the last M-cycle's second dot.
+        // as the transfer was after the last M-cycle's third dot.
         irqModeBefore = if (x == Gb.oamEnd) scanIrqMode
-          else if (if (firstLine) transferMidBefore else transferBefore) 3 else 0
-        transferMid = transferAfter(2)
+          else if (if (firstLine) transfer3Before else transferBefore) 3 else 0
+        transfer3 = transferAfter(3)
         transferEnding = transferBefore
         irqMode = if (x == Gb.oamEnd) scanIrqMode
-          // The first line's mode 0 interrupt sees the transfer as it was before the dots.
-          else if (if (firstLine) transferBefore else transferAfter(2)) 3 else 0
-        // The first line's mode 3 ends for the CPU two dots later.
-        mode = if (transferAfter(if (firstLine) 1 else 3)) 3 else 0
+          // The first line's mode 0 interrupt sees the transfer as it is after the first dot.
+          else if (if (firstLine) transferAfter(1) else transferAfter(2)) 3 else 0
+        // The first line's mode 3 ends for the CPU a dot later.
+        mode = if (transferAfter(if (firstLine) 2 else 3)) 3 else 0
         transfer = transferAfter(4)
       }
     }
@@ -331,7 +345,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     bgSize = 8; java.util.Arrays.fill(bgF, 0)
     obSize = 0
     lcdX = 0; pos = -16; pixActive = true
-    fSt = 0; sbSt = 0; sbWait = 7
+    // The first line after the LCD is turned on starts a dot later (Gambatte's mode 3 start).
+    fSt = 0; sbSt = 0; sbWait = if (firstLine) 8 else 7
     insertBg = false; noInsertGlitch = false; abortObj = false; duringObjFetch = false
     if (firstLine) wxTriggered = false
     objDone = 0
@@ -376,26 +391,29 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private def pendingObj = if ((lcdc & 2) == 0) -1 else (0 until objCount).find(i => (objDone & (1 << i)) == 0 && objX(i) == xMatch).getOrElse(-1)
   private def fetcherY = if (wxTriggered) winY & 0xFF else (ly + scy) & 0xFF
 
+  // The fetcher takes the map and tile data selects and SCY when it reads VRAM,
+  // not when it computes the address in the step before (Gambatte).
   private def advance(): Unit = fSt match {
     case 0 =>
       if ((lcdc & 0x20) == 0) wxTriggered = false
-      val map = if (!wxTriggered && (lcdc & 8) != 0 || wxTriggered && (lcdc & 0x40) != 0) 0x1C00 else 0x1800
-      val y = fetcherY
-      val x = if (wxTriggered) winTileX else if (pos < -8) scx >> 3 else ((scx + pos + 8) >> 3) & 0x1F
-      tileIdxAddr = map + x + (y >> 3) * 32
+      tileIdxAddr = if (wxTriggered) winTileX else if (pos < -8) scx >> 3 else ((scx + pos + 8) >> 3) & 0x1F
       fSt = 1
-    case 1 => curTile = vram(tileIdxAddr); fSt = 2
+    case 1 =>
+      val map = if (!wxTriggered && (lcdc & 8) != 0 || wxTriggered && (lcdc & 0x40) != 0) 0x1C00 else 0x1800
+      curTile = vram(map + tileIdxAddr + (fetcherY >> 3) * 32); fSt = 2
     case 2 | 4 =>
-      val base = if ((lcdc & 0x10) != 0) curTile * 16 else curTile.toByte * 16 + 0x1000
-      tileDataAddr = base + (fetcherY & 7) * 2 + (if (fSt == 4) 1 else 0)
+      tileDataAddr = if (fSt == 4) 1 else 0
       fSt += 1
-    case 3 => data0 = vram(tileDataAddr); fSt = 4
+    case 3 => data0 = vram(tileData); fSt = 4
     case 5 =>
-      data1 = vram(tileDataAddr)
+      data1 = vram(tileData)
       if (wxTriggered) winTileX = (winTileX + 1) & 0x1F
       push()
     case _ => push()
   }
+
+  private def tileData: Int =
+    (if ((lcdc & 0x10) != 0) curTile * 16 else curTile.toByte * 16 + 0x1000) + (fetcherY & 7) * 2 + tileDataAddr
 
   private def push(): Unit = {
     fSt = 6

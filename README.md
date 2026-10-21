@@ -252,13 +252,14 @@ sbt "Test/runMain retro.gb.GbSuiteReport model m3_"  # on the reference model, f
 ```
 
 `SHARD=i/n` runs every n-th ROM, for parallel JVMs (give each its own `SIM_WORKSPACE`). Results
-on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped):
+on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped, as are GBMicrotest's 31
+scratch ROMs that never write a verdict):
 
 | Suite | Pass | Fail |
 |---|---|---|
-| Mealybug Tearoom Tests | 15 | 9 |
-| Gambatte | 1809 | 64 |
-| GBMicrotest | 480 | 33 |
+| Mealybug Tearoom Tests | 20 | 4 |
+| Gambatte | 1846 | 27 |
+| GBMicrotest | 480 | 2 |
 | wilbertpol's Mooneye | 95 | 0 |
 | AGE | 12 | 2 |
 | Scribbltests | 5 | 0 |
@@ -266,8 +267,9 @@ on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped):
 | Blargg's dmg_sound | 13 | 0 |
 | Bully, little-things, Strikethrough, TurtleTests | 5 | 0 |
 
-The pixel transfer is a port of SameBoy's DMG FIFO and fetcher, which passes the same 15
-Mealybug DMG tests; `PpuReference` lists the timing it pins down (register writes landing between
+The pixel transfer is a port of SameBoy's DMG FIFO and fetcher, which passes 15 of the Mealybug
+DMG tests; with Gambatte's timing where SameBoy fails (the fetcher takes LCDC's selects and SCY
+when it reads VRAM, the first line after LCD on starts a dot later) it passes 20; `PpuReference` lists the timing it pins down (register writes landing between
 a cycle's dots, mode 3 ending 3 dots before the last pixel, when a halted or running CPU sees a
 STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`OamDmaPlugin`). The reference
 model has no MBC, so the 40 Gambatte OAM DMA tests that bank-switch or push to cartridge RAM
