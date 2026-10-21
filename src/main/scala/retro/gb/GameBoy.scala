@@ -110,6 +110,14 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
     ackLines += line -> b
     b
   }
+  private val writeAckLines = ArrayBuffer[(IrqLine, Bool)]()
+  /** An IF write this M-cycle that clears the bit also counts as an acknowledge for
+    * `ackClears` in the next M-cycle. Retain `irqLock` before calling it. */
+  def writeAcks(line: IrqLine): Bool = {
+    val b = Bool().setCompositeName(this, s"irq_${line.name}_writeAcks")
+    writeAckLines += line -> b
+    b
+  }
 
   val early = during setup new Area {
     val requests, lateHalted, lateRunning = Bits(5 bits)
@@ -141,7 +149,8 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
     val written = ifSlave.writeFire ? ifSlave.cmd.data(4 downto 0).asBits | ticked
     val acked = early.ack.valid ? UIntToOh(early.ack.payload, 5) | B(0, 5 bits)
     flags := written & ~acked
-    ackedLast := acked
+    val writeAcked = (0 until 5).map(i => ifSlave.writeFire && !ifSlave.cmd.data(i) && any(writeAckLines, i)).asBits()
+    ackedLast := acked | writeAcked
     early.requests := ticked & enable(4 downto 0)
     def lateOf(halted: Boolean) = (0 until 5).map(i => lateLines.filter(l => l._1.index == i && l._2 == halted).map(_._3).foldLeft(False: Bool)(_ || _)).asBits()
     early.lateHalted := lateOf(true) & ~flags

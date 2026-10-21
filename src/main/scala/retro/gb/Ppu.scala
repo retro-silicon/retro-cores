@@ -77,10 +77,12 @@ class PpuPlugin(postBoot: Boolean = false)
   var lcdcReg: UInt = null
   private var statLateHalted: Bool = null
   private var statAckClears: Bool = null
+  private var statWriteAcks: Bool = null
   override def withController(ctrl: IrqService): Unit = ctrl match {
     case c: InterruptControllerPlugin =>
       statLateHalted = c.late(Gb.Irq.STAT, halted = true)
       statAckClears = c.ackClears(Gb.Irq.STAT)
+      statWriteAcks = c.writeAcks(Gb.Irq.STAT)
       c.ackClears(Gb.Irq.VBLANK) := True
     case _ =>
   }
@@ -542,7 +544,7 @@ class PpuPlugin(postBoot: Boolean = false)
     // A halted CPU sees the STAT line two dots earlier than a running one: on the first line, as
     // the transfer was after the last M-cycle's second dot.
     when(transferPart) { irqModeBefore := (xTicked === Gb.oamEnd) ? scanIrqMode | ((firstLineTicked ? transferMid | s0.transfer) ? U(3, 2 bits) | U(0, 2 bits)) }
-    // LY reads 0 from line 153's second M-cycle.
+    // LY = LYC compares 0 from line 153's second M-cycle.
     val lyNow = (lyTicked === Gb.frameLines - 1 && xTicked >= 1) ? U(0, 8 bits) | lyTicked
     // LY = LYC is only compared while the LCD is on, and stays on the interrupt line when off.
     // It drops in the line's last M-cycle, where LY already reads the next line (except at the
@@ -556,7 +558,9 @@ class PpuPlugin(postBoot: Boolean = false)
       (sel(1) && m === 1) || (sel(0) && m === 0))
     val line = lineFor(irqMode)
     // LY reads the next line in the last M-cycle of a line.
-    val lyRead = (on && xTicked === Gb.lineCycles - 1) ? ((lyTicked === Gb.frameLines - 1) ? U(0, 8 bits) | lyTicked + 1) | lyNow
+    // LY reads 0 for all of line 153.
+    val lyRead = (on && xTicked === Gb.lineCycles - 1) ? ((lyTicked === Gb.frameLines - 1) ? U(0, 8 bits) | lyTicked + 1) |
+      ((on && lyTicked === Gb.frameLines - 1) ? U(0, 8 bits) | lyNow)
     // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written;
     // entering VBlank, LY = LYC is compared before the mode changes.
     // A STAT write on the DMG first enables every STAT interrupt source for a dot, as they are this
@@ -565,13 +569,17 @@ class PpuPlugin(postBoot: Boolean = false)
     val glitchSelect2 = !(irqModeLast === 2 && x === Gb.lineCycles - 1 && statSelect(0) && !statSelect(2))
     val line0Mode2 = irqModeLast === 2 && ly === 0 && x === 0
     val glitchMode2 = (irqMode === 2 && !(lyTicked === 0 && xTicked === 0) || line0Mode2) && glitchSelect2
-    val writeRise = statWrite && on && (lycLine || lycLineTicked || irqMode === 0 || irqMode === 1 || glitchMode2)
+    val writeRise = statWrite && on && (lycLine && xTicked =/= 0 || lycLineTicked || irqMode === 0 || irqMode === 1 || glitchMode2)
     val start = statLine || statSelect(3) && lycLine || writeRise
     val mid = vblankMode2 ? lineFor(0) | line
-    val stat = !statLine && start || !start && mid || !mid && line
+    // The glitch comes at the end of the write's M-cycle: after a held LY = LYC line dropped.
+    val glitchLate = statWrite && on && lycLine && !lycLineTicked && statSelect(3) && !line && (irqMode === 0 || irqMode === 1 || glitchMode2)
+    val stat = !statLine && start || !start && mid || !mid && line || glitchLate
     // LYC and STAT writes land after the dots, and can drop the STAT line before a source rises
     // in the next M-cycle; see `PpuReference`.
     val ending = irqMode === 3 && transferPart
+    // An IF write lands a dot after the M-cycle: after the mode 0 source rises at its end.
+    if (statWriteAcks != null) statWriteAcks := ending && mode === 0
     val lineNext = Bool()
     lineNext := line
     when(slave.writeFire && on && slave.cmd.address === Gb.LYC && compared) {

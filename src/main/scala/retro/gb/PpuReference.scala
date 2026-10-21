@@ -26,8 +26,8 @@ package retro.gb
   *  - a halted CPU sees a STAT interrupt raised after the M-cycle's first dot an M-cycle late
   *    (two dots before a running CPU does: on the first line after the LCD is turned on, the
   *    transfer as it was after the last M-cycle's second dot; `statLate`);
-  *  - LY reads the next line in the last M-cycle of a line, and 0 from the second M-cycle of
-  *    line 153, where LY = LYC also drops for one M-cycle;
+  *  - LY reads the next line in the last M-cycle of a line, and 0 all through line 153; LY = LYC
+  *    compares 0 from line 153's second M-cycle, and drops in that M-cycle;
   *  - the LY = LYC flag is only updated while the LCD is on, and stays on the STAT interrupt line
   *    while it is off (stat_lyc_onoff); it drops in a line's last M-cycle;
   *  - the first line after the LCD is turned on has no mode 2: it reads as mode 0 until the
@@ -75,6 +75,8 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private var objDone = 0
   // Window
   private var wyHit = false
+  /** The mode 0 interrupt source rises right after this M-cycle (STAT reads mode 0 from its third dot). */
+  var mode0AtLastDot = false
   // Pixel transfer
   private var transfer = false
   /** Dots the current or last pixel transfer has taken. */
@@ -129,7 +131,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     case Gb.STAT => 0x80 | statSelect << 3 | (if (coincidence) 4 else 0) | mode
     case Gb.SCY => scy
     case Gb.SCX => scx
-    case Gb.LY => if (on && x == Gb.lineCycles - 1) (if (ly == Gb.frameLines - 1) 0 else ly + 1) else lyNow
+    case Gb.LY => if (on && x == Gb.lineCycles - 1) (if (ly == Gb.frameLines - 1) 0 else ly + 1) else if (on && ly == Gb.frameLines - 1) 0 else lyNow
     case Gb.LYC => lyc
     case Gb.BGP => bgp
     case Gb.OBP0 => obp0
@@ -263,12 +265,15 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written.
     // The glitch sees the sources as they are this M-cycle, LY = LYC also as held from the last.
     val glitchMode2 = irqMode == 2 && !(ly == 0 && x == 0) || line0Mode2
-    val writeRise = on && (((glitchSelect & 8) != 0 && (lycHeld || lycLine)) || ((glitchSelect & 4) != 0 && glitchMode2) ||
+    val writeRise = on && (((glitchSelect & 8) != 0 && (lycHeld && x != 0 || lycLine)) || ((glitchSelect & 4) != 0 && glitchMode2) ||
       ((glitchSelect & 2) != 0 && irqMode == 1) || ((glitchSelect & 1) != 0 && irqMode == 0))
     val start = statLine || (statSelect & 8) != 0 && lycHeld || writeRise
     // Entering VBlank, LY = LYC is compared before the mode changes.
     val mid = if (vblankMode2) statFor(0) else line
-    val stat = !statLine && start || !start && mid || !mid && line
+    // The glitch comes at the end of the write's M-cycle: after a held LY = LYC line dropped.
+    val glitchLate = on && lycHeld && !lycLine && (statSelect & 8) != 0 && !line &&
+      (((glitchSelect & 4) != 0 && glitchMode2) || ((glitchSelect & 2) != 0 && irqMode == 1) || ((glitchSelect & 1) != 0 && irqMode == 0))
+    val stat = !statLine && start || !start && mid || !mid && line || glitchLate
     // A halted CPU sees the STAT line as it was before this M-cycle's dots.
     statLate = stat && !(writeRise && !statLine) && !statFor(if (irqModeBefore < 0) irqMode else irqModeBefore, lycLine || lycHeld)
     statLine = line
@@ -276,6 +281,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     // in the next M-cycle (SameBoy): an LYC write before mode 0 starts later than its third dot,
     // a STAT write (a dot later) before mode 0 starts after its last dot or VBlank's mode 2.
     val ending = irqMode == 3 && x >= Gb.oamEnd && ly < Gb.visibleLines
+    mode0AtLastDot = on && ending && mode == 0
     for ((a, d) <- scheduled if on) a match {
       case Gb.LYC if compared => statLine = statLine && statFor(if (ending && mode == 0) 0 else irqMode, lyNow == d)
       case Gb.STAT => statLine = statLine && (statFor(if (ending && !transfer) 0 else irqMode, sel = (d >> 3) & 0xF) ||

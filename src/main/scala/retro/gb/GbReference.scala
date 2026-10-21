@@ -227,7 +227,10 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
         case _ if a < 0xFEA0 => if (!dmaCopying && !ppu.oamWriteLocked) oam(a & 0xFF) = d
         case _ if a >= 0xFF80 && a < 0xFFFF => hram(a & 0x7F) = d
         case Gb.IE => ie = d
-        case Gb.IF => iflag = d & 0x1F
+        case Gb.IF =>
+          iflag = d & 0x1F
+          // The write lands a dot after the M-cycle: after the mode 0 source rises at its end.
+          if (ppu.mode0AtLastDot) acked |= ~d & 1 << Gb.Irq.STAT.index
         case Gb.P1 => select = (d >> 4) & 3
         case Gb.SB => sb = d
         case Gb.SC =>
