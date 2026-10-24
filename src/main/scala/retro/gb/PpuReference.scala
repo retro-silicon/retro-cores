@@ -37,7 +37,35 @@ package retro.gb
   *  - entering VBlank also raises a mode 2 STAT interrupt (vblank_stat_intr);
   *  - VRAM and OAM are locked against the CPU as `vramReadLocked` and the others describe.
   * After the boot ROM the PPU is 98 M-cycles into line 153. */
+/** The states of the mode 3 loop (`PpuReference.sbStep`, SameBoy's numbering). */
+object PpuStep {
+  val WINDOW = 0       // check for the window
+  val OBJ_WAIT = 1     // step the fetcher until the background tile is in, to fetch an object
+  val OBJ_ATTRS = 3    // read the object's tile and flags
+  val OBJ_LOW = 4      // read its low tile byte
+  val OBJ_HIGH = 5     // read its high tile byte and mix the row into the object FIFO
+  val OBJ_NEXT = 6     // another object at this X?
+  val PIXEL = 7        // shift out a pixel and step the fetcher
+  val WINDOW_DELAY = 8 // the window's extra dot with WX = 0 and SCX mod 8 > 0
+  val OBJ_CHECK = 9    // any object at this X?
+}
+
+/** The background fetcher's steps (`PpuReference.advance`); each read takes the step before for
+  * its address. */
+object FetchStep {
+  val INDEX_ADDR = 0
+  val INDEX = 1
+  val LOW_ADDR = 2
+  val LOW_BYTE = 3
+  val HIGH_ADDR = 4
+  val HIGH_BYTE = 5
+  val PUSH = 6
+}
+
 class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
+  import FetchStep._
+  import PpuStep._
+
   var lcdc = if (postBoot) Gb.PostBoot.lcdc else 0
   var statSelect, scy, scx, lyc, wy, wx = 0
   var bgp = if (postBoot) Gb.PostBoot.bgp else 0
@@ -346,7 +374,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     obSize = 0
     lcdX = 0; pos = -16; pixActive = true
     // The first line after the LCD is turned on starts a dot later (Gambatte's mode 3 start).
-    fSt = 0; sbSt = 0; sbWait = if (firstLine) 8 else 7
+    fSt = INDEX_ADDR; sbSt = WINDOW; sbWait = if (firstLine) 8 else 7
     insertBg = false; noInsertGlitch = false; abortObj = false; duringObjFetch = false
     if (firstLine) wxTriggered = false
     objDone = 0
@@ -394,18 +422,18 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   // The fetcher takes the map and tile data selects and SCY when it reads VRAM,
   // not when it computes the address in the step before (Gambatte).
   private def advance(): Unit = fSt match {
-    case 0 =>
+    case INDEX_ADDR =>
       if ((lcdc & 0x20) == 0) wxTriggered = false
       tileIdxAddr = if (wxTriggered) winTileX else if (pos < -8) scx >> 3 else ((scx + pos + 8) >> 3) & 0x1F
-      fSt = 1
-    case 1 =>
+      fSt = INDEX
+    case INDEX =>
       val map = if (!wxTriggered && (lcdc & 8) != 0 || wxTriggered && (lcdc & 0x40) != 0) 0x1C00 else 0x1800
-      curTile = vram(map + tileIdxAddr + (fetcherY >> 3) * 32); fSt = 2
-    case 2 | 4 =>
-      tileDataAddr = if (fSt == 4) 1 else 0
+      curTile = vram(map + tileIdxAddr + (fetcherY >> 3) * 32); fSt = LOW_ADDR
+    case LOW_ADDR | HIGH_ADDR =>
+      tileDataAddr = if (fSt == HIGH_ADDR) 1 else 0
       fSt += 1
-    case 3 => data0 = vram(tileData); fSt = 4
-    case 5 =>
+    case LOW_BYTE => data0 = vram(tileData); fSt = HIGH_ADDR
+    case HIGH_BYTE =>
       data1 = vram(tileData)
       if (wxTriggered) winTileX = (winTileX + 1) & 0x1F
       push()
@@ -416,7 +444,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     (if ((lcdc & 0x10) != 0) curTile * 16 else curTile.toByte * 16 + 0x1000) + (fetcherY & 7) * 2 + tileDataAddr
 
   private def push(): Unit = {
-    fSt = 6
+    fSt = PUSH
     if (bgSize > 0) return
     if (wyHit && (lcdc & 0x20) == 0 && !noInsertGlitch) {
       val logical = if (pos + 7 > 167) 0 else pos + 7
@@ -424,7 +452,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     }
     for (b <- 0 until 8) bgF(b) = (if ((data1 << b & 0x80) != 0) 2 else 0) | (if ((data0 << b & 0x80) != 0) 1 else 0)
     bgSize = 8
-    fSt = 0
+    fSt = INDEX_ADDR
   }
 
   private def render(): Unit = {
@@ -457,7 +485,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
 
   private def sbDot(): Unit = {
     transferDots += 1
-    if (abortObj) { abortObj = false; if (sbSt >= 1 && sbSt <= 6) { sbSt = 7; sbWait = 0 } }
+    if (abortObj) { abortObj = false; if (sbSt >= OBJ_WAIT && sbSt <= OBJ_NEXT) { sbSt = PIXEL; sbWait = 0 } }
     if (sbWait > 0) sbWait -= 1
     else {
       sbWait = -1
@@ -467,44 +495,44 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
 
   /** One run of SameBoy's mode 3 loop up to its next sleep, which sets `sbWait`. */
   private def sbStep(): Unit = sbSt match {
-    case 0 =>
+    case WINDOW =>
       if (!wxTriggered && wyHit && (lcdc & 0x20) != 0) {
         val act = if (wx == 0) pos == -7 || pos == -16 && (scx & 7) != 0 || pos >= -15 && pos <= -8
           else if (wx < 166) wx == ((pos + 7) & 0xFF) || wx == ((pos + 6) & 0xFF) && !wxJustChanged && { if (lcdX > 0) lcdX -= 1; true }
           else false
         if (act) {
           winY += 1; winTileX = 0; bgSize = 0
-          wxTriggered = true; fSt = 0; winFetching = true
-          if (wx == 0 && (scx & 7) != 0) { sbSt = 8; sbWait = 0; return }
+          wxTriggered = true; fSt = INDEX_ADDR; winFetching = true
+          if (wx == 0 && (scx & 7) != 0) { sbSt = WINDOW_DELAY; sbWait = 0; return }
         } else if (wx == 166 && wx == ((pos + 7) & 0xFF)) winY += 1
       }
-      sbSt = 9
-    case 8 => sbSt = 9 // after the WX = 0 delay
-    case 9 =>
-      if (wx == ((pos + 7) & 0xFF) && wxTriggered && !winFetching && fSt == 0 && bgSize == 8) insertBg = true
+      sbSt = OBJ_CHECK
+    case WINDOW_DELAY => sbSt = OBJ_CHECK
+    case OBJ_CHECK =>
+      if (wx == ((pos + 7) & 0xFF) && wxTriggered && !winFetching && fSt == INDEX_ADDR && bgSize == 8) insertBg = true
       for (i <- 0 until objCount if objX(i) < xMatch) objDone |= 1 << i
       duringObjFetch = true
-      sbSt = if (pendingObj >= 0) 1 else 7
-    case 1 =>
-      // Finish the background tile before the object; state 2 is entered in the same dot.
-      sbSt = if (fSt < 5 || bgSize == 0) 1 else 3
+      sbSt = if (pendingObj >= 0) OBJ_WAIT else PIXEL
+    case OBJ_WAIT =>
+      // Finish the background tile before the object; SameBoy's state 2 is entered in the same dot.
+      sbSt = if (fSt < HIGH_BYTE || bgSize == 0) OBJ_WAIT else OBJ_ATTRS
       advance(); sbWait = 0
-    case 3 =>
+    case OBJ_ATTRS =>
       advance()
       fetchSlot = pendingObj
       val e = objIndex(fetchSlot)
       oTile = oamRead(4 * e + 2); oFlags = oamRead(4 * e + 3)
       yBus = oTile
-      sbSt = 4; sbWait = 1
-    case 4 =>
-      sbObjLo = vram(objLine(fetchSlot)); sbSt = 5; sbWait = 1
-    case 5 =>
+      sbSt = OBJ_LOW; sbWait = 1
+    case OBJ_LOW =>
+      sbObjLo = vram(objLine(fetchSlot)); sbSt = OBJ_HIGH; sbWait = 1
+    case OBJ_HIGH =>
       duringObjFetch = false
       overlay(sbObjLo, vram(objLine(fetchSlot) + 1))
       objDone |= 1 << fetchSlot
-      sbSt = 6; sbWait = 0
-    case 6 => sbSt = if (pendingObj >= 0) 1 else 7
-    case 7 =>
+      sbSt = OBJ_NEXT; sbWait = 0
+    case OBJ_NEXT => sbSt = if (pendingObj >= 0) OBJ_WAIT else PIXEL
+    case PIXEL =>
       duringObjFetch = false
       render()
       advance()
@@ -515,7 +543,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
         if (ly == Gb.visibleLines - 1) winY = -1
         wxTriggered = wyHit && (lcdc & 0x20) != 0 && wx == 166
         if (wxTriggered) { winTileX = 1; winY += 1 }
-      } else { sbSt = 0; sbWait = 0 }
+      } else { sbSt = WINDOW; sbWait = 0 }
   }
 
   private def objLine(i: Int): Int = {

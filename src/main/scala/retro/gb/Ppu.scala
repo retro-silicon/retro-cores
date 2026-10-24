@@ -6,6 +6,8 @@ import spinal.core.fiber._
 import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.misc._
+import FetchStep._
+import PpuStep._
 
 /** Up to four pixels a cycle (one per dot) for the LCD: `valid(i)` marks the pixels sent, `x(i)`
   * their columns on line `y`, `shade(i)` their shades, 0 (white) to 3 (black). `fill` ends a line
@@ -36,7 +38,7 @@ object LcdPixels {
 case class PpuDot() extends Bundle {
   /** Mode 3 as the CPU sees it, and the transfer running. */
   val transfer, active = Bool()
-  /** `PpuReference.sbStep`'s state, and dots to wait before its next step. */
+  /** `PpuReference.sbStep`'s state (`PpuStep`), and dots to wait before its next step. */
   val st = UInt(4 bits)
   val sleep = UInt(4 bits)
   val pos = SInt(9 bits)
@@ -47,7 +49,7 @@ case class PpuDot() extends Bundle {
   val obPix = Vec(UInt(2 bits), 8)
   val obPal, obPrio = Bits(8 bits)
   val obSize = UInt(4 bits)
-  // Background fetcher
+  // Background fetcher (`FetchStep`)
   val fSt = UInt(3 bits)
   val tileIdxAddr, tileDataAddr = UInt(13 bits)
   val curTile, data0, data1 = UInt(8 bits)
@@ -205,7 +207,7 @@ class PpuPlugin(postBoot: Boolean = false)
     when(visible && xTicked === Gb.oamEnd) {
       s0.transfer := True
       s0.active := True
-      s0.st := 0
+      s0.st := WINDOW
       // The first line after the LCD is turned on starts a dot later.
       s0.sleep := firstLineTicked ? U(8, 4 bits) | U(7, 4 bits)
       s0.pos := -16
@@ -213,7 +215,7 @@ class PpuPlugin(postBoot: Boolean = false)
       for (k <- 0 until 8) s0.bg(k) := 0
       s0.bgSize := 8
       s0.obSize := 0
-      s0.fSt := 0
+      s0.fSt := INDEX_ADDR
       s0.insertBg := False
       s0.noInsertGlitch := False
       when(firstLineTicked) { s0.wxTriggered := False }
@@ -295,19 +297,19 @@ class PpuPlugin(postBoot: Boolean = false)
       s2 := s1
       when(s1.abortObj) {
         s2.abortObj := False
-        when(s1.st >= 1 && s1.st <= 6) { s2.st := 7; s2.sleep := 0 }
+        when(s1.st >= OBJ_WAIT && s1.st <= OBJ_NEXT) { s2.st := PIXEL; s2.sleep := 0 }
       }
       val st0 = s2.st
       val stepping = s2.sleep === 0
       val wyHitD = if (i >= 4) wyHit4 else wyHitTicked
 
-      // State 0: the window check.
+      // The window check.
       val win = new Area {
         val a = PpuDot()
         a := s2
         val p7 = (s2.pos + 7).asUInt.resize(8)
         val p6 = (s2.pos + 6).asUInt.resize(8)
-        val check = st0 === 0 && !s2.wxTriggered && wyHitD && lcdcD(5)
+        val check = st0 === WINDOW && !s2.wxTriggered && wyHitD && lcdcD(5)
         val m7 = wxD === p7
         val m6 = wxD === p6 && !wxJustChanged
         val atZero = s2.pos === -7 || (s2.pos === -16 && scxD(2 downto 0) =/= 0) || (s2.pos >= -15 && s2.pos <= -8)
@@ -317,7 +319,7 @@ class PpuPlugin(postBoot: Boolean = false)
           a.winTileX := 0
           a.bgSize := 0
           a.wxTriggered := True
-          a.fSt := 0
+          a.fSt := INDEX_ADDR
           a.winFetching := True
           when(wxD =/= 0 && !m7 && s2.lcdX =/= 0) { a.lcdX := s2.lcdX - 1 }
         } elsewhen (check && wxD === 166 && m7) {
@@ -327,12 +329,12 @@ class PpuPlugin(postBoot: Boolean = false)
       }
 
       // State 9: the window's background insertion, then objects passed and the next state.
-      val goes9 = (st0 === 0 && !win.delay) || st0 === 8
+      val goes9 = (st0 === WINDOW && !win.delay) || st0 === WINDOW_DELAY
       val b = PpuDot()
       b := win.a
       val xMatch = (win.a.pos + 8 < 0) ? U(0, 9 bits) | (win.a.pos + 8).asUInt
       when(goes9) {
-        when(wxD === win.p7 && win.a.wxTriggered && !win.a.winFetching && win.a.fSt === 0 && win.a.bgSize === 8) { b.insertBg := True }
+        when(wxD === win.p7 && win.a.wxTriggered && !win.a.winFetching && win.a.fSt === INDEX_ADDR && win.a.bgSize === 8) { b.insertBg := True }
         b.objDone := win.a.objDone | (0 until 10).map(k => k < objCount && objX(k) < xMatch).asBits()
         b.duringObjFetch := True
       }
@@ -340,7 +342,7 @@ class PpuPlugin(postBoot: Boolean = false)
       val pending = lcdcD(1) && hits =/= 0
       val st1 = UInt(4 bits)
       st1 := st0
-      when(goes9 || st0 === 6) { st1 := pending ? U(1, 4 bits) | U(7, 4 bits) }
+      when(goes9 || st0 === OBJ_NEXT) { st1 := pending ? U(OBJ_WAIT, 4 bits) | U(PIXEL, 4 bits) }
 
       // State 7: one pixel out of the FIFOs.
       val render = new Area {
@@ -391,7 +393,7 @@ class PpuPlugin(postBoot: Boolean = false)
       // steps 1, 3 and 5, and the object fetch at states 4 and 5.
       val pre = PpuDot()
       pre := b
-      when(st1 === 7) { pre := render.r }
+      when(st1 === PIXEL) { pre := render.r }
       val objRow = new Area {
         val tall = lcdcD(2)
         val mask = tall ? U(15, 4 bits) | U(7, 4 bits)
@@ -407,19 +409,19 @@ class PpuPlugin(postBoot: Boolean = false)
         map + (fetcherY(pre)(7 downto 3) @@ pre.tileIdxAddr(4 downto 0)).resized
       }
       val dataAddr = (!lcdcD(4) && !pre.curTile(7)).asUInt @@ pre.curTile @@ fetcherY(pre)(2 downto 0) @@ pre.tileDataAddr(0)
-      vAddr := (pre.fSt === 1) ? idxAddr | dataAddr
-      when(st1 === 4) { vAddr := objRow.address(0) }
-      when(st1 === 5) { vAddr := objRow.address(1) }
+      vAddr := (pre.fSt === INDEX) ? idxAddr | dataAddr
+      when(st1 === OBJ_LOW) { vAddr := objRow.address(0) }
+      when(st1 === OBJ_HIGH) { vAddr := objRow.address(1) }
       val vData = if (dry) U(0, 8 bits) else vram.directRead(vAddr)
 
       val adv = PpuDot()
       adv := pre
       val push = new Area {
-        val data1 = (pre.fSt === 5) ? vData | pre.data1
+        val data1 = (pre.fSt === HIGH_BYTE) ? vData | pre.data1
         val p7 = pre.pos.resize(10) + 7
         val insert = wyHitD && !lcdcD(5) && !pre.noInsertGlitch && p7 >= 0 && wxD === p7.asUInt.resize(8)
         def apply(): Unit = {
-          adv.fSt := 6
+          adv.fSt := PUSH
           when(pre.bgSize === 0) {
             when(insert) {
               adv.bg(0) := 0
@@ -427,26 +429,26 @@ class PpuPlugin(postBoot: Boolean = false)
             } otherwise {
               for (k <- 0 until 8) adv.bg(k) := (data1(7 - k) ## pre.data0(7 - k)).asUInt
               adv.bgSize := 8
-              adv.fSt := 0
+              adv.fSt := INDEX_ADDR
             }
           }
         }
       }
       switch(pre.fSt) {
-        is(0) {
+        is(INDEX_ADDR) {
           val wxT = pre.wxTriggered && lcdcD(5)
           adv.wxTriggered := wxT
           val scrolled = (scxD.resize(10) + (pre.pos + 8).asUInt.resize(10))(7 downto 3)
           adv.tileIdxAddr := (wxT ? pre.winTileX | ((pre.pos < -8) ? scxD(7 downto 3) | scrolled)).resized
-          adv.fSt := 1
+          adv.fSt := INDEX
         }
-        is(1) { adv.curTile := vData; adv.fSt := 2 }
-        is(2, 4) {
-          adv.tileDataAddr := (pre.fSt === 4).asUInt.resized
+        is(INDEX) { adv.curTile := vData; adv.fSt := LOW_ADDR }
+        is(LOW_ADDR, HIGH_ADDR) {
+          adv.tileDataAddr := (pre.fSt === HIGH_ADDR).asUInt.resized
           adv.fSt := pre.fSt + 1
         }
-        is(3) { adv.data0 := vData; adv.fSt := 4 }
-        is(5) {
+        is(LOW_BYTE) { adv.data0 := vData; adv.fSt := HIGH_ADDR }
+        is(HIGH_BYTE) {
           adv.data1 := vData
           when(pre.wxTriggered) { adv.winTileX := pre.winTileX + 1 }
           push()
@@ -462,15 +464,15 @@ class PpuPlugin(postBoot: Boolean = false)
         n := s1
       } elsewhen (!stepping) {
         n.sleep := s2.sleep - 1
-      } elsewhen (st0 === 0 && win.delay) {
+      } elsewhen (st0 === WINDOW && win.delay) {
         n := win.a
-        n.st := 8
+        n.st := WINDOW_DELAY
         n.sleep := 0
-      } elsewhen (st1 === 1) {
+      } elsewhen (st1 === OBJ_WAIT) {
         n := adv
-        n.st := (b.fSt < 5 || b.bgSize === 0) ? U(1, 4 bits) | U(3, 4 bits)
+        n.st := (b.fSt < HIGH_BYTE || b.bgSize === 0) ? U(OBJ_WAIT, 4 bits) | U(OBJ_ATTRS, 4 bits)
         n.sleep := 0
-      } elsewhen (st1 === 3) {
+      } elsewhen (st1 === OBJ_ATTRS) {
         n := adv
         val slot = OHToUInt(OHMasking.first(hits))
         val entry = objIndex(slot.resized)
@@ -478,14 +480,14 @@ class PpuPlugin(postBoot: Boolean = false)
         n.oTile := (if (dry) U(0, 8 bits) else dma.objRead((entry @@ U(2, 2 bits)).resize(8)))
         n.oFlags := (if (dry) U(0, 8 bits) else dma.objRead((entry @@ U(3, 2 bits)).resize(8)))
         n.yBus := n.oTile
-        n.st := 4
+        n.st := OBJ_LOW
         n.sleep := 1
-      } elsewhen (st1 === 4) {
+      } elsewhen (st1 === OBJ_LOW) {
         n := b
         n.objLo := vData
-        n.st := 5
+        n.st := OBJ_HIGH
         n.sleep := 1
-      } elsewhen (st1 === 5) {
+      } elsewhen (st1 === OBJ_HIGH) {
         n := b
         n.duringObjFetch := False
         // Mix the object's row into the object FIFO where that is transparent.
@@ -501,9 +503,9 @@ class PpuPlugin(postBoot: Boolean = false)
         }
         n.obSize := 8
         n.objDone(b.slot.resized) := True
-        n.st := 6
+        n.st := OBJ_NEXT
         n.sleep := 0
-      } otherwise { // 7
+      } otherwise { // PIXEL
         n := adv
         n.duringObjFetch := False
         pixel.valid := (if (dry) False else render.emit)
@@ -518,7 +520,7 @@ class PpuPlugin(postBoot: Boolean = false)
           when(wx166) { n.winTileX := 1 }
           fill := (if (dry) False else render.r.lcdX < 160)
         } otherwise {
-          n.st := 0
+          n.st := WINDOW
           n.sleep := 0
         }
       }
