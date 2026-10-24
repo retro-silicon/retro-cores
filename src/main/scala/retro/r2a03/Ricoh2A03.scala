@@ -124,6 +124,8 @@ object Isa {
 object Ricoh2A03 {
   val DISPATCH = 0x100
   val RESET = 0x101
+  /** The opcodes that lock the CPU up (JAM, also KIL or HLT). */
+  val JAMS = Set(0x02, 0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x92, 0xB2, 0xD2, 0xF2)
 
   class AluPlugin extends FiberPlugin {
     val logic = during setup new Area {
@@ -511,7 +513,7 @@ object Ricoh2A03 {
     op("RESET", RESET, Seq(dummy, dummy, read(Agu.STACK).assign(SP -> Agu.S_DEC), read(Agu.STACK).assign(SP -> Agu.S_DEC),
       read(Agu.STACK).assign(SP -> Agu.S_DEC, IF -> Isa.ONE), read(Isa.RESET_LO).assign(PCL -> RDATA), read(Isa.RESET_HI).assign(PCH -> RDATA), fetch))
     // JAM halts with the address bus parked on FFFF; only reset leaves (the fetch is never reached).
-    for (code <- Seq(0x02, 0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x92, 0xB2, 0xD2, 0xF2))
+    for (code <- JAMS.toSeq.sorted)
       op("JAM", code, Seq(dummy, read(Isa.JAM_FFFF), read(Isa.JAM_FFFE), read(Isa.JAM_FFFE), read(Isa.JAM_FFFF).branchIf(Isa.ALWAYS, 4), fetch))
     ops.result()
   }

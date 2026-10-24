@@ -29,6 +29,9 @@ object Nes {
   /** APU length counter loads, indexed by the top 5 bits of the 4003/4007/400B/400F write. */
   val lengthTable = Seq(10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
                         12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30)
+  /** Palette RAM as blargg's console has it at power-up (power_up_palette checks it). */
+  val powerUpPalette = Seq(0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C,
+                           0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02, 0x00, 0x20, 0x2C, 0x08)
 
   /** The 2A03 plugins plus the NES ones, in one host. The open bus claims every address no
     * other slave does, so the CPU has no external bus port. `romDecoder`: see `SequencerPlugin`

@@ -48,8 +48,6 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: 
   private val lengthLoad = Array.fill(4)(-1)
   private val lengthBefore = Array.fill(4)(0)
   private var lengthEnabled = 0
-  private val lengthTable = Array(10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
-                                  12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30)
   private def quarterFrame(): Unit = { pulse1.quarter(); pulse2.quarter(); triangle.quarter(); noise.quarter() }
   private def halfFrame(): Unit = {
     for (i <- 0 until 4) if (length(i) > 0 && !lengthHalt(i)) length(i) -= 1
@@ -225,7 +223,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: 
     case 0x4008 => newHalt(2) = (value & 0x80) != 0
     case 0x4003 | 0x4007 | 0x400B | 0x400F =>
       val i = address >> 2 & 3
-      if ((lengthEnabled >> i & 1) != 0) { lengthLoad(i) = lengthTable(value >> 3); lengthBefore(i) = length(i) }
+      if ((lengthEnabled >> i & 1) != 0) { lengthLoad(i) = Nes.lengthTable(value >> 3); lengthBefore(i) = length(i) }
     case 0x4010 =>
       dmcIrqEnable = (value & 0x80) != 0
       dmcLoop = (value & 0x40) != 0

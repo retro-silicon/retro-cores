@@ -79,10 +79,6 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
   val pins = during setup new Area { val pixel = out(Flow(NesPixel())).setName("ppu_pixel") }
   def pixel = pins.pixel
 
-  /** Power-up palette, as in `NesPpuReference`. */
-  val powerUpPalette = Seq(0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C,
-                           0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02, 0x00, 0x20, 0x2C, 0x08)
-
   val logic = during setup new Area {
     val bus = host[BusService]
     val ctrl = host[IrqService]
@@ -106,7 +102,7 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
     }
     state.line.simPublic()
     state.dot.simPublic()
-    val palette = Vec(powerUpPalette.map(c => Reg(UInt(6 bits)).init(c)))
+    val palette = Vec(Nes.powerUpPalette.map(c => Reg(UInt(6 bits)).init(c)))
     val ciram = Mem.fill(0x800)(UInt(8 bits)).setName("ciram").simPublic()
     ciram.init(Seq.fill(0x800)(U(0, 8 bits)))
     val oam = Mem.fill(64)(Bits(32 bits)).setName("oam").simPublic()

@@ -17,9 +17,8 @@ class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
   var buffer = 0
   /** The PPU's data bus latch: what unused register bits read as. */
   var latch = 0
-  /** Palette RAM, as blargg's console has it at power-up (power_up_palette checks this). */
-  val palette = Array(0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C,
-                      0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02, 0x00, 0x20, 0x2C, 0x08)
+  /** Palette RAM, from `Nes.powerUpPalette`. */
+  val palette = Nes.powerUpPalette.toArray
   val ciram = Array.fill(0x800)(0)
 
   var dot, line = 0
