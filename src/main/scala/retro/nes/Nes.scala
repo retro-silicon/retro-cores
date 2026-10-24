@@ -386,14 +386,15 @@ class NesApuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
 /** What an iNES cartridge needs in hardware: sizes, mapper (`NesCartridge.mappers`),
   * mirroring, and for MMC3 which IRQ behavior (`NesCartridge.mmc3Alternate`). */
 case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: Int, verticalMirroring: Boolean,
-                       mmc3Alternate: Boolean = false) {
+                       mmc3Alternate: Boolean = false, prgRamBytes: Int = 0x2000) {
+  require(prgRamBytes >= 0x2000 && isPow2(prgRamBytes))
   require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   def discrete = NesCartridge.discrete.contains(mapper)
   require(prgBytes % 0x4000 == 0 && isPow2(chrBytes))
   require(!(Seq(4, 9, 10, 69).contains(mapper) || discrete) || isPow2(prgBytes), s"mapper $mapper's PRG must be a power of 2")
 }
 object NesCartSpec {
-  def of(c: NesCartridge) = NesCartSpec(c.prg.length, c.chr.length, c.chrRam, c.mapper, c.verticalMirroring, c.mmc3Alternate)
+  def of(c: NesCartridge) = NesCartSpec(c.prg.length, c.chr.length, c.chrRam, c.mapper, c.verticalMirroring, c.mmc3Alternate, c.prgRamBytes)
 }
 
 /** The cartridge: PRG ROM at 8000-FFFF, 8 KB of PRG RAM at 6000 (test ROMs report there), CHR
@@ -414,6 +415,8 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     val chrBank0, chrBank1 = Reg(UInt(5 bits)).init(0)
     val prgBank = Reg(UInt(4 bits)).init(0)
     val control = Reg(Bits(5 bits)).init(0x0C)
+    /** MMC1: PRG RAM disabled (PRG bit 4), C000 the CHR register written last. */
+    val mmc1RamOff, mmc1LastChr1 = RegInit(False)
     val chrBank0After, chrBank1After = UInt(5 bits)
     val prgBankAfter = UInt(4 bits)
     val controlAfter = Bits(5 bits)
@@ -440,9 +443,9 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
             shift := 0; shiftCount := 0
             switch(prgSlave.cmd.address(14 downto 13)) {
               is(0) { controlAfter := full.asBits }
-              is(1) { chrBank0After := full }
-              is(2) { chrBank1After := full }
-              is(3) { prgBankAfter := full(3 downto 0) }
+              is(1) { chrBank0After := full; mmc1LastChr1 := False }
+              is(2) { chrBank1After := full; mmc1LastChr1 := True }
+              is(3) { prgBankAfter := full(3 downto 0); mmc1RamOff := full(4) }
             }
           }
         }
@@ -456,6 +459,8 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
       val bankSelect = Reg(Bits(8 bits)).init(0)
       val banks = Vec(Seq(0, 2, 4, 5, 6, 7, 0, 1).map(b => Reg(UInt(8 bits)).init(b)))
       val horizontal, irqEnabled = RegInit(False)
+      val ramOn = RegInit(True)
+      val ramProtect = RegInit(False)
       val irqLatch = Reg(UInt(8 bits)).init(0)
       val bankSelectAfter = CombInit(bankSelect)
       val banksAfter = CombInit(banks)
@@ -468,6 +473,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
           is(0) { bankSelectAfter := d.asBits }
           is(1) { banksAfter(bankSelect(2 downto 0).asUInt) := d }
           is(2) { horizontalAfter := d(0) }
+          is(3) { ramOn := d(7); ramProtect := d(6) }
           is(4) { irqLatchAfter := d }
           is(5) { reloadWrite := True }
           is(6) { irqEnabledAfter := False; ackWrite := True }
@@ -551,6 +557,8 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     val prg = Mem.fill(spec.prgBytes)(UInt(8 bits)).setName("cart_prg").simPublic()
     for (c <- image) prg.init(c.prg.map(U(_, 8 bits)).toSeq)
     val pa = prgSlave.cmd.address
+    /** MMC1: the CHR register whose bits 2-4 drive the PRG RAM lines and PRG A18. */
+    val mmc1Extra = (mmc1LastChr1 && control(4)) ? chrBank1 | chrBank0
     val prgBank16 = UInt(4 bits)
     prgBank16 := pa(14).asUInt.resize(4)
     if (spec.mapper == 1) switch(control(3 downto 2)) {
@@ -593,22 +601,33 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
         }
         if (banks == 1) pa(13 downto 0) else bank16.resize(log2Up(banks)) @@ pa(13 downto 0)
       } else if (banks == 1) pa(13 downto 0)
+      else if (spec.mapper == 1 && banks == 32) (mmc1Extra(4) ## prgBank16).asUInt @@ pa(13 downto 0) // SUROM, SXROM
       else if (isPow2(banks)) prgBank16.resize(log2Up(banks)) @@ pa(13 downto 0)
       else Vec((0 until 16).map(b => U(b % banks, log2Up(banks) bits)))(prgBank16) @@ pa(13 downto 0)
     prgSlave.rdata := MidCycleRead(prg, prgIndex)
-    val prgRam = Mem.fill(0x2000)(UInt(8 bits)).setName("cart_prg_ram").simPublic()
-    prgRam.init(Seq.fill(0x2000)(U(0, 8 bits)))
-    val ramData = MidCycleRead(prgRam, ramSlave.cmd.address(12 downto 0))
+    // PRG RAM, as `NesCartridge` maps it: SXROM banks its 32 KB by MMC1's CHR bits 2-3; MMC1
+    // (PRG bit 4, and CHR A16 on SNROM), MMC3 (A001) and FME-7 (register 8) disable it.
+    val prgRam = Mem.fill(spec.prgRamBytes)(UInt(8 bits)).setName("cart_prg_ram").simPublic()
+    prgRam.init(Seq.fill(spec.prgRamBytes)(U(0, 8 bits)))
+    val ramBanks = spec.prgRamBytes >> 13
+    val ra = ramSlave.cmd.address(12 downto 0)
+    val ramAddress = if (ramBanks == 1) ra else (if (spec.mapper == 1) mmc1Extra(3 downto 2) else U(0, 2 bits)).resize(log2Up(ramBanks)) @@ ra
+    val ramData = MidCycleRead(prgRam, ramAddress)
+    val snrom = spec.chrRam && spec.prgBytes <= 0x40000
+    val ramReadable = spec.mapper match {
+      case 1 => !mmc1RamOff && !(if (snrom) mmc1Extra(4) else False)
+      case 4 => mmc3.ramOn
+      case 69 => fme7.ramOn
+      case _ => True
+    }
+    val ramWritable = ramReadable && (if (spec.mapper == 4) !mmc3.ramProtect else True)
+    val openBus = host[NesOpenBusPlugin].logic.get.latch
     if (spec.mapper == 69) {
       val banks8 = spec.prgBytes >> 13
-      val romData = MidCycleRead(prg, fme7.regs(8)(5 downto 0).resize(log2Up(banks8)) @@ ramSlave.cmd.address(12 downto 0))
-      val openBus = host[NesOpenBusPlugin].logic.get.latch
-      ramSlave.rdata := fme7.ramOn ? ramData | (fme7.ramOff ? openBus | romData)
-      prgRam.write(ramSlave.cmd.address(12 downto 0), ramSlave.cmd.data, ramSlave.writeFire && fme7.ramOn)
-    } else {
-      ramSlave.rdata := ramData
-      prgRam.write(ramSlave.cmd.address(12 downto 0), ramSlave.cmd.data, ramSlave.writeFire)
-    }
+      val romData = MidCycleRead(prg, fme7.regs(8)(5 downto 0).resize(log2Up(banks8)) @@ ra)
+      ramSlave.rdata := ramReadable ? ramData | (fme7.ramOff ? openBus | romData)
+    } else ramSlave.rdata := ramReadable ? ramData | openBus
+    prgRam.write(ramAddress, ramSlave.cmd.data, ramSlave.writeFire && ramWritable)
 
     val chr = Mem.fill(spec.chrBytes)(UInt(8 bits)).setName("cart_chr").simPublic()
     if (spec.chrRam) chr.init(Seq.fill(spec.chrBytes)(U(0, 8 bits)))

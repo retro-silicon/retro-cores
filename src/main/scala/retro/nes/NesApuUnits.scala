@@ -30,7 +30,8 @@ class PulseUnit(first: Boolean) extends Area {
 
   val change = (period |>> sweepShift).resize(12)
   val target = sweepNegate ? (period.resize(12) - change - (if (first) 1 else 0)) | (period.resize(12) + change)
-  val muted = period < 8 || target > 0x7FF
+  // A negated target never mutes: below 0 (pulse 1 with shift 0) it is 0, not a 12-bit wrap.
+  val muted = period < 8 || (!sweepNegate && target > 0x7FF)
   /** The period after this cycle's sweep, which the timer reloads from and writes modify. */
   val periodSwept = UInt(11 bits)
 

@@ -23,8 +23,8 @@ package retro.nes
   * low, high), D the IRQ (bit 0 enabled, bit 7 counting; writing acknowledges), E-F the 16-bit
   * counter, which counts down every CPU cycle before the access and raises the IRQ when it wraps
   * from 0. The 5B sound chip is not modelled.
-  * Like most emulators, every cartridge gets 8 KB of PRG RAM at 6000, which test ROMs use to
-  * report results.
+  * Like most emulators, every cartridge gets at least 8 KB of PRG RAM at 6000, which test ROMs
+  * use to report results (more when an NES 2.0 header asks: SXROM's 32 KB).
   *
   * MMC1 takes a register write 5 bits at a time, bit 0 first, through a shift register at
   * 8000-FFFF; address bits 13-14 of the fifth write pick the register (control, CHR bank 0, CHR
@@ -32,7 +32,7 @@ package retro.nes
   * write in the cycle after another one is ignored (the second write of a read-modify-write
   * instruction). PRG RAM is always enabled. */
 case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mapper: Int, verticalMirroring: Boolean,
-                        mmc3Alternate: Boolean = false) {
+                        mmc3Alternate: Boolean = false, prgRamBytes: Int = 0x2000) {
   require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   def prgMask = prg.length - 1
   def chrMask = chr.length - 1
@@ -45,6 +45,12 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
   var control = 0x0C
   private var shift, shiftCount = 0
   private var lastWrite = -2L
+  /** MMC1: PRG RAM disabled (PRG register bit 4, MMC1B), and whether C000 was the CHR register
+    * written last (in 4 KB mode its bits then drive PRG A18 and the PRG RAM lines, as in Mesen). */
+  var mmc1RamOff, mmc1LastChr1 = false
+  /** MMC3: PRG RAM enabled and write-protected (A001 bits 7 and 6); enabled at power-up here. */
+  var mmc3RamOn = true
+  var mmc3RamProtect = false
   /** MMC3: bank select (8000), the eight bank registers R0-R7, mirroring (A000: 0 vertical),
     * and the scanline counter: latch (C000), reload request (C001), enable (E001; E000
     * disables and acknowledges). The counter is clocked by rises of PPU A12 after it was low for
@@ -101,6 +107,7 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
       case 0xA000 => mmc3Mirroring = value & 1
       case 0xC000 => irqLatch = value
       case 0xC001 => irqCounter = 0; irqReload = true
+      case 0xA001 => mmc3RamOn = (value & 0x80) != 0; mmc3RamProtect = (value & 0x40) != 0
       case 0xE000 => irqEnabled = false; irq = false
       case 0xE001 => irqEnabled = true
       case _ =>
@@ -115,9 +122,9 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
         if (shiftCount == 5) {
           (address >> 13 & 3) match {
             case 0 => control = shift
-            case 1 => chrBank0 = shift
-            case 2 => chrBank1 = shift
-            case 3 => prgBank = shift & 0x0F
+            case 1 => chrBank0 = shift; mmc1LastChr1 = false
+            case 2 => chrBank1 = shift; mmc1LastChr1 = true
+            case 3 => prgBank = shift & 0x0F; mmc1RamOff = (shift & 0x10) != 0
           }
           shift = 0
           shiftCount = 0
@@ -131,14 +138,30 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
     fme7Counter = (fme7Counter - 1) & 0xFFFF
     if (fme7Counter == 0xFFFF && (fme7(0xD) & 1) != 0) irq = true
   }
-  /** A CPU read of 6000-7FFF, where most boards have the 8 KB of `ram`. */
+  /** MMC1: the CHR register whose bits 2-4 drive PRG A18 and the PRG RAM lines. */
+  private def mmc1Extra = if (mmc1LastChr1 && (control & 0x10) != 0) chrBank1 else chrBank0
+  /** Whether 6000-7FFF reads and writes PRG RAM. MMC1 disables it by PRG bit 4, and on SNROM (CHR
+    * RAM, at most 256 KB of PRG) also by CHR A16; MMC3 by A001; FME-7 by register 8. */
+  private def ramReadable = mapper match {
+    case 1 => !mmc1RamOff && !(chrRam && prg.length <= 0x40000 && (mmc1Extra & 0x10) != 0)
+    case 4 => mmc3RamOn
+    case 69 => (fme7(8) & 0xC0) == 0xC0
+    case _ => true
+  }
+  private def ramWritable = ramReadable && !(mapper == 4 && mmc3RamProtect)
+  /** Index into `prgRamBytes` of PRG RAM: SXROM (MMC1 with 32 KB) banks it by CHR bits 2-3. */
+  private def ramIndex(address: Int) = {
+    val bank = if (mapper == 1) mmc1Extra >> 2 & 3 else 0
+    (bank % (prgRamBytes >> 13)) << 13 | address & 0x1FFF
+  }
+  /** A CPU read of 6000-7FFF, where most boards have PRG RAM (`ram`, `prgRamBytes` of it). */
   def lowRead(address: Int, ram: Array[Int], openBus: Int): Int =
-    if (mapper != 69 || (fme7(8) & 0xC0) == 0xC0) ram(address & 0x1FFF)
-    else if ((fme7(8) & 0x40) != 0) openBus
+    if (ramReadable) ram(ramIndex(address))
+    else if (mapper != 69 || (fme7(8) & 0x40) != 0) openBus
     else prg(((fme7(8) & 0x3F) % (prg.length >> 13)) << 13 | address & 0x1FFF)
   /** A CPU write to 6000-7FFF. */
   def lowWrite(address: Int, value: Int, ram: Array[Int]): Unit =
-    if (mapper != 69 || (fme7(8) & 0xC0) == 0xC0) ram(address & 0x1FFF) = value
+    if (ramWritable) ram(ramIndex(address)) = value
 
   /** The PPU drove `address` on its bus in PPU dot `dot` (counted from power-up). */
   def ppuBus(address: Int, dot: Long): Unit = if (mapper == 9 || mapper == 10) {
@@ -199,8 +222,10 @@ case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mappe
       case 2 => if ((address & 0x4000) == 0) 0 else prgBank
       case _ => if ((address & 0x4000) == 0) prgBank else 0x0F
     }
+    // SUROM and SXROM (512 KB): CHR bit 4 drives PRG A18.
+    val outer = if (mapper == 1 && prg.length == 0x80000) mmc1Extra & 0x10 else 0
     // Bank numbers wrap at the number of banks, which need not be a power of 2 (80 KB images).
-    (bank % (prg.length >> 14)) << 14 | address & 0x3FFF
+    ((bank | outer) % (prg.length >> 14)) << 14 | address & 0x3FFF
   }
   /** PPU address (0000-1FFF) to an index into CHR. */
   def chrIndex(address: Int): Int = {
@@ -250,8 +275,15 @@ object NesCartridge {
     val chrSize = image(5) * 0x2000
     val trainer = if ((image(6) & 4) != 0) 512 else 0
     val prg = image.slice(16 + trainer, 16 + trainer + prgSize)
-    val chr = if (chrSize == 0) Array.fill(0x2000)(0) else image.slice(16 + trainer + prgSize, 16 + trainer + prgSize + chrSize)
-    NesCartridge(prg, chr, chrSize == 0, (image(6) >> 4) | (image(7) & 0xF0), (image(6) & 1) != 0)
+    // NES 2.0 headers give the CHR RAM size (64 << n bytes); iNES ones mean 8 KB.
+    val nes2 = (image(7) & 0x0C) == 0x08
+    val chrRamSize = if (nes2 && (image(11) & 0x0F) != 0) 64 << (image(11) & 0x0F) else 0x2000
+    val chr = if (chrSize == 0) Array.fill(chrRamSize)(0) else image.slice(16 + trainer + prgSize, 16 + trainer + prgSize + chrSize)
+    // NES 2.0: PRG RAM plus PRG NVRAM (64 << n bytes each); at least the 8 KB every board gets here.
+    def shifted(n: Int) = if (n == 0) 0 else 64 << n
+    val prgRam = if (nes2) shifted(image(10) & 0x0F) + shifted(image(10) >> 4) else 0
+    NesCartridge(prg, chr, chrSize == 0, (image(6) >> 4) | (image(7) & 0xF0), (image(6) & 1) != 0,
+      prgRamBytes = prgRam max 0x2000)
   }
   def load(file: java.io.File): NesCartridge = load(java.nio.file.Files.readAllBytes(file.toPath).map(_ & 0xFF))
 }

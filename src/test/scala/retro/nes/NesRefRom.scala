@@ -39,10 +39,12 @@ object NesRoms {
     * from 6004; older ones leave the result in zero page F8 (1 = passed) and print to the
     * screen. `stableFrames` is how long F8 and the screen have been unchanged (some tests idle for 80
     * frames mid-run). */
-  def verdict(nes: NesReference, stableFrames: Int, crcs: Set[String] = Set(), nmiSync: Boolean = false): Verdict = {
+  def verdict(nes: NesReference, stableFrames: Int, crcs: Set[String] = Set(), nmiSync: Boolean = false,
+              holyMapperel: Option[HolyMapperel] = None): Verdict = {
     val r = nes.prgRam
     lazy val lastLine = screenText(nes).linesIterator.toSeq.lastOption.getOrElse("")
     if (nmiSync) { if (nes.ppu.frames >= 60) nmiSyncVerdict(nes.ppu.frame) else Running }
+    else if (holyMapperel.nonEmpty) { if (stableFrames > 120 && nes.ppu.frames >= 300) holyMapperelVerdict(nes, holyMapperel.get) else Running }
     else if (crcs.nonEmpty && stableFrames > 120 && lastLine.matches("[0-9A-F]{8}")) Done(crcs(lastLine), if (crcs(lastLine)) 0 else 1, screenText(nes))
     else if (r(1) == 0xDE && r(2) == 0xB0 && r(3) == 0x61) {
       if (r(0) >= 0x80) Running
@@ -72,6 +74,35 @@ object NesRoms {
     val (top, line, bottom) = (left(119), left(121), left(123))
     val ok = top >= 0 && line >= top && line <= bottom + (if (top == bottom) 1 else 0)
     Done(ok, if (ok) 0 else 1, s"line starts at x=$line, references at $top and $bottom")
+  }
+
+  /** What a Holy Mapperel build (pinobatch's cartridge test, built by fetch-nes-test-roms.sh) is
+    * for, from its name (M<mapper>_P<PRG>_C<CHR ROM> or CR<CHR RAM>[_S or W<PRG RAM>]). */
+  case class HolyMapperel(mapper: Int, prgBytes: Int, chrBytes: Int, chrRom: Boolean, wramBytes: Int)
+  def holyMapperel(file: File): Option[HolyMapperel] = {
+    def bytes(n: String) = if (n.endsWith("M")) n.init.toInt << 20 else n.stripSuffix("K").toInt << 10
+    val name = "M(\\d+)_P(\\d+[KM])_C(R?)(\\d+K)(?:_[SW](\\d+K))?(?:_[HV])?\\.nes".r
+    if (!file.getPath.contains("holy-mapperel")) None
+    else file.getName match {
+      case name(m, p, r, c, w) => Some(HolyMapperel(m.toInt, bytes(p), bytes(c), r.isEmpty, Option(w).map(bytes).getOrElse(0)))
+      case _ => None
+    }
+  }
+  /** Holy Mapperel only shows what it found: it passes when that is the board it was built for,
+    * with every test result 0. Its variables are in zero page 15-20. Every board here has 8 KB
+    * of PRG RAM, so one without is not checked for its absence. */
+  def holyMapperelVerdict(nes: NesReference, h: HolyMapperel): Verdict = {
+    val z = (a: Int) => nes.ram(a)
+    val found = Seq("mapper" -> z(0x15), "PRG 4K banks - 1" -> z(0x17), "CHR ROM" -> (if (z(0x18) != 0) 1 else 0),
+      "CHR 8K banks - 1" -> z(0x19), "CHR test" -> z(0x1A), "WRAM" -> (if (z(0x1C) != 0) 1 else 0),
+      "WRAM test" -> z(0x1E), "detailed PRG" -> z(0x1F), "detailed CHR" -> z(0x20))
+    val want = Map("mapper" -> h.mapper, "PRG 4K banks - 1" -> (h.prgBytes / 4096 - 1), "CHR ROM" -> (if (h.chrRom) 1 else 0),
+      "CHR 8K banks - 1" -> (h.chrBytes / 8192 - 1), "CHR test" -> 0, "WRAM" -> 1, "WRAM test" -> 0,
+      "detailed PRG" -> 0, "detailed CHR" -> 0)
+    val wrong = found.filter { case (k, v) => v != want(k) }
+    val wramSize = if (h.wramBytes > 0 && z(0x1D) != h.wramBytes / 8192 - 1) Seq(s"WRAM 8K banks - 1 ${z(0x1D)}, want ${h.wramBytes / 8192 - 1}") else Nil
+    val problems = wrong.map { case (k, v) => f"$k $v%02X, want ${want(k)}%02X" } ++ wramSize
+    Done(problems.isEmpty, if (problems.isEmpty) 0 else 1, problems.mkString("\n"))
   }
 
   /** A test asking for the reset button (status 81): blargg's tests want it pressed some time
@@ -203,6 +234,7 @@ object NesRefRom extends App {
     val nes = new NesReference(NesRoms.cartridge(file), dots, NesRoms.timing(file))
     val crcs = NesRoms.expectedCrcs(file)
     val nmiSync = NesRoms.nmiSync(file)
+    val holyMapperel = NesRoms.holyMapperel(file)
     val audio = if (sys.env.contains("WAV")) Some(new NesAudio) else None
     for (a <- audio) nes.onSample = a.add
     var verdict: NesRoms.Verdict = NesRoms.Running
@@ -217,7 +249,7 @@ object NesRefRom extends App {
       stable = if (f8 == lastF8) stable + 1 else 0
       lastF8 = f8
       button.frame(nes)
-      verdict = NesRoms.verdict(nes, stable, crcs, nmiSync)
+      verdict = NesRoms.verdict(nes, stable, crcs, nmiSync, holyMapperel)
     }
     total += 1
     val text = verdict match {

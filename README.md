@@ -104,11 +104,11 @@ console's output filters, and checks that the residual is no louder than in the 
 recordings in the nes-test-roms collection: square 0.8% (hardware 1.2%), triangle 1.5% (1.9%),
 noise 11.6% (10.8%), DMC 0.8% (2.8%).
 
-The model passes 153 of the 156 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
+The model passes 182 of the 185 ROMs in `fetch-nes-test-roms.sh` (ppu_vbl_nmi, vbl_nmi_timing,
 sprite_hit, sprite_overflow, cpu_interrupts_v2, instr_test, instr_timing, nes_cpu_test5,
 cpu_dummy_writes, cpu_exec_space, oam_stress, ppu_open_bus, sprdma_and_dmc_dma, apu_test,
 blargg_apu_2005.07.30, apu_mixer, apu_reset, cpu_reset, dmc_dma_during_read4, read_joy3,
-the MMC3 tests, pal_apu_tests, nmi_sync and others; print-only tests are judged by the CRCs their source
+the MMC3 tests, pal_apu_tests, nmi_sync, Holy Mapperel and others; print-only tests are judged by the CRCs their source
 lists). The rest of the nes-test-roms collection is demos, visual or interactive tests, or
 needs other mappers; instr_test-v3 and nes_instr_test are older versions of instr_test-v5.
 Left: LXA in instr_test 03-immediate, the all_instrs ROM that stops there and nes_cpu_test5's
@@ -126,12 +126,19 @@ MMC6): the IRQ fires only when the counter got to 0 by decrementing or by a relo
 C001 write. iNES headers don't say which chip a board has, so the test runner picks it from the
 ROM's name. All 18 ROMs of blargg's mmc3_test, mmc3_test_2 and mmc3_irq_tests pass, on the
 model and the RTL.
-The discrete boards (mappers 2, 7, 11, 34, 66, 180; no bus conflicts) have no self-checking
-test ROMs here yet: the 240p Test Suite (UxROM and BNROM builds, GPL) boots to its menu on the
-model and matches it on the RTL, checked by hand. MMC2 and MMC4 (9, 10) switch CHR banks by
-latches the PPU's fetches of tiles FD and FE set, changing at the next PPU bus address as in
-Mesen; FME-7 (69) has 1 KB CHR banks, ROM, RAM or open bus at 6000, and a 16-bit CPU-cycle IRQ
-counter (no 5B sound). They are written from nesdev's descriptions, without a hardware test:
+The discrete boards (mappers 2, 7, 11, 34, 66, 180; no bus conflicts), MMC2 and MMC4 (9, 10),
+which switch CHR banks by latches the PPU's fetches of tiles FD and FE set (changing at the
+next PPU bus address, as in Mesen), and FME-7 (69: 1 KB CHR banks, ROM, RAM or open bus at
+6000, a 16-bit CPU-cycle IRQ counter, no 5B sound) are written from nesdev's descriptions.
+Holy Mapperel (Damian Yerrick's cartridge test, zlib; `fetch-nes-test-roms.sh` builds it from
+source) checks them with every other mapper here: it detects the board by its mirroring, sizes
+its PRG ROM, CHR and PRG RAM by bank tags, and tests every bank window, PRG RAM protection and
+the IRQ, then shows what it found. The runners pass a build when that is the board its name
+says, with every result 0: all 29 builds for our mappers pass, on the model and the RTL. That
+took PRG RAM protection (MMC1's PRG bit 4 and SNROM's CHR A16, MMC3's A001 enable and write
+protect; 6000 reads open bus when disabled), SUROM and SXROM (512 KB MMC1, CHR bit 4 driving
+PRG A18, SXROM's 32 KB of PRG RAM banked by CHR bits 2-3), and the CHR and PRG RAM sizes of NES
+2.0 headers. Left out: the NROM build with 32 KB of CHR RAM, which NROM cannot bank.
 `make-nes-mapper-tests.sh` builds three exercise ROMs of ours (src/test/asm) that switch banks
 mid-frame and, for FME-7, take IRQs at any instruction; they report "done" after 120 frames,
 so they pass when the RTL matches the model. Moving the FME-7 IRQ by one cycle in the model
@@ -442,4 +449,4 @@ NES: the 2A03 CPU (SingleStepTests nes6502, nestest), a whole-system reference m
 the RTL NES (PPU, APU with sound, DMA unit, NROM/MMC1/CNROM/MMC3/MMC2/MMC4/FME-7 and six
 discrete boards) cosimulated against it on those ROMs, audio included.
 
-Next: MBC2, MBC3 and STOP on the Game Boy; on the NES, a hardware mapper test (Holy Mapperel), MMC5, the FME-7's sound.
+Next: MBC2, MBC3 and STOP on the Game Boy; on the NES, MMC5, the FME-7's sound.

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Downloads freely distributed NES test ROMs into ./roms (gitignored):
 # - roms/nes: nestest by Kevin Horton, with the Nintendulator log the RTL is compared against;
-# - roms/nes-test-roms: blargg's CPU, PPU, APU and MMC3 tests from the christopherpow/nes-test-roms collection.
+# - roms/nes-test-roms: blargg's CPU, PPU, APU and MMC3 tests from the christopherpow/nes-test-roms collection,
+#   and Holy Mapperel's builds for our mappers.
 # `sbt "testOnly retro.r2a03.R2A03NestestSim"` and `sbt "Test/runMain retro.nes.NesRefRom"` use them.
 set -eu
 cd "$(dirname "$0")/.."
@@ -24,4 +25,15 @@ done
 rm roms/nes-test-roms/read_joy3/count_errors.nes roms/nes-test-roms/read_joy3/count_errors_fast.nes \
    roms/nes-test-roms/read_joy3/test_buttons.nes
 rm -rf roms/.nes-test-roms
+# Holy Mapperel (Damian Yerrick, zlib): a cartridge test that shows the board it detects; built
+# from source (needs cc65, Python 3 with Pillow, make). Leaves out the NROM build with 32 KB of
+# CHR RAM, which NROM cannot bank, and the mappers we don't have (28, 78, 118).
+git clone -q https://github.com/pinobatch/holy-mapperel.git roms/.holy-mapperel
+git -C roms/.holy-mapperel checkout -q 4e48b59
+make -s -C roms/.holy-mapperel holy-mapperel.nes > /dev/null
+mkdir -p roms/nes-test-roms/holy-mapperel
+for f in roms/.holy-mapperel/testroms/M*.nes; do
+  case "$(basename "$f")" in M0_P32K_CR32K_V.nes|M28_*|M78.3_*|M118_*) ;; *) cp "$f" roms/nes-test-roms/holy-mapperel/ ;; esac
+done
+rm -rf roms/.holy-mapperel
 find roms/nes-test-roms -name '*.nes' | wc -l

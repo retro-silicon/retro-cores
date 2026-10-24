@@ -19,7 +19,7 @@ import retro.r2a03.{R2A03Bus, R2A03Reference}
   * read takes a get cycle from the OAM copy, its halt and dummy cycles overlapping the copy. */
 class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: NesTiming = NesTiming.ntsc) {
   val ram = Array.fill(0x800)(0)
-  val prgRam = Array.fill(0x2000)(0)
+  val prgRam = Array.fill(cart.prgRamBytes)(0)
   val ppu = new NesPpuReference(cart, timing)
   var openBus = 0
   /** CPU cycles since power-on. */
