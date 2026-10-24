@@ -8,10 +8,9 @@ console. The SM83 in `src/main/scala/retro/sm83/Sm83.scala` and the Game Boy in
 
 | Service | Plugin | What you get from it |
 |---|---|---|
-| `BusService` | `BusPlugin` | `newMaster(priority)` and `newSlave(mapping, priority)`: ports onto the bus |
+| `BusService` | `BusPlugin` | `newMaster(priority)` and `newSlave(mapping, priority, direct)`: ports onto the bus; `directRead(address)` reads memories past the bus (a slave's `direct` port), for a DMA that runs alongside the CPU |
 | `RegFileService` | `RegFilePlugin(spec)` | `read`, `flag`, `newWrite` on `Register`/`Pair`/`Flag` objects; `setReset` |
 | `IrqService` | a console's interrupt controller (`retro.gb.GbInterruptsPlugin`) | `request(line)`: a `Bool` to pulse |
-| `DirectRead` | memories (`RamPlugin`, `retro.gb.GbCartridgePlugin`) | a read port that bypasses the bus, for a DMA that runs alongside the CPU (`host.list[DirectRead]`) |
 | `SequencerService` | `SequencerPlugin` | `addOp`, `addSource`, `addSink`, `addCond`, `addKey`/`ctrl`, `addFetchOverride`, `fetchFire` |
 | (whitebox) | `TracePlugin` | `simPublic` taps read by `retro.sim.Probe` |
 

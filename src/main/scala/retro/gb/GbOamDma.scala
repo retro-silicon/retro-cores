@@ -8,11 +8,11 @@ import spinal.lib.bus.misc._
 import spinal.lib.misc.plugin._
 
 /** OAM (FE00-FE9F) and its DMA (FF46). Writing FF46 copies 160 bytes from `value << 8` into OAM,
-  * one per M-cycle, alongside the CPU: the DMA reads its source through `DirectRead` ports,
+  * one per M-cycle, alongside the CPU: the DMA reads its source through `BusService.directRead`,
   * not over the CPU's bus. Following Mooneye's oam_dma tests, the write happens in M-cycle 0,
   * nothing changes in M-cycle 1 (a DMA already running keeps running), and the copy runs in
   * M-cycles 2 to 161; while it runs the CPU reads FF from OAM and its OAM writes are lost.
-  * Sources E000-FFFF read WRAM at C000-DFFF. Addresses no `DirectRead` claims read FF.
+  * Sources E000-FFFF read WRAM at C000-DFFF. Addresses no direct port claims read FF.
   *
   * The PPU loads `readLock` and `writeLock`, which block the CPU's OAM accesses in the modes the
   * PPU uses OAM.
@@ -51,7 +51,6 @@ class GbOamDmaPlugin extends FiberPlugin {
     val dmaSlave = bus.newSlave(SingleMapping(Gb.DMA))
     val intercept = bus.newIntercept()
     retainer.release()
-    val sources = host.list[DirectRead]
 
     // Registers rather than a RAM: the OAM bug rewrites up to three rows in one M-cycle.
     val oam = Vec.fill(Gb.oamBytes)(Reg(UInt(8 bits)).init(0))
@@ -76,9 +75,7 @@ class GbOamDmaPlugin extends FiberPlugin {
     val address = UInt(16 bits)
     address := from @@ at
     when(from >= 0xE0) { address(13) := False }
-    val hits = sources.map(s => s.directMappings.map(_.hit(address)).reduce(_ || _))
-    val data = U(0xFF, 8 bits)
-    for ((s, hit) <- sources.zip(hits).reverse) when(hit) { data := s.directRead(address) }
+    val data = bus.directRead(address)
 
     new RetroBusSlaveFactory(dmaSlave).readAndWrite(register, Gb.DMA)
     val oamIndex = oamSlave.cmd.address(7 downto 0)

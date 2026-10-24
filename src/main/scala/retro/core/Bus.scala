@@ -40,8 +40,10 @@ class BusMaster(c: RetroBusConfig, val priority: Int) extends Area {
 /** A responder on the bus: RAM, a peripheral's registers, open bus. `cmd.valid` is high in every
   * cycle where the granted master's access decodes to this slave; the slave answers `rdata`
   * combinationally in the same cycle and may raise `stall` to stretch it. A write takes effect
-  * on `fire`, the cycle it is not stalled. */
-class BusSlave(c: RetroBusConfig, val mapping: AddressMapping, val priority: Int) extends Area {
+  * on `fire`, the cycle it is not stalled. `direct`: a memory's read port that bypasses the bus
+  * (`BusService.directRead`). */
+class BusSlave(c: RetroBusConfig, val mapping: AddressMapping, val priority: Int,
+               val direct: Option[UInt => UInt]) extends Area {
   val cmd = Flow(BusCmd(c))
   val rdata = UInt(c.dataWidth bits)
   val stall = Bool()
@@ -60,7 +62,11 @@ trait BusService {
   def newMaster(priority: Int): BusMaster
   /** A slave answering the addresses `mapping` hits. Where mappings overlap, the highest
     * priority wins, so a catch-all (open bus) is a low-priority slave over a wide range. */
-  def newSlave(mapping: AddressMapping, priority: Int = 0): BusSlave
+  def newSlave(mapping: AddressMapping, priority: Int = 0, direct: Option[UInt => UInt] = None): BusSlave
+  /** A read at `address` through the slaves' `direct` ports, past the bus, for a DMA with its own
+    * path to memory (Game Boy OAM DMA runs alongside the CPU). Decoded like the bus; addresses
+    * no direct port claims read `openBus`. Call it from a build phase. */
+  def directRead(address: UInt): UInt
   /** Lets a block take over accesses (Game Boy OAM DMA bus conflicts): see `BusIntercept`. */
   def newIntercept(): BusIntercept
   /** The access on the bus this cycle, the granted master's, for blocks that watch it (DMA bus
@@ -96,12 +102,18 @@ class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(),
     masters += m
     m
   }
-  def newSlave(mapping: AddressMapping, priority: Int = 0): BusSlave = {
-    val s = new BusSlave(busConfig, mapping, priority)
+  def newSlave(mapping: AddressMapping, priority: Int = 0, direct: Option[UInt => UInt] = None): BusSlave = {
+    val s = new BusSlave(busConfig, mapping, priority, direct)
     slaves += s
     s
   }
   def access = logic.cmd
+  def directRead(address: UInt): UInt = {
+    busLock.await()
+    val data = U(openBus, busConfig.dataWidth bits)
+    for (s <- slaves.filter(_.direct.nonEmpty).sortBy(-_.priority).reverse) when(s.mapping.hit(address)) { data := s.direct.get(address) }
+    data
+  }
   def completed = logic.completed
   private val intercepts = ArrayBuffer[BusIntercept]()
   def newIntercept(): BusIntercept = {

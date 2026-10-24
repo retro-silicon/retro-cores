@@ -40,37 +40,28 @@ abstract class PeripheralPlugin(mapping: AddressMapping, irqs: IrqLine*) extends
   }
 }
 
-/** A memory that another on-chip block can read without going through the bus, the way a DMA
-  * engine with its own path to memory does (Game Boy OAM DMA runs alongside the CPU). */
-trait DirectRead {
-  /** The bus addresses `directRead` answers. */
-  def directMappings: Seq[AddressMapping]
-  /** A combinational read port at a bus address. Call it from a build phase. */
-  def directRead(address: UInt): UInt
-}
-
 /** On-chip RAM as a bus slave. It decodes only the low `log2Up(size)` address bits, so `mapping`
   * must be aligned to that and may cover mirrors (Game Boy echo RAM). Reads are combinational,
   * as the M-cycle bus expects; contents start at zero.
   *
   * @param ramName  names the memory signal (`ram_<ramName>`)
   * @param lockable another plugin (the Game Boy PPU) loads `readLock` and `writeLock`: while
-  *                 they are high the bus reads FF and writes are lost. `directRead` ports are
-  *                 not affected.
+  *                 they are high the bus reads FF and writes are lost. `directRead` is not
+  *                 affected.
   * @param midCycleRead read the bus port on the falling edge (`MidCycleRead`), so FPGA block RAM
   *                 holds it; `directRead` ports stay combinational. */
 class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0,
                 val lockable: Boolean = false, val midCycleRead: Boolean = false,
-                val init: Int => Int = _ => 0) extends FiberPlugin with DirectRead {
+                val init: Int => Int = _ => 0) extends FiberPlugin {
   val readLock, writeLock = Handle[Bool]()
-  def directMappings = Seq(mapping)
+  /** A combinational read port past the bus (the Game Boy PPU's VRAM reads, OAM DMA). */
   def directRead(address: UInt): UInt = logic.mem.readAsync(address(logic.width - 1 downto 0))
 
   val logic = during setup new Area {
     val bus = host[BusService]
     val retainer = retains(bus.busLock)
     awaitBuild()
-    val slave = bus.newSlave(mapping, priority)
+    val slave = bus.newSlave(mapping, priority, Some(directRead))
     retainer.release()
 
     val width = log2Up(size)

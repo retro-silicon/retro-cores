@@ -370,7 +370,7 @@ What makes that work:
 | Game Boy plugin | Addresses | What it does |
 |---|---|---|
 | `RamPlugin` ×3 | 8000, C000 (+echo), FF80 | VRAM, WRAM, HRAM |
-| `GbOamDmaPlugin` | FE00, FF46 | OAM and its DMA, which runs alongside the CPU and reads its source through `DirectRead` ports |
+| `GbOamDmaPlugin` | FE00, FF46 | OAM and its DMA, which runs alongside the CPU and reads its source through `BusService.directRead` |
 | `GbInterruptsPlugin` | FF0F, FFFF | IF, IE, `IrqService`, `Sm83.InterruptController` |
 | `GbTimerPlugin` | FF04-FF07 | DIV/TIMA/TMA/TAC from a 16-bit counter: falling-edge ticks (DIV and TAC write glitches) and the delayed TMA reload |
 | `GbSerialPlugin` | FF01-FF02 | internally clocked transfers, shifting on the 8192 Hz edges of the timer's counter; `serial_tx` pin with each byte sent |

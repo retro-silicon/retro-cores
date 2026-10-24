@@ -51,21 +51,17 @@ object GbCartSpec {
   *
   * MBC5: RAMG (0000-1FFF, 0x0A enables RAM), ROMB (2000-2FFF low 8 bits, 3000-3FFF bit 8; bank 0
   * is allowed at 4000-7FFF), RAMB (4000-5FFF, 4 bits). 0000-3FFF is always bank 0. */
-class GbCartridgePlugin(val spec: GbCartSpec) extends FiberPlugin with DirectRead {
-  def directMappings = Seq(SizeMapping(0x0000, 0x8000), SizeMapping(0xA000, 0x2000))
-  def directRead(address: UInt): UInt = {
-    val l = logic.get
-    val rom = l.rom.readAsync(l.romIndex(address))
-    if (spec.ramBytes == 0) address(15) ? U(0xFF, 8 bits) | rom
-    else address(15) ? l.ram.read(address) | rom
-  }
+class GbCartridgePlugin(val spec: GbCartSpec) extends FiberPlugin {
+  // The OAM DMA's reads, past the bus.
+  private def romRead(address: UInt): UInt = logic.rom.readAsync(logic.romIndex(address))
+  private def ramRead(address: UInt): UInt = if (spec.ramBytes == 0) U(0xFF, 8 bits) else logic.ram.read(address)
 
   val logic = during setup new Area {
     val bus = host[BusService]
     val retainer = retains(bus.busLock)
     awaitBuild()
-    val romSlave = bus.newSlave(SizeMapping(0x0000, 0x8000))
-    val ramSlave = bus.newSlave(SizeMapping(0xA000, 0x2000))
+    val romSlave = bus.newSlave(SizeMapping(0x0000, 0x8000), direct = Some(romRead))
+    val ramSlave = bus.newSlave(SizeMapping(0xA000, 0x2000), direct = Some(ramRead))
     retainer.release()
 
     val romWidth = log2Up(spec.romBytes)
