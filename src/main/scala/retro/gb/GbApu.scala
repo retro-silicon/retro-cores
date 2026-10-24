@@ -193,10 +193,12 @@ class GbApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping
     }
     def update(i: Int, value: UInt): Unit = If(dacOn(i)) { samples(i) := value }
     def mix(): Seq[SInt] = {
-      def side(volume: UInt, route: Int => Bool) = (0 until 4).map { i =>
-        val a = S(15, 6 bits) - (samples(i).v << 1).resize(6).asSInt
-        (dacOn(i) && route(i)) ? (a * (volume.resize(5) + 1).asSInt).resize(10) | S(0, 10 bits)
-      }.reduce(_ + _)
+      def side(volume: UInt, route: Int => Bool) = (0 until 4)
+        .map { i =>
+          val a = S(15, 6 bits) - (samples(i).v << 1).resize(6).asSInt
+          (dacOn(i) && route(i)) ? (a * (volume.resize(5) + 1).asSInt).resize(10) | S(0, 10 bits)
+        }
+        .reduce(_ + _)
       val nr50 = regs(0x14).v
       val nr51 = regs(0x15).v
       Seq(side(nr50(6 downto 4), i => nr51(4 + i)), side(nr50(2 downto 0), i => nr51(i)))

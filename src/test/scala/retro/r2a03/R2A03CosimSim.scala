@@ -21,7 +21,8 @@ class R2A03CosimSim extends AnyFunSuite {
     var checked = 0
     var resetDone = false
     val seen = collection.mutable.Map[Int, Int]().withDefaultValue(0)
-    override def onRetire(e: RetireEvent) = try check(e) catch { case t: Throwable => failure = Some(t) }
+    override def onRetire(e: RetireEvent) = try check(e)
+    catch { case t: Throwable => failure = Some(t) }
     var failure: Option[Throwable] = None
     var jammed = false
     def check(e: RetireEvent) = {

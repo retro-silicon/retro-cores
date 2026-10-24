@@ -75,8 +75,7 @@ case class PpuDot() extends Bundle {
   * does, so three more copies look ahead, without VRAM. A CPU write to a PPU register lands
   * between the dots (`GbPpuReference.writeDot`). The timing, and what it leaves out, is described
   * at `GbPpuReference`, the model the system cosim checks this against dot for dot. */
-class GbPpuPlugin(postBoot: Boolean = false)
-    extends PeripheralPlugin(SizeMapping(Gb.LCDC, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
+class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMapping(Gb.LCDC, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
   val pins = during setup new Area { val lcd = out(LcdPixels()).setName("lcd") }
   def lcd = pins.lcd
   /** LCDC, for a sim to tell whether the LCD is on. */

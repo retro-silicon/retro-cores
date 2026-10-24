@@ -50,8 +50,8 @@ object Gb {
     * internal counter is the value that makes DIV read 0xAB there. */
   object PostBoot {
     import Sm83Regs._
-    val regs: Seq[(Register, BigInt)] = Seq(A -> 0x01, F -> 0xB0, B -> 0x00, C -> 0x13, D -> 0x00, E -> 0xD8,
-      H -> 0x01, L -> 0x4D, SPH -> 0xFF, SPL -> 0xFE, PC -> 0x0100)
+    val regs: Seq[(Register, BigInt)] =
+      Seq(A -> 0x01, F -> 0xB0, B -> 0x00, C -> 0x13, D -> 0x00, E -> 0xD8, H -> 0x01, L -> 0x4D, SPH -> 0xFF, SPL -> 0xFE, PC -> 0x0100)
     val counter = 0xABC8
     val lcdc = 0x91
     /** Where the PPU is: M-cycle 98 of line 153. */
@@ -346,25 +346,24 @@ class GbHramPlugin extends RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F)
   * (cartridge ROM 0000-7FFF and cartridge RAM A000-BFFF) is the external bus, unless a
   * `cartridge` is given, in which case a `GbCartridgePlugin` answers there. */
 object GameBoy {
-  def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[GbCartSpec] = None,
-              romDecoder: Boolean = false): Seq[Hostable] = Sm83.plugins(withTrace, romDecoder) ++ Seq(
-    new GbVramPlugin,
-    new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000, init = Gb.wramInit), // E000-FDFF echoes C000-DDFF
-    new GbOamDmaPlugin,
-    new GbHramPlugin,
-    new OpenBusPlugin(SizeMapping(0xFEA0, 0x60), value = 0x00),
-    new OpenBusPlugin(SizeMapping(0xFF00, 0x100)),
-    new GbInterruptsPlugin(if (postBoot) Gb.PostBoot.iflag else 0),
-    new GbTimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
-    new GbSerialPlugin,
-    new GbApuPlugin(postBoot),
-    new GbPpuPlugin(postBoot),
-    new GbJoypadPlugin
-  ) ++ (if (postBoot) Seq(new GbPostBootPlugin) else Nil) ++ cartridge.map(new GbCartridgePlugin(_))
+  def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[GbCartSpec] = None, romDecoder: Boolean = false): Seq[Hostable] =
+    Sm83.plugins(withTrace, romDecoder) ++ Seq(
+      new GbVramPlugin,
+      new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000, init = Gb.wramInit), // E000-FDFF echoes C000-DDFF
+      new GbOamDmaPlugin,
+      new GbHramPlugin,
+      new OpenBusPlugin(SizeMapping(0xFEA0, 0x60), value = 0x00),
+      new OpenBusPlugin(SizeMapping(0xFF00, 0x100)),
+      new GbInterruptsPlugin(if (postBoot) Gb.PostBoot.iflag else 0),
+      new GbTimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
+      new GbSerialPlugin,
+      new GbApuPlugin(postBoot),
+      new GbPpuPlugin(postBoot),
+      new GbJoypadPlugin
+    ) ++ (if (postBoot) Seq(new GbPostBootPlugin) else Nil) ++ cartridge.map(new GbCartridgePlugin(_))
 
   /** `romDecoder`: see `SequencerPlugin` (faster in Verilator). */
-  def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[GbCartSpec] = None,
-            romDecoder: Boolean = false): RetroCore =
+  def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[GbCartSpec] = None, romDecoder: Boolean = false): RetroCore =
     RetroCore(plugins(withTrace, postBoot, cartridge, romDecoder)).setDefinitionName("GameBoy")
 }
 

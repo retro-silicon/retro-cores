@@ -50,8 +50,15 @@ object GbSuites {
   private def files(dir: String, ext: String*): Seq[File] = {
     val d = new File(root, dir)
     if (!d.isDirectory) Nil
-    else Files.walk(d.toPath).iterator().asScala.map(_.toFile)
-      .filter(f => f.isFile && ext.exists(f.getName.endsWith)).toSeq.sortBy(_.getPath)
+    else
+      Files
+        .walk(d.toPath)
+        .iterator()
+        .asScala
+        .map(_.toFile)
+        .filter(f => f.isFile && ext.exists(f.getName.endsWith))
+        .toSeq
+        .sortBy(_.getPath)
   }
   private def base(f: File) = f.getName.take(f.getName.lastIndexOf('.'))
   private def sibling(f: File, name: String) = Some(new File(f.getParentFile, name)).filter(_.isFile)
@@ -102,13 +109,39 @@ object GbSuites {
 
   /** GBMicrotest ROMs whose sources (aappleby/GBMicrotest) never write a verdict to FF82: scratch
     * programs and experiments rather than tests, which no Game Boy passes. */
-  val microNoVerdict = Set("000-oam_lock", "000-write_to_x8000", "001-vram_unlocked", "002-vram_locked",
-    "004-tima_boot_phase", "004-tima_cycle_timer", "007-lcd_on_stat", "400-dma", "500-scx-timing",
-    "800-ppu-latch-scx", "801-ppu-latch-scy", "802-ppu-latch-tileselect", "803-ppu-latch-bgdisplay",
-    "audio_testbench", "cpu_bus_1", "dma_basic", "flood_vram", "lcdon_write_timing", "ly_while_lcd_off",
-    "minimal", "mode2_stat_int_to_oam_unlock", "oam_sprite_trashing", "poweron", "ppu_scx_vs_bgp",
-    "ppu_sprite_testbench", "ppu_spritex_vs_scx", "ppu_win_vs_wx", "ppu_wx_early", "temp", "toggle_lcdc",
-    "wave_write_to_0xC003")
+  val microNoVerdict = Set(
+    "000-oam_lock",
+    "000-write_to_x8000",
+    "001-vram_unlocked",
+    "002-vram_locked",
+    "004-tima_boot_phase",
+    "004-tima_cycle_timer",
+    "007-lcd_on_stat",
+    "400-dma",
+    "500-scx-timing",
+    "800-ppu-latch-scx",
+    "801-ppu-latch-scy",
+    "802-ppu-latch-tileselect",
+    "803-ppu-latch-bgdisplay",
+    "audio_testbench",
+    "cpu_bus_1",
+    "dma_basic",
+    "flood_vram",
+    "lcdon_write_timing",
+    "ly_while_lcd_off",
+    "minimal",
+    "mode2_stat_int_to_oam_unlock",
+    "oam_sprite_trashing",
+    "poweron",
+    "ppu_scx_vs_bgp",
+    "ppu_sprite_testbench",
+    "ppu_spritex_vs_scx",
+    "ppu_win_vs_wx",
+    "ppu_wx_early",
+    "temp",
+    "toggle_lcdc",
+    "wave_write_to_0xC003"
+  )
 
   def micro = files("gbmicrotest", ".gb").map { f =>
     val skip = if (microNoVerdict(base(f))) Some("not a test: writes no verdict") else None
@@ -134,21 +167,22 @@ object GbSuites {
   def same = files("same-suite", ".gb").map { f =>
     val n = name(f)
     // Of the APU tests only the two not using the CGB's PCM registers pass on a DMG.
-    val skip = if (n.contains("/apu/")) { if (base(f).startsWith("div_write_trigger") && !base(f).contains("volume")) None else Some("CGB PCM registers") }
-      else if (!n.contains("/interrupt/")) Some("CGB or SGB test") else None
+    val skip =
+      if (n.contains("/apu/")) { if (base(f).startsWith("div_write_trigger") && !base(f).contains("volume")) None else Some("CGB PCM registers") }
+      else if (!n.contains("/interrupt/")) Some("CGB or SGB test")
+      else None
     Rom("samesuite", n, f, Fibonacci(LdBB), 600 * frameCycles, skip)
   }
 
   def screenshots: Seq[Rom] = {
     def shot(suite: String, f: File, png: Option[File], frames: Int, skip: Option[String] = None) =
-      Rom(suite, name(f), f, Screenshot(png.toSeq, None), frames.toLong * frameCycles,
-        skip.orElse(if (png.isEmpty) Some("no DMG reference") else None))
+      Rom(suite, name(f), f, Screenshot(png.toSeq, None), frames.toLong * frameCycles, skip.orElse(if (png.isEmpty) Some("no DMG reference") else None))
     def png(f: File, suffixes: String*) = suffixes.flatMap(s => sibling(f, base(f).replace('-', '_') + s) orElse sibling(f, base(f) + s)).headOption
     files("scribbltests", ".gb").map(f => shot("scribbltests", f, png(f, "-dmg.png", "-cgb-dmg.png"), if (base(f) == "statcount-auto") 300 else 30)) ++
       files("bully", ".gb").map(f => shot("bully", f, sibling(f, "bully.png"), 60)) ++
       files("strikethrough", ".gb").map(f => shot("strikethrough", f, sibling(f, "strikethrough-dmg.png"), 60)) ++
-      files("little-things-gb", ".gb").map(f => shot("little-things-gb", f, png(f, "-dmg-cgb.png", "-dmg.png"), 60,
-        if (base(f) == "tellinglys") Some("needs button presses") else None)) ++
+      files("little-things-gb", ".gb").map(f =>
+        shot("little-things-gb", f, png(f, "-dmg-cgb.png", "-dmg.png"), 60, if (base(f) == "tellinglys") Some("needs button presses") else None)) ++
       files("turtle-tests", ".gb").map(f => shot("turtle-tests", f, png(f, ".png"), 60)) ++
       files("mbc3-tester", ".gb").map(f => shot("mbc3-tester", f, png(f, "-dmg.png"), 60, Some("MBC3 not modelled"))) ++
       files("rtc3test", ".gb").map(f => shot("rtc3test", f, None, 60, Some("MBC3 RTC not modelled; needs button presses")))
@@ -186,12 +220,15 @@ object GbSuites {
     "..........#####..#.....#.#.......#.......#.......#.....#..#####.",
     ".........######..#.....#.#.....#.#.....#.#.....#.#.....#.######.",
     ".........#######.#.......#.......#######.#.......#.......#######",
-    ".........#######.#.......#.......#######.#.......#.......#......")
+    ".........#######.#.......#.......#######.#.......#.......#......"
+  )
 
   /** The hex digits shown at the top left, `?` where none matches. */
   def hexSeen(frame: Array[Int], n: Int): String = (0 until n).map { i =>
-    (0 until 16).find(h => (0 until 64).forall(p => frame((p / 8) * 160 + i * 8 + p % 8) == (if (hexTiles(h)(p) == '#') 3 else 0)))
-      .map(h => Character.toUpperCase(Character.forDigit(h, 16))).getOrElse('?')
+    (0 until 16)
+      .find(h => (0 until 64).forall(p => frame((p / 8) * 160 + i * 8 + p % 8) == (if (hexTiles(h)(p) == '#') 3 else 0)))
+      .map(h => Character.toUpperCase(Character.forDigit(h, 16)))
+      .getOrElse('?')
   }.mkString
 
   def hexMatches(frame: Array[Int], digits: String): Boolean = digits.zipWithIndex.forall { case (c, i) =>
@@ -208,7 +245,7 @@ object GbSuites {
   def judge(rom: Rom, v: View, opcode: Boolean, frameEnd: Boolean, end: Boolean, cycles: Long): Option[Outcome] = rom.check match {
     case Fibonacci(_) if opcode =>
       Some(if (v.fib == Seq(3, 5, 8, 13, 21, 34)) Outcome(true, "Fibonacci", cycles)
-      else Outcome(false, "registers " + v.fib.map(r => f"$r%02X").mkString(" ") + f" at PC ${v.pc}%04X", cycles))
+        else Outcome(false, "registers " + v.fib.map(r => f"$r%02X").mkString(" ") + f" at PC ${v.pc}%04X", cycles))
     case Screenshot(pngs, Some(_)) if opcode =>
       val d = screenshotMatch(v.frame, pngs)
       Some(Outcome(d == 0, if (d == 0) "screenshot" else s"$d pixels differ", cycles))
@@ -288,9 +325,15 @@ object GbSuites {
   }
 
   private val compiled = mutable.Map[GbCartSpec, SimCompiled[RetroCore]]()
-  def compile(spec: GbCartSpec) = synchronized { compiled.getOrElseUpdate(spec,
-    FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz))).workspacePath(sys.env.getOrElse("SIM_WORKSPACE", "simWorkspace")).workspaceName(f"GameBoyRom_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
-      .compile(GameBoy(withTrace = false, cartridge = Some(spec), romDecoder = true))) }
+  def compile(spec: GbCartSpec) = synchronized {
+    compiled.getOrElseUpdate(
+      spec,
+      FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz)))
+        .workspacePath(sys.env.getOrElse("SIM_WORKSPACE", "simWorkspace"))
+        .workspaceName(f"GameBoyRom_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
+        .compile(GameBoy(withTrace = false, cartridge = Some(spec), romDecoder = true))
+    )
+  }
 
   /** On the `GameBoy` RTL with a `GbCartridgePlugin`; frames come from its `lcd` pixel port. */
   def runRtl(rom: Rom): Outcome = {
@@ -384,8 +427,9 @@ object GbSuiteReport extends App {
     val (status, detail) = rom.skip match {
       case Some(why) => ("SKIP", why)
       case None =>
-        val o = try { if (engine == "model") GbSuites.runModel(rom) else GbSuites.runRtl(rom) }
-        catch { case e: Throwable => GbSuites.Outcome(false, s"error: ${e.getMessage}", 0) }
+        val o =
+          try { if (engine == "model") GbSuites.runModel(rom) else GbSuites.runRtl(rom) }
+          catch { case e: Throwable => GbSuites.Outcome(false, s"error: ${e.getMessage}", 0) }
         if (!o.passed && o.frame != null) GbFrame.save(o.frame, new File(s"out/frames-$engine/${rom.name}.png"))
         (if (o.passed) "PASS" else "FAIL", f"${o.detail} (${o.mcycles / 1e6}%.2fM)")
     }
@@ -405,15 +449,19 @@ object GbSuiteReport extends App {
   * ROMs whose name contains one of them instead. Skipped ROMs are registered as ignored, with the
   * reason in the name. */
 class GbSuitesSim extends AnyFunSuite {
-  val filters = sys.env.get("GB_ROMS").map(_.split(',').toSeq).getOrElse(Seq("blargg/cpu_instrs/individual",
-    "blargg/instr_timing", "blargg/mem_timing", "blargg/halt_bug", "blargg/oam_bug", "mooneye-test-suite/", "dmg-acid2"))
+  val filters = sys.env
+    .get("GB_ROMS")
+    .map(_.split(',').toSeq)
+    .getOrElse(Seq("blargg/cpu_instrs/individual", "blargg/instr_timing", "blargg/mem_timing", "blargg/halt_bug", "blargg/oam_bug", "mooneye-test-suite/",
+        "dmg-acid2"))
   val roms = GbSuites.roms.filter(r => filters.exists(r.name.contains))
   for (rom <- roms) rom.skip match {
     case Some(why) => ignore(s"${rom.name} ($why)") {}
-    case None => test(rom.name) {
-      val o = GbSuites.runRtl(rom)
-      assert(o.passed, o.detail)
-    }
+    case None =>
+      test(rom.name) {
+        val o = GbSuites.runRtl(rom)
+        assert(o.passed, o.detail)
+      }
   }
   if (roms.isEmpty) test("test ROMs") { cancel(s"no ROMs under ${GbSuites.root}: run scripts/fetch-test-roms.sh") }
 }

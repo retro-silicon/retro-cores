@@ -35,7 +35,8 @@ class Sm83SingleStepSim extends SingleStepSuite {
   }
 
   test("reference model") {
-    checkAll("reference")(body => body(_.map { t =>
+    checkAll("reference")(body =>
+      body(_.map { t =>
         val mem = mutable.HashMap[Int, Int]() ++= t.initial.ram
         val log = ArrayBuffer[Cycle]()
         val bus = new Sm83Bus {
@@ -49,10 +50,25 @@ class Sm83SingleStepSim extends SingleStepSuite {
         ref.h = r("h"); ref.l = r("l"); ref.sp = r("sp"); ref.pc = r("pc"); ref.ime = r("ime") == 1
         ref.reset()
         ref.step()
-        Outcome(log.init.toSeq, Map("pc" -> log.last.address, "a" -> ref.a, "f" -> ref.f, "b" -> ref.b, "c" -> ref.c, "d" -> ref.d,
-          "e" -> ref.e, "h" -> ref.h, "l" -> ref.l, "sp" -> ref.sp, "ime" -> (if (ref.ime) 1 else 0),
-          "ei" -> (if (ref.imeNext) 1 else 0)), a => mem.getOrElse(a, 0))
-    }))
+        Outcome(
+          log.init.toSeq,
+          Map(
+            "pc" -> log.last.address,
+            "a" -> ref.a,
+            "f" -> ref.f,
+            "b" -> ref.b,
+            "c" -> ref.c,
+            "d" -> ref.d,
+            "e" -> ref.e,
+            "h" -> ref.h,
+            "l" -> ref.l,
+            "sp" -> ref.sp,
+            "ime" -> (if (ref.ime) 1 else 0),
+            "ei" -> (if (ref.imeNext) 1 else 0)
+          ),
+          a => mem.getOrElse(a, 0)
+        )
+      }))
   }
 
   test("RTL") {
@@ -83,18 +99,21 @@ class Sm83SingleStepSim extends SingleStepSuite {
           var nextPc = -1
           var i = 0
           while (nextPc < 0 && i < 16) {
-            val c = if (!io.cmd.valid.toBoolean) Cycle('-', 0, 0) else {
-              val a = io.cmd.address.toInt
-              if (io.cmd.write.toBoolean) { mem(a) = io.cmd.data.toInt; Cycle('w', a, io.cmd.data.toInt) }
-              else Cycle('r', a, mem.getOrElse(a, 0))
-            }
+            val c =
+              if (!io.cmd.valid.toBoolean) Cycle('-', 0, 0)
+              else {
+                val a = io.cmd.address.toInt
+                if (io.cmd.write.toBoolean) { mem(a) = io.cmd.data.toInt; Cycle('w', a, io.cmd.data.toInt) }
+                else Cycle('r', a, mem.getOrElse(a, 0))
+              }
             if (c.kind == 'r') io.rdata #= c.data
             if (i > 0 && trace.fetch.toBoolean) nextPc = c.address else log += c
             sleep(1); cd.risingEdge(); sleep(1); cd.fallingEdge(); sleep(1)
             i += 1
           }
           val regs = Map("a" -> A, "f" -> F, "b" -> B, "c" -> C, "d" -> D, "e" -> E, "h" -> H, "l" -> L).map { case (n, reg) => n -> rf(reg).toInt } ++
-            Map("pc" -> nextPc, "sp" -> (rf(SPH).toInt << 8 | rf(SPL).toInt), "ime" -> (if (int.ime.toBoolean) 1 else 0), "ei" -> (if (int.imeNext.toBoolean) 1 else 0))
+            Map("pc" -> nextPc, "sp" -> (rf(SPH).toInt << 8 | rf(SPL).toInt), "ime" -> (if (int.ime.toBoolean) 1 else 0),
+              "ei" -> (if (int.imeNext.toBoolean) 1 else 0))
           Outcome(log.toSeq, regs, a => mem.getOrElse(a, 0))
         }
         body(_.map(runOne))

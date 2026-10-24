@@ -10,8 +10,8 @@ import spinal.lib.misc.plugin._
 
 /** What an iNES cartridge needs in hardware: sizes, mapper (`NesCartridge.mappers`),
   * mirroring, and for MMC3 which IRQ behavior (`NesCartridge.mmc3Alternate`). */
-case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: Int, verticalMirroring: Boolean,
-                       mmc3Alternate: Boolean = false, prgRamBytes: Int = 0x2000) {
+case class NesCartSpec(prgBytes: Int, chrBytes: Int, chrRam: Boolean, mapper: Int, verticalMirroring: Boolean, mmc3Alternate: Boolean = false,
+                       prgRamBytes: Int = 0x2000) {
   require(prgRamBytes >= 0x2000 && isPow2(prgRamBytes))
   require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   require(prgBytes % 0x4000 == 0 && isPow2(chrBytes))
@@ -205,7 +205,7 @@ class Mmc1Logic(spec: NesCartSpec, slave: BusSlave) extends NesBoardLogic(spec, 
     val (bank0, bank1, ctrl) = if (after) (chrBank0After, chrBank1After, controlAfter) else (chrBank0, chrBank1, control)
     ctrl(4) ? ((a(12) ? bank1 | bank0) @@ a(11 downto 0)) | (bank0(4 downto 1) @@ a(12 downto 0))
   }
-  override def mirroring(after: Boolean): Bits = (if (after) controlAfter else control)(1 downto 0)
+  override def mirroring(after: Boolean): Bits = (if (after) controlAfter else control).take(2)
   val snrom = spec.chrRam && spec.prgBytes <= 0x40000
   override val ramReadable: Bool = !ramOff && !(if (snrom) extra(4) else False)
   override def ramBank: UInt = extra(3 downto 2)
@@ -327,18 +327,20 @@ class Mmc3Logic(spec: NesCartSpec, slave: BusSlave) extends NesBoardLogic(spec, 
     def event(s: S, valid: Bool, high: Bool, latch: UInt, enabled: Bool): S = {
       val clock = valid && high && !s.a12 && s.low >= NesCartridge.a12Filter
       val next = (s.counter === 0 || s.reload) ? latch | (s.counter - 1)
-      S(valid ? high | s.a12,
+      S(
+        valid ? high | s.a12,
         (valid && !high && s.a12) ? U(0, 4 bits) | s.low,
         clock ? next | s.counter,
         !clock && s.reload,
-        s.irq || (clock && next === 0 && enabled && (if (spec.mmc3Alternate) s.counter =/= 0 || s.reload else True)))
+        s.irq || (clock && next === 0 && enabled && (if (spec.mmc3Alternate) s.counter =/= 0 || s.reload else True))
+      )
     }
     val start = S(r.a12, r.lowDots, r.counter, r.reload, r.irq)
     val ticked = start.copy(low = (start.low === 15) ? start.low | (start.low + 1))
     val dotted = event(ticked, dot._1, dot._2, after ? irqLatchAfter | irqLatch, after ? irqEnabledAfter | irqEnabled)
     val reloaded = accessPhase && reloadWrite
-    val written = dotted.copy(counter = reloaded ? U(0, 8 bits) | dotted.counter, reload = reloaded || dotted.reload,
-      irq = !(accessPhase && ackWrite) && dotted.irq)
+    val written =
+      dotted.copy(counter = reloaded ? U(0, 8 bits) | dotted.counter, reload = reloaded || dotted.reload, irq = !(accessPhase && ackWrite) && dotted.irq)
     val s = access.foldLeft(written)((s, e) => event(s, e._1, e._2, irqLatchAfter, irqEnabledAfter))
     r.a12 := s.a12; r.lowDots := s.low; r.counter := s.counter; r.reload := s.reload; r.irq := s.irq
     irqOut := s.irq
@@ -434,13 +436,14 @@ class Fme7Logic(spec: NesCartSpec, slave: BusSlave) extends NesBoardLogic(spec, 
     }
   }
   regs := regsAfter; counter := counterAfter; irqReg := irqAfter
+  def regsAt(after: Boolean) = if (after) regsAfter else regs
   override def irq: Bool = irqAfter
 
   override def prgIndex: UInt =
     prg8((pa(14 downto 13) === 3) ? U(banks8 - 1, 8 bits) | regs((U(9, 4 bits) + pa(14 downto 13)))(5 downto 0).resize(8))
   override def chrIndex(a: UInt, after: Boolean, dot: Boolean): UInt =
-    (if (after) regsAfter else regs)(a(12 downto 10).resize(4)) @@ a(9 downto 0)
-  override def mirroring(after: Boolean): Bits = { val m = (if (after) regsAfter else regs)(12); (!m(1)) ## m(0) }
+    regsAt(after)(a(12 downto 10).resize(4)) @@ a(9 downto 0)
+  override def mirroring(after: Boolean): Bits = { val m = regsAt(after)(12); (!m(1)) ## m(0) }
   /** 6000-7FFF: RAM selected and enabled, RAM disabled (open bus), else a ROM bank. */
   override val ramReadable: Bool = regs(8)(7 downto 6) === 3
   override def lowOff(ra: UInt, openBus: UInt, prg: Mem[UInt]): UInt =

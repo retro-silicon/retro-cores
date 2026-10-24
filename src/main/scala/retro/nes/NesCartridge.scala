@@ -4,8 +4,8 @@ package retro.nes
   * and PRG RAM size, with its `board` (one `NesBoard` class per mapper). Like most emulators,
   * every cartridge gets at least 8 KB of PRG RAM at 6000, which test ROMs use to report results
   * (more when an NES 2.0 header asks: SXROM's 32 KB). */
-case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mapper: Int, verticalMirroring: Boolean,
-                        mmc3Alternate: Boolean = false, prgRamBytes: Int = 0x2000) {
+case class NesCartridge(prg: Array[Int], chr: Array[Int], chrRam: Boolean, mapper: Int, verticalMirroring: Boolean, mmc3Alternate: Boolean = false,
+                        prgRamBytes: Int = 0x2000) {
   require(NesCartridge.mappers.contains(mapper), s"mapper $mapper is not supported")
   def prgMask = prg.length - 1
   def chrMask = chr.length - 1
@@ -344,8 +344,7 @@ object NesCartridge {
     // NES 2.0: PRG RAM plus PRG NVRAM (64 << n bytes each); at least the 8 KB every board gets here.
     def shifted(n: Int) = if (n == 0) 0 else 64 << n
     val prgRam = if (nes2) shifted(image(10) & 0x0F) + shifted(image(10) >> 4) else 0
-    NesCartridge(prg, chr, chrSize == 0, (image(6) >> 4) | (image(7) & 0xF0), (image(6) & 1) != 0,
-      prgRamBytes = prgRam max 0x2000)
+    NesCartridge(prg, chr, chrSize == 0, (image(6) >> 4) | (image(7) & 0xF0), (image(6) & 1) != 0, prgRamBytes = prgRam max 0x2000)
   }
   def load(file: java.io.File): NesCartridge = load(java.nio.file.Files.readAllBytes(file.toPath).map(_ & 0xFF))
 }

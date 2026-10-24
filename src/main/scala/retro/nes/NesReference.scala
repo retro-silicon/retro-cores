@@ -113,7 +113,8 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: 
     else {
       dmcTimer = dmcPeriod
       if (!dmcSilence) {
-        if ((dmcShift & 1) != 0) { if (dmcLevel <= 125) dmcLevel += 2 } else if (dmcLevel >= 2) dmcLevel -= 2
+        if ((dmcShift & 1) != 0) { if (dmcLevel <= 125) dmcLevel += 2 }
+        else if (dmcLevel >= 2) dmcLevel -= 2
       }
       dmcShift >>= 1
       dmcBits -= 1
@@ -139,7 +140,8 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: 
   /** The DMC was disabled: a fetch that has not halted the CPU yet is dropped, one under way
     * gives up after its current cycle. */
   private def stopDmcDma(): Unit = if (dmcDma) {
-    if (needHalt) { dmcDma = false; needDummy = false; needHalt = false } else dmcAbort = true
+    if (needHalt) { dmcDma = false; needDummy = false; needHalt = false }
+    else dmcAbort = true
   }
 
   private def dma(cpuAddress: Int): Unit = {

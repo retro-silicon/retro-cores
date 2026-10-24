@@ -35,11 +35,14 @@ final class NesPulse(first: Boolean) {
     case 2 => period = period & 0x700 | value
     case _ => period = period & 0xFF | (value & 7) << 8; position = 0; envelope.start = true
   }
-  def cycle(): Unit = if (timer == 0) { timer = 2 * period + 1; position = (position - 1) & 7 } else timer -= 1
+  def cycle(): Unit =
+    if (timer == 0) { timer = 2 * period + 1; position = (position - 1) & 7 }
+    else timer -= 1
   def quarter(): Unit = envelope.quarter()
   def half(): Unit = {
     if (sweepDivider == 0 && sweepEnabled && sweepShift != 0 && !muted) period = target
-    if (sweepDivider == 0 || sweepReload) { sweepDivider = sweepPeriod; sweepReload = false } else sweepDivider -= 1
+    if (sweepDivider == 0 || sweepReload) { sweepDivider = sweepPeriod; sweepReload = false }
+    else sweepDivider -= 1
   }
   /** 0-15; `playing` is the length counter's being nonzero. */
   def output(playing: Boolean) = if (!playing || muted || (NesPulse.duties(duty) >> position & 1) == 0) 0 else envelope.output
@@ -61,7 +64,8 @@ final class NesTriangle {
     case _ =>
   }
   def cycle(playing: Boolean): Unit =
-    if (timer == 0) { timer = period; if (playing && linear > 0) position = (position + 1) & 31 } else timer -= 1
+    if (timer == 0) { timer = period; if (playing && linear > 0) position = (position + 1) & 31 }
+    else timer -= 1
   def quarter(): Unit = {
     if (reloadLinear) linear = linearLoad else if (linear > 0) linear -= 1
     if (!control) reloadLinear = false

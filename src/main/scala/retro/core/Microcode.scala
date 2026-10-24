@@ -50,10 +50,7 @@ object BusOp {
 case class Branch(cond: Cond, target: Int)
 
 /** What one M-cycle of an opcode does. */
-case class MCycleSpec(bus: BusOp = BusOp.Idle,
-                      assigns: Seq[(Sink, Source)] = Nil,
-                      keys: Seq[(CtrlKey, BigInt)] = Nil,
-                      branch: Option[Branch] = None) {
+case class MCycleSpec(bus: BusOp = BusOp.Idle, assigns: Seq[(Sink, Source)] = Nil, keys: Seq[(CtrlKey, BigInt)] = Nil, branch: Option[Branch] = None) {
   /** Register transfers, as `sink -> source`, applied at the end of the cycle. */
   def assign(pairs: (Sink, Source)*): MCycleSpec = copy(assigns = assigns ++ pairs)
   /** Set a plugin-defined control key for this cycle. */

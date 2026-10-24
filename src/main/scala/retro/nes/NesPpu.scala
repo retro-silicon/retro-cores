@@ -151,7 +151,7 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
         val tile = s.spTile(si)
         val row = s.spAttr(si)(7) ? ((h16 ? U(15, 4 bits) | U(7, 4 bits)) - row0) | row0
         val spPattern = h16 ? (tile(0) ## tile(7 downto 1) ## row(3) ## sprite(1) ## row(2 downto 0)).asUInt |
-                              (s.ctrl(3) ## tile ## sprite(1) ## row(2 downto 0)).asUInt
+          (s.ctrl(3) ## tile ## sprite(1) ## row(2 downto 0)).asUInt
         (phase(1) ? atAddress | ntAddress, spriteFetch ? spPattern | bgPattern)
       }
 
@@ -455,8 +455,8 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
       val ciramRead = ciram.readSync(ciramIndexNext)
       ciramDot := ciramBypass ? RegNext(ciramWrite.data) | ciramRead
       val chrWriteNow = chrWrite.enable && accessPhase && slave.writeFire
-      val (chrDotValue, chrAccessValue) = cart.chrPorts(chrNext, nextAfter, chrWrite.address, chrWrite.data,
-        chrWriteNow || (fillNow && fillFromChr), chrWriteNow)
+      val (chrDotValue, chrAccessValue) =
+        cart.chrPorts(chrNext, nextAfter, chrWrite.address, chrWrite.data, chrWriteNow || (fillNow && fillFromChr), chrWriteNow)
       chrDot := chrDotValue
       chrAccess := chrAccessValue
       oam.write(oamWrite.address, oamWrite.data, oamWrite.enable && accessPhase && slave.writeFire, oamWriteMask)

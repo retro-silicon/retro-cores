@@ -50,9 +50,9 @@ abstract class PeripheralPlugin(mapping: AddressMapping, irqs: IrqLine*) extends
   *                 affected.
   * @param midCycleRead read the bus port on the falling edge (`MidCycleRead`), so FPGA block RAM
   *                 holds it; `directRead` ports stay combinational. */
-class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0,
-                val lockable: Boolean = false, val midCycleRead: Boolean = false,
-                val init: Int => Int = _ => 0) extends FiberPlugin {
+class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int, val priority: Int = 0, val lockable: Boolean = false,
+                val midCycleRead: Boolean = false, val init: Int => Int = _ => 0)
+    extends FiberPlugin {
   val readLock, writeLock = Handle[Bool]()
   /** A combinational read port past the bus (the Game Boy PPU's VRAM reads, OAM DMA). */
   def directRead(address: UInt): UInt = logic.mem.readAsync(address(logic.width - 1 downto 0))
@@ -87,8 +87,7 @@ class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int,
 /** Answers a constant and ignores writes: unmapped I/O. Low priority by default, so it only gets
   * the addresses no other slave in its range claims. `latched`: answers the data last on the bus
   * instead (the NES's data bus keeps it), refreshed by every completed access, a DMA's too. */
-class OpenBusPlugin(val mapping: AddressMapping, val value: BigInt = 0xFF, val priority: Int = -1,
-                    val latched: Boolean = false) extends FiberPlugin {
+class OpenBusPlugin(val mapping: AddressMapping, val value: BigInt = 0xFF, val priority: Int = -1, val latched: Boolean = false) extends FiberPlugin {
   /** What a read nothing answers returns this cycle. */
   def data: UInt = logic.data
   val logic = during setup new Area {

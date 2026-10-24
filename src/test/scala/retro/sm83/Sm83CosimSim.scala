@@ -37,8 +37,7 @@ class Sm83CosimSim extends AnyFunSuite {
   case class Result(seen: Map[Int, Int], mem: Array[Int], regs: Map[String, BigInt])
 
   /** @param irqRate chance per M-cycle that a random IF bit is raised (IE is all ones) */
-  def cosim(image: Array[Int], instructions: Int, seed: Int, waitStates: Boolean, irqRate: Double = 0,
-            irqAt: Map[Long, Int] = Map.empty): Result = {
+  def cosim(image: Array[Int], instructions: Int, seed: Int, waitStates: Boolean, irqRate: Double = 0, irqAt: Map[Long, Int] = Map.empty): Result = {
     var result: Result = null
     compiled.doSimUntilVoid(seed = seed) { dut =>
       val io = dut.host[BusPlugin].logic.io
@@ -90,9 +89,8 @@ class Sm83CosimSim extends AnyFunSuite {
   test("hand-written program: copy loop with 16-bit pointers and flags") {
     // LD HL,C000 / LD DE,D000 / LD B,05 / loop: LD A,(HL+) / ADD A,B / LD (DE),A / INC DE / DEC B / JR NZ,loop
     // then: XOR A / CP 01 / JR C,+2 / ... / JP 0000
-    val prog = Seq(0x21, 0x00, 0xC0, 0x11, 0x00, 0xD0, 0x06, 0x05,
-      0x2A, 0x80, 0x12, 0x13, 0x05, 0x20, 0xF9,
-      0xAF, 0xFE, 0x01, 0x38, 0x02, 0x3E, 0x99, 0xC3, 0x00, 0x00)
+    val prog =
+      Seq(0x21, 0x00, 0xC0, 0x11, 0x00, 0xD0, 0x06, 0x05, 0x2A, 0x80, 0x12, 0x13, 0x05, 0x20, 0xF9, 0xAF, 0xFE, 0x01, 0x38, 0x02, 0x3E, 0x99, 0xC3, 0x00, 0x00)
     cosim(image(0 -> prog, 0xC000 -> (0 until 5).map(i => 0x10 * i + 0x0F)), 200, seed = 1, waitStates = false)
   }
 

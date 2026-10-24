@@ -19,8 +19,7 @@ class R2A03InterruptSim extends AnyFunSuite {
 
   /** Runs `program` (loaded at 8000, vectors at FFFA..FFFF) and returns every bus access with the
     * fetch flag. `irqAt(cycle)` and `nmiAt(cycle)` give the line levels per cycle after reset. */
-  def run(program: Map[Int, Seq[Int]], cycles: Int, irqAt: Int => Boolean = _ => false,
-          nmiAt: Int => Boolean = _ => false): Seq[(Access, Boolean)] = {
+  def run(program: Map[Int, Seq[Int]], cycles: Int, irqAt: Int => Boolean = _ => false, nmiAt: Int => Boolean = _ => false): Seq[(Access, Boolean)] = {
     val mem = Array.fill(0x10000)(0xEA)
     for ((at, bytes) <- program; (b, i) <- bytes.zipWithIndex) mem(at + i) = b
     // NMI -> A000, reset -> 8000, IRQ -> 9000
@@ -41,7 +40,9 @@ class R2A03InterruptSim extends AnyFunSuite {
         int.nmi #= nmiAt(c)
         sleep(1)
         val a = io.cmd.address.toInt
-        val acc = if (io.cmd.write.toBoolean) { mem(a) = io.cmd.data.toInt; Access(true, a, mem(a)) } else Access(false, a, mem(a))
+        val acc =
+          if (io.cmd.write.toBoolean) { mem(a) = io.cmd.data.toInt; Access(true, a, mem(a)) }
+          else Access(false, a, mem(a))
         if (!acc.write) io.rdata #= acc.data
         log += acc -> trace.fetch.toBoolean
         cd.waitSampling()
@@ -58,8 +59,16 @@ class R2A03InterruptSim extends AnyFunSuite {
     assert(f.take(5) == Seq(0x8000, 0x8002, 0x8003, 0x8004, 0x9000), f.map(a => f"$a%04X").mkString(" "))
     // The fetch at 8004 is the one taken over: read 8004 again, push 8004 and P, read the vector.
     val at = log.indexWhere(e => e._2 && e._1.address == 0x8004)
-    val expected = Seq(Access(false, 0x8004, 0xEA), Access(false, 0x8004, 0xEA), Access(true, 0x01FD, 0x80), Access(true, 0x01FC, 0x04),
-      Access(true, 0x01FB, 0x22), Access(false, 0xFFFE, 0x00), Access(false, 0xFFFF, 0x90), Access(false, 0x9000, 0x4C))
+    val expected = Seq(
+      Access(false, 0x8004, 0xEA),
+      Access(false, 0x8004, 0xEA),
+      Access(true, 0x01FD, 0x80),
+      Access(true, 0x01FC, 0x04),
+      Access(true, 0x01FB, 0x22),
+      Access(false, 0xFFFE, 0x00),
+      Access(false, 0xFFFF, 0x90),
+      Access(false, 0x9000, 0x4C)
+    )
     assert(log.slice(at, at + 8).map(_._1) == expected, log.slice(at, at + 8).map(_._1).mkString(", "))
   }
 

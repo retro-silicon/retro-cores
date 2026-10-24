@@ -94,8 +94,11 @@ class GameBoySim extends AnyFunSuite {
       val frames = rtlFrames.size min refFrames.size
       for (k <- 0 until frames) {
         val differ = GbFrame.differences(rtlFrames(k), refFrames(k))
-        def firstDiffs = (0 until 160 * 144).filter(i => rtlFrames(k)(i) != refFrames(k)(i)).take(8)
-          .map(i => s"(${i % 160},${i / 160}) rtl ${rtlFrames(k)(i)} ref ${refFrames(k)(i)}").mkString(", ")
+        def firstDiffs = (0 until 160 * 144)
+          .filter(i => rtlFrames(k)(i) != refFrames(k)(i))
+          .take(8)
+          .map(i => s"(${i % 160},${i / 160}) rtl ${rtlFrames(k)(i)} ref ${refFrames(k)(i)}")
+          .mkString(", ")
         assert(differ == 0, s"frame $k: $differ pixels differ, first $firstDiffs")
       }
       val samples = rtlAudio.size min refAudio.size
@@ -131,8 +134,7 @@ class GameBoySim extends AnyFunSuite {
   }
 
   test("timer interrupts and serial output") {
-    val main = Seq(
-      0xF3, //             DI
+    val main = Seq(0xF3, //             DI
       0x31, 0xFE, 0xFF, // LD SP,FFFE
       0x3E, 0x04, //       LD A,04
       0xE0, 0xFF, //       LDH (IE),A      timer interrupt only
@@ -154,8 +156,7 @@ class GameBoySim extends AnyFunSuite {
       0x3E, 0x4B, //       LD A,'K'
       0xCD, 0x30, 0x01, // CALL 0130
       0x18, 0xFE) //       JR $
-    val send = Seq(
-      0xE0, 0x01, //       0130: LDH (SB),A
+    val send = Seq(0xE0, 0x01, //       0130: LDH (SB),A
       0x3E, 0x81, //       LD A,81
       0xE0, 0x02, //       LDH (SC),A      start, internal clock
       0xF0, 0x02, //       0136: LDH A,(SC)
@@ -171,8 +172,7 @@ class GameBoySim extends AnyFunSuite {
 
   test("LCD timing: VBlank interrupt and LY") {
     // Wait for VBlank by interrupt, then read LY twice; the handler stores LY at FF81.
-    val main = Seq(
-      0x31, 0xFE, 0xFF, // LD SP,FFFE
+    val main = Seq(0x31, 0xFE, 0xFF, // LD SP,FFFE
       0x3E, 0x01, //       LD A,01
       0xE0, 0xFF, //       LDH (IE),A      VBlank only
       0xAF, //             XOR A
@@ -190,8 +190,7 @@ class GameBoySim extends AnyFunSuite {
     * keeps changing SCX, mid-line too, and reads STAT and LY. Each frame's pixels and every STAT
     * read must match the model, so object, window and scroll penalties line up dot for dot. */
   test("PPU: random tiles, objects, scroll and window") {
-    val main = Seq(
-      0xF3, //             DI
+    val main = Seq(0xF3, //             DI
       0x31, 0xFE, 0xFF, // LD SP,FFFE
       0x21, 0x00, 0x80, // LD HL,8000
       0x11, 0x00, 0x40, // LD DE,4000
@@ -205,8 +204,7 @@ class GameBoySim extends AnyFunSuite {
       0xCD, 0x50, 0x01, // CALL 0150
       0x21, 0x00, 0x60) // LD HL,6000      LCDC SCY SCX BGP OBP0 OBP1 WY WX
     val regs = Seq(0x40, 0x42, 0x43, 0x47, 0x48, 0x49, 0x4A, 0x4B).flatMap(r => Seq(0x2A, 0xE0, r)) // LD A,(HL+) / LDH (r),A
-    val loop = Seq(
-      0xF0, 0x43, //       LDH A,(SCX)
+    val loop = Seq(0xF0, 0x43, //       LDH A,(SCX)
       0x3C, //             INC A
       0xE0, 0x43, //       LDH (SCX),A
       0xF0, 0x41, //       LDH A,(STAT)
@@ -223,8 +221,8 @@ class GameBoySim extends AnyFunSuite {
         c(0x5002 + 4 * o) = rnd.nextInt(256)
         c(0x5003 + 4 * o) = rnd.nextInt(256)
       }
-      val lcdRegs = Seq(0x80 | rnd.nextInt(0x80), rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256),
-        rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(150), rnd.nextInt(170))
+      val lcdRegs = Seq(0x80 | rnd.nextInt(0x80), rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(150),
+        rnd.nextInt(170))
       for ((v, i) <- lcdRegs.zipWithIndex) c(0x6000 + i) = v
       val r = cosim(c, 36000, seed)
       assert(r.frames >= 3, s"only ${r.frames} frames")

@@ -39,15 +39,15 @@ package retro.gb
   * After the boot ROM the PPU is 98 M-cycles into line 153. */
 /** The states of the mode 3 loop (`GbPpuReference.sbStep`, SameBoy's numbering). */
 object PpuStep {
-  val WINDOW = 0       // check for the window
-  val OBJ_WAIT = 1     // step the fetcher until the background tile is in, to fetch an object
-  val OBJ_ATTRS = 3    // read the object's tile and flags
-  val OBJ_LOW = 4      // read its low tile byte
-  val OBJ_HIGH = 5     // read its high tile byte and mix the row into the object FIFO
-  val OBJ_NEXT = 6     // another object at this X?
-  val PIXEL = 7        // shift out a pixel and step the fetcher
+  val WINDOW = 0 // check for the window
+  val OBJ_WAIT = 1 // step the fetcher until the background tile is in, to fetch an object
+  val OBJ_ATTRS = 3 // read the object's tile and flags
+  val OBJ_LOW = 4 // read its low tile byte
+  val OBJ_HIGH = 5 // read its high tile byte and mix the row into the object FIFO
+  val OBJ_NEXT = 6 // another object at this X?
+  val PIXEL = 7 // shift out a pixel and step the fetcher
   val WINDOW_DELAY = 8 // the window's extra dot with WX = 0 and SCX mod 8 > 0
-  val OBJ_CHECK = 9    // any object at this X?
+  val OBJ_CHECK = 9 // any object at this X?
 }
 
 /** The background fetcher's steps (`GbPpuReference.advance`); each read takes the step before for
@@ -209,8 +209,10 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private def tickDots(): (Boolean, Boolean) = {
     // A STAT write on the DMG first enables every STAT interrupt source for a dot, except mode
     // 2's at the end of HBlank when only mode 0's was enabled (SameBoy).
-    val glitchSelect = if (!scheduled.exists(_._1 == Gb.STAT)) 0
-      else if (irqMode == 2 && x == Gb.lineCycles - 1 && (statSelect & 5) == 1) 0xB else 0xF
+    val glitchSelect =
+      if (!scheduled.exists(_._1 == Gb.STAT)) 0
+      else if (irqMode == 2 && x == Gb.lineCycles - 1 && (statSelect & 5) == 1) 0xB
+      else 0xF
     // Line 0's mode 2 interrupt, which the STAT write glitch sees an M-cycle late.
     val line0Mode2 = irqMode == 2 && ly == 0 && x == 0
     dots += 4
@@ -234,8 +236,7 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
       // The last M-cycle of the frame reads as mode 0.
       mode = if (ly == Gb.frameLines - 1 && x == Gb.lineCycles - 1) 0 else 1
       irqMode = 1
-    }
-    else if (on) {
+    } else if (on) {
       if (x < Gb.oamEnd && ly == wy && (lcdc & 0x20) != 0) wyHit = true
       val scanMode = if (firstLine) 0 else 2
       // The mode 2 interrupt source is only on as the line starts (SameBoy's mode_for_interrupt):
@@ -283,13 +284,17 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
         def transferAfter(i: Int) = transferBefore && active(i + 3)
         // A halted CPU sees the STAT line two dots earlier than a running one: on the first line,
         // as the transfer was after the last M-cycle's third dot.
-        irqModeBefore = if (x == Gb.oamEnd) scanIrqMode
-          else if (if (firstLine) transfer3Before else transferBefore) 3 else 0
+        irqModeBefore =
+          if (x == Gb.oamEnd) scanIrqMode
+          else if (if (firstLine) transfer3Before else transferBefore) 3
+          else 0
         transfer3 = transferAfter(3)
         transferEnding = transferBefore
-        irqMode = if (x == Gb.oamEnd) scanIrqMode
+        irqMode =
+          if (x == Gb.oamEnd) scanIrqMode
           // The first line's mode 0 interrupt sees the transfer as it is after the first dot.
-          else if (if (firstLine) transferAfter(1) else transferAfter(2)) 3 else 0
+          else if (if (firstLine) transferAfter(1) else transferAfter(2)) 3
+          else 0
         // The first line's mode 3 ends for the CPU a dot later.
         mode = if (transferAfter(if (firstLine) 2 else 3)) 3 else 0
         transfer = transferAfter(4)
@@ -335,8 +340,9 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     mode0AtLastDot = on && ending && mode == 0
     for ((a, d) <- scheduled if on) a match {
       case Gb.LYC if compared => statLine = statLine && statFor(if (ending && mode == 0) 0 else irqMode, lyNow == d)
-      case Gb.STAT => statLine = statLine && (statFor(if (ending && !transfer) 0 else irqMode, sel = (d >> 3) & 0xF) ||
-        ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1 && (d & 0x20) != 0)
+      case Gb.STAT =>
+        statLine = statLine && (statFor(if (ending && !transfer) 0 else irqMode, sel = (d >> 3) & 0xF) ||
+          ly == Gb.visibleLines - 1 && x == Gb.lineCycles - 1 && (d & 0x20) != 0)
       case _ =>
     }
     statRiseInDots = stat && !(lycLine && (statSelect & 8) != 0) &&
@@ -458,7 +464,9 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private def render(): Unit = {
     if ((lcdc & 2) != 0 && (0 until objCount).exists(i => (objDone & (1 << i)) == 0 && objX(i) == 0)) return
     if (bgSize == 0) return
-    val bg = if (insertBg) { insertBg = false; 0 } else bgPop()
+    val bg =
+      if (insertBg) { insertBg = false; 0 }
+      else bgPop()
     var draw = false; var op, opal, oprio = 0
     if (obSize > 0) {
       op = obPix(0); opal = obPal(0); oprio = obPrio(0)
@@ -497,7 +505,8 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   private def sbStep(): Unit = sbSt match {
     case WINDOW =>
       if (!wxTriggered && wyHit && (lcdc & 0x20) != 0) {
-        val act = if (wx == 0) pos == -7 || pos == -16 && (scx & 7) != 0 || pos >= -15 && pos <= -8
+        val act =
+          if (wx == 0) pos == -7 || pos == -16 && (scx & 7) != 0 || pos >= -15 && pos <= -8
           else if (wx < 166) wx == ((pos + 7) & 0xFF) || wx == ((pos + 6) & 0xFF) && !wxJustChanged && { if (lcdX > 0) lcdX -= 1; true }
           else false
         if (act) {
@@ -564,9 +573,8 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   }
 
   // The transfer state the look-ahead changes.
-  private def snapshot() = (transferDots, winY, pixActive, sbSt, sbWait, pos, lcdX, bgF.clone, bgSize,
-    (obPix.clone, obPal.clone, obPrio.clone, obSize), (fSt, tileIdxAddr, curTile, tileDataAddr, data0, data1),
-    (wxTriggered, winFetching, insertBg, noInsertGlitch, wxJustChanged, duringObjFetch, abortObj),
+  private def snapshot() = (transferDots, winY, pixActive, sbSt, sbWait, pos, lcdX, bgF.clone, bgSize, (obPix.clone, obPal.clone, obPrio.clone, obSize),
+    (fSt, tileIdxAddr, curTile, tileDataAddr, data0, data1), (wxTriggered, winFetching, insertBg, noInsertGlitch, wxJustChanged, duringObjFetch, abortObj),
     (winTileX, objDone, oTile, oFlags, sbObjLo, lastShade, fetchSlot))
   private def restore(s: ReturnType): Unit = {
     transferDots = s._1; winY = s._2; pixActive = s._3; sbSt = s._4; sbWait = s._5; pos = s._6; lcdX = s._7
@@ -578,7 +586,6 @@ class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     wxJustChanged = s._12._5; duringObjFetch = s._12._6; abortObj = s._12._7
     winTileX = s._13._1; objDone = s._13._2; oTile = s._13._3; oFlags = s._13._4; sbObjLo = s._13._5; lastShade = s._13._6; fetchSlot = s._13._7
   }
-  private type ReturnType = (Int, Int, Boolean, Int, Int, Int, Int, Array[Int], Int, (Array[Int], Array[Int], Array[Int], Int),
-    (Int, Int, Int, Int, Int, Int), (Boolean, Boolean, Boolean, Boolean, Boolean, Boolean, Boolean), (Int, Int, Int, Int, Int, Int, Int))
+  private type ReturnType = (Int, Int, Boolean, Int, Int, Int, Int, Array[Int], Int, (Array[Int], Array[Int], Array[Int], Int), (Int, Int, Int, Int, Int, Int),
+                             (Boolean, Boolean, Boolean, Boolean, Boolean, Boolean, Boolean), (Int, Int, Int, Int, Int, Int, Int))
 }
-

@@ -12,11 +12,23 @@ class Toy8Sim extends AnyFunSuite {
   // LD HL,8000 / LD A,FD / loop: INC A / LD (HL),A / INC HL / JR NZ,loop / LD A,(HL) / NOP...
   val program = Seq(0x21, 0x00, 0x80, 0x3E, 0xFD, 0x3C, 0x77, 0x23, 0x20, 0xFB, 0x7E)
   val expected = Seq( // (address, mnemonic, M-cycles)
-    (0x0000, "LD HL,nn", 3), (0x0003, "LD A,n", 2),
-    (0x0005, "INC A", 1), (0x0006, "LD (HL),A", 2), (0x0007, "INC HL", 2), (0x0008, "JR NZ,e", 3),
-    (0x0005, "INC A", 1), (0x0006, "LD (HL),A", 2), (0x0007, "INC HL", 2), (0x0008, "JR NZ,e", 3),
-    (0x0005, "INC A", 1), (0x0006, "LD (HL),A", 2), (0x0007, "INC HL", 2), (0x0008, "JR NZ,e", 2),
-    (0x000A, "LD A,(HL)", 2), (0x000B, "NOP", 1))
+    (0x0000, "LD HL,nn", 3),
+    (0x0003, "LD A,n", 2),
+    (0x0005, "INC A", 1),
+    (0x0006, "LD (HL),A", 2),
+    (0x0007, "INC HL", 2),
+    (0x0008, "JR NZ,e", 3),
+    (0x0005, "INC A", 1),
+    (0x0006, "LD (HL),A", 2),
+    (0x0007, "INC HL", 2),
+    (0x0008, "JR NZ,e", 3),
+    (0x0005, "INC A", 1),
+    (0x0006, "LD (HL),A", 2),
+    (0x0007, "INC HL", 2),
+    (0x0008, "JR NZ,e", 2),
+    (0x000A, "LD A,(HL)", 2),
+    (0x000B, "NOP", 1)
+  )
 
   lazy val compiled = SimConfig.withVerilator.compile(Toy8(steal = true))
 

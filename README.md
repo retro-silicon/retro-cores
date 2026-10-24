@@ -27,6 +27,7 @@ Requirements: JDK 17+ (21 tested), sbt 1.10, Verilator 5, a C++ toolchain.
 sbt test                               # all Verilator sims: toy CPU, SM83, 2A03, Game Boy and NES
 sbt "runMain retro.sm83.Sm83Verilog"   # writes gen/Sm83Core.v (the bare CPU)
 sbt "runMain retro.gb.GameBoyVerilog"  # writes gen/GameBoy.v (CPU + SoC, cartridge bus external)
+sbt scalafmtAll Test/scalafmtAll       # format the code (.scalafmt.conf); scalafmtCheckAll checks it
 ```
 
 ### Single-instruction tests

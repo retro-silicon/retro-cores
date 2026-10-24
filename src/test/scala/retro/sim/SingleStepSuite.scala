@@ -37,17 +37,29 @@ abstract class SingleStepSuite extends AnyFunSuite {
   val limit = sys.env.get("SST_LIMIT").map(_.toInt).getOrElse(defaultLimit)
 
   def load(file: File): Seq[Test] = {
-    def state(o: ujson.Value) = State(regNames.map(n => n -> o.obj.get(n).map(_.num.toInt).getOrElse(0)).toMap,
-      o("ram").arr.map(e => e(0).num.toInt -> e(1).num.toInt).toSeq)
-    ujson.read(file).arr.iterator.take(limit).map { t =>
-      Test(t("name").str, state(t("initial")), state(t("final")), t("cycles").arr.map(cycle).toSeq)
-    }.toSeq
+    def state(o: ujson.Value) =
+      State(regNames.map(n => n -> o.obj.get(n).map(_.num.toInt).getOrElse(0)).toMap, o("ram").arr.map(e => e(0).num.toInt -> e(1).num.toInt).toSeq)
+    ujson
+      .read(file)
+      .arr
+      .iterator
+      .take(limit)
+      .map { t =>
+        Test(t("name").str, state(t("initial")), state(t("final")), t("cycles").arr.map(cycle).toSeq)
+      }
+      .toSeq
   }
 
   def files: Seq[(Int, File)] = {
     val only = sys.env.get("SST_OPS").map(_.split(",").map(_.trim.toLowerCase).toSet)
-    dir.listFiles().filter(_.getName.endsWith(".json")).map(_.getName.stripSuffix(".json"))
-      .filter(n => only.forall(_.contains(n))).map(n => opcode(n) -> new File(dir, s"$n.json")).sortBy(_._1).toSeq
+    dir
+      .listFiles()
+      .filter(_.getName.endsWith(".json"))
+      .map(_.getName.stripSuffix(".json"))
+      .filter(n => only.forall(_.contains(n)))
+      .map(n => opcode(n) -> new File(dir, s"$n.json"))
+      .sortBy(_._1)
+      .toSeq
   }
 
   def check(t: Test, o: Outcome): Seq[String] = {

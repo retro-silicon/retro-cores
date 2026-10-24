@@ -51,7 +51,9 @@ class R2A03Reference(bus: R2A03Bus, lines: Long => (Boolean, Boolean) = _ => (fa
 
   private def access(addr: Int, write: Boolean, data: Int, select: Boolean = false, hold: Boolean = false, clear: Boolean = false): Int = {
     val address = addr & 0xFFFF
-    val v = if (write) { bus.write(address, data & 0xFF); data & 0xFF } else bus.read(address)
+    val v =
+      if (write) { bus.write(address, data & 0xFF); data & 0xFF }
+      else bus.read(address)
     log += BusAccess(write, address, v)
     // Sampled after the access: in a system model the bus call is where the rest of the
     // machine advances through this cycle.
@@ -195,8 +197,10 @@ class R2A03Reference(bus: R2A03Bus, lines: Long => (Boolean, Boolean) = _ => (fa
       case 0x78 => rd(pc); setFlag(2, true)
       case 0x18 | 0x38 | 0xB8 | 0xD8 | 0xF8 =>
         rd(pc)
-        op match { case 0x18 => setFlag(0, false); case 0x38 => setFlag(0, true); case 0xB8 => setFlag(6, false)
-                   case 0xD8 => setFlag(3, false); case 0xF8 => setFlag(3, true) }
+        op match {
+          case 0x18 => setFlag(0, false); case 0x38 => setFlag(0, true); case 0xB8 => setFlag(6, false)
+          case 0xD8 => setFlag(3, false); case 0xF8 => setFlag(3, true)
+        }
       case 0xAA => rd(pc); x = nz(a)
       case 0xA8 => rd(pc); y = nz(a)
       case 0x8A => rd(pc); a = nz(x)
@@ -254,14 +258,18 @@ class R2A03Reference(bus: R2A03Bus, lines: Long => (Boolean, Boolean) = _ => (fa
       case _ if cc == 3 && aaa == 5 => // LAX
         val v = readOperand(bbb, alt = Some(y)); a = nz(v); x = a
       case _ if cc == 3 =>
-        modify(bbb, v => aaa match {
-          case 0 => val r = asl(v); a = nz(a | r); r
-          case 1 => val r = rol(v); a = nz(a & r); r
-          case 2 => val r = lsr(v); a = nz(a ^ r); r
-          case 3 => val r = ror(v); adc(r); r
-          case 6 => val r = (v - 1) & 0xFF; compare(a, r); r
-          case 7 => val r = (v + 1) & 0xFF; adc(r ^ 0xFF); r
-        })
+        modify(
+          bbb,
+          v =>
+            aaa match {
+              case 0 => val r = asl(v); a = nz(a | r); r
+              case 1 => val r = rol(v); a = nz(a & r); r
+              case 2 => val r = lsr(v); a = nz(a ^ r); r
+              case 3 => val r = ror(v); adc(r); r
+              case 6 => val r = (v - 1) & 0xFF; compare(a, r); r
+              case 7 => val r = (v + 1) & 0xFF; adc(r ^ 0xFF); r
+            }
+        )
       // ---- cc = 10: shifts, INC/DEC, STX/LDX, NOPs ------------------------------------------------
       case 0xA2 => x = nz(imm())
       case _ if cc == 2 && bbb == 0 => imm() // 82 C2 E2: NOP #n

@@ -61,11 +61,9 @@ trait SequencerService {
   * @param romDecoder  decode with a ROM indexed by IR ## STEP instead of minimized logic: the same
   *                    words (unused steps of defined opcodes give the illegal word rather than
   *                    don't-care), and several times cheaper to evaluate in Verilator */
-class SequencerPlugin(val opcodeWidth: Int = 8,
-                      val busPriority: Int = 0,
-                      val resetOpcode: Int = 0,
-                      val illegal: MCycleSpec,
-                      val romDecoder: Boolean = false) extends FiberPlugin with SequencerService {
+class SequencerPlugin(val opcodeWidth: Int = 8, val busPriority: Int = 0, val resetOpcode: Int = 0, val illegal: MCycleSpec, val romDecoder: Boolean = false)
+    extends FiberPlugin
+    with SequencerService {
   val seqLock = Retainer()
   private val ops = mutable.LinkedHashMap[Int, OpSpec]()
   private val sources = mutable.LinkedHashMap[Source, UInt]()
@@ -196,13 +194,16 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     // ---- Datapath --------------------------------------------------------------------------
     // The sources some microcode puts on the bus. Only those feed its address and data, so
     // values that depend on the bus access (interrupt requests a write can raise) do not loop.
-    val busSources = ops.values.flatMap(_.cycles.map(_.bus)).flatMap {
-      case BusOp.Idle => Nil
-      case BusOp.Read(a) => Seq(a)
-      case BusOp.Write(a, d) => Seq(a, d)
-      case BusOp.Fetch(a) => Seq(a)
-      case BusOp.Prefix(a, _) => Seq(a)
-    }.toSet
+    val busSources = ops.values
+      .flatMap(_.cycles.map(_.bus))
+      .flatMap {
+        case BusOp.Idle => Nil
+        case BusOp.Read(a) => Seq(a)
+        case BusOp.Write(a, d) => Seq(a, d)
+        case BusOp.Fetch(a) => Seq(a)
+        case BusOp.Prefix(a, _) => Seq(a)
+      }
+      .toSet
     def select(sel: UInt, width: Int, busSide: Boolean = false): UInt = {
       val r = UInt(width bits)
       r := 0

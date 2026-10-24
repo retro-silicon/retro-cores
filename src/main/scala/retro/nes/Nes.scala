@@ -27,28 +27,28 @@ object Nes {
     val IRQ = IrqLine("IRQ", 1)
   }
   /** APU length counter loads, indexed by the top 5 bits of the 4003/4007/400B/400F write. */
-  val lengthTable = Seq(10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
-                        12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30)
+  val lengthTable = Seq(10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30)
   /** Palette RAM as blargg's console has it at power-up (power_up_palette checks it). */
-  val powerUpPalette = Seq(0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C,
-                           0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3A, 0x00, 0x02, 0x00, 0x20, 0x2C, 0x08)
+  val powerUpPalette = Seq(0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C, 0x09, 0x01, 0x34, 0x03, 0x00, 0x04,
+    0x00, 0x14, 0x08, 0x3A, 0x00, 0x02, 0x00, 0x20, 0x2C, 0x08)
 
   /** The 2A03 plugins plus the NES ones, in one host. The open bus claims every address no
     * other slave does, so the CPU has no external bus port. `romDecoder`: see `SequencerPlugin`
     * (the simulations use it). */
-  def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None,
-              timing: NesTiming = NesTiming.ntsc): Seq[Hostable] =
+  def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None, timing: NesTiming = NesTiming.ntsc)
+      : Seq[Hostable] =
     Ricoh2A03.plugins(withTrace, external = false, romDecoder = romDecoder) ++ Seq(
-    new NesInterruptsPlugin,
-    new OpenBusPlugin(SizeMapping(0x0000, 0x10000), latched = true),
-    new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800, midCycleRead = true), // 0800-1FFF mirror it
-    new NesPpuPlugin(timing),
-    new NesApuPlugin(timing),
-    new NesJoypadPlugin,
-    new NesCartridgePlugin(cart, image))
+      new NesInterruptsPlugin,
+      new OpenBusPlugin(SizeMapping(0x0000, 0x10000), latched = true),
+      new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800, midCycleRead = true), // 0800-1FFF mirror it
+      new NesPpuPlugin(timing),
+      new NesApuPlugin(timing),
+      new NesJoypadPlugin,
+      new NesCartridgePlugin(cart, image)
+    )
 
-  def apply(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None,
-            timing: NesTiming = NesTiming.ntsc): RetroCore =
+  def apply(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None, timing: NesTiming = NesTiming.ntsc)
+      : RetroCore =
     RetroCore(plugins(cart, withTrace, romDecoder, image, timing), cycleClocks = timing.dotsPerCycle).setDefinitionName("Nes")
 }
 
@@ -62,10 +62,12 @@ case class NesTiming(pal: Boolean) {
   val steps = if (pal) Seq(8313, 16627, 24939, 33253) else Seq(7457, 14913, 22371, 29829)
   /** The 5-step mode's fifth step; it wraps a cycle later. */
   val fifthStep = if (pal) 41565 else 37281
-  val noisePeriods = if (pal) Seq(4, 8, 14, 30, 60, 88, 118, 148, 188, 236, 354, 472, 708, 944, 1890, 3778)
-                     else Seq(4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068)
-  val dmcRates = if (pal) Seq(398, 354, 316, 298, 276, 236, 210, 198, 176, 148, 132, 118, 98, 78, 66, 50)
-                 else Seq(428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54)
+  val noisePeriods =
+    if (pal) Seq(4, 8, 14, 30, 60, 88, 118, 148, 188, 236, 354, 472, 708, 944, 1890, 3778)
+    else Seq(4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068)
+  val dmcRates =
+    if (pal) Seq(398, 354, 316, 298, 276, 236, 210, 198, 176, 148, 132, 118, 98, 78, 66, 50)
+    else Seq(428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54)
   /** The pre-render line; on NTSC its last dot is skipped on odd frames while rendering. */
   val preLine = if (pal) 311 else 261
   val oddFrameSkip = !pal

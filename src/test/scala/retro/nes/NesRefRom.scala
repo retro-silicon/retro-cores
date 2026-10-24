@@ -12,12 +12,15 @@ object NesRoms {
   def all: Seq[(String, File)] = {
     def walk(f: File): Seq[File] = if (f.isDirectory) f.listFiles().sortBy(_.getName).toSeq.flatMap(walk) else Seq(f)
     if (!dir.isDirectory) Nil
-    else walk(dir).filter(_.getName.endsWith(".nes")).map(f => dir.toPath.relativize(f.toPath).toString -> f)
-      .filter { case (_, f) =>
-        val h = java.nio.file.Files.readAllBytes(f.toPath).take(8).map(_ & 0xFF)
-        val mapper = (h(6) >> 4) | (h(7) & 0xF0)
-        NesCartridge.mappers.contains(mapper)
-      }
+    else
+      walk(dir)
+        .filter(_.getName.endsWith(".nes"))
+        .map(f => dir.toPath.relativize(f.toPath).toString -> f)
+        .filter { case (_, f) =>
+          val h = java.nio.file.Files.readAllBytes(f.toPath).take(8).map(_ & 0xFF)
+          val mapper = (h(6) >> 4) | (h(7) & 0xF0)
+          NesCartridge.mappers.contains(mapper)
+        }
   }
 
   /** The console a ROM is for: PAL for blargg's pal_apu_tests, NTSC otherwise (iNES headers
@@ -39,8 +42,7 @@ object NesRoms {
     * from 6004; older ones leave the result in zero page F8 (1 = passed) and print to the
     * screen. `stableFrames` is how long F8 and the screen have been unchanged (some tests idle for 80
     * frames mid-run). */
-  def verdict(nes: NesReference, stableFrames: Int, crcs: Set[String] = Set(), nmiSync: Boolean = false,
-              holyMapperel: Option[HolyMapperel] = None): Verdict = {
+  def verdict(nes: NesReference, stableFrames: Int, crcs: Set[String] = Set(), nmiSync: Boolean = false, holyMapperel: Option[HolyMapperel] = None): Verdict = {
     val r = nes.prgRam
     lazy val lastLine = screenText(nes).linesIterator.toSeq.lastOption.getOrElse("")
     if (nmiSync) { if (nes.ppu.frames >= 60) nmiSyncVerdict(nes.ppu.frame) else Running }
@@ -83,22 +85,39 @@ object NesRoms {
     def bytes(n: String) = if (n.endsWith("M")) n.init.toInt << 20 else n.stripSuffix("K").toInt << 10
     val name = "M(\\d+)_P(\\d+[KM])_C(R?)(\\d+K)(?:_[SW](\\d+K))?(?:_[HV])?\\.nes".r
     if (!file.getPath.contains("holy-mapperel")) None
-    else file.getName match {
-      case name(m, p, r, c, w) => Some(HolyMapperel(m.toInt, bytes(p), bytes(c), r.isEmpty, Option(w).map(bytes).getOrElse(0)))
-      case _ => None
-    }
+    else
+      file.getName match {
+        case name(m, p, r, c, w) => Some(HolyMapperel(m.toInt, bytes(p), bytes(c), r.isEmpty, Option(w).map(bytes).getOrElse(0)))
+        case _ => None
+      }
   }
   /** Holy Mapperel only shows what it found: it passes when that is the board it was built for,
     * with every test result 0. Its variables are in zero page 15-20. Every board here has 8 KB
     * of PRG RAM, so one without is not checked for its absence. */
   def holyMapperelVerdict(nes: NesReference, h: HolyMapperel): Verdict = {
     val z = (a: Int) => nes.ram(a)
-    val found = Seq("mapper" -> z(0x15), "PRG 4K banks - 1" -> z(0x17), "CHR ROM" -> (if (z(0x18) != 0) 1 else 0),
-      "CHR 8K banks - 1" -> z(0x19), "CHR test" -> z(0x1A), "WRAM" -> (if (z(0x1C) != 0) 1 else 0),
-      "WRAM test" -> z(0x1E), "detailed PRG" -> z(0x1F), "detailed CHR" -> z(0x20))
-    val want = Map("mapper" -> h.mapper, "PRG 4K banks - 1" -> (h.prgBytes / 4096 - 1), "CHR ROM" -> (if (h.chrRom) 1 else 0),
-      "CHR 8K banks - 1" -> (h.chrBytes / 8192 - 1), "CHR test" -> 0, "WRAM" -> 1, "WRAM test" -> 0,
-      "detailed PRG" -> 0, "detailed CHR" -> 0)
+    val found = Seq(
+      "mapper" -> z(0x15),
+      "PRG 4K banks - 1" -> z(0x17),
+      "CHR ROM" -> (if (z(0x18) != 0) 1 else 0),
+      "CHR 8K banks - 1" -> z(0x19),
+      "CHR test" -> z(0x1A),
+      "WRAM" -> (if (z(0x1C) != 0) 1 else 0),
+      "WRAM test" -> z(0x1E),
+      "detailed PRG" -> z(0x1F),
+      "detailed CHR" -> z(0x20)
+    )
+    val want = Map(
+      "mapper" -> h.mapper,
+      "PRG 4K banks - 1" -> (h.prgBytes / 4096 - 1),
+      "CHR ROM" -> (if (h.chrRom) 1 else 0),
+      "CHR 8K banks - 1" -> (h.chrBytes / 8192 - 1),
+      "CHR test" -> 0,
+      "WRAM" -> 1,
+      "WRAM test" -> 0,
+      "detailed PRG" -> 0,
+      "detailed CHR" -> 0
+    )
     val wrong = found.filter { case (k, v) => v != want(k) }
     val wramSize = if (h.wramBytes > 0 && z(0x1D) != h.wramBytes / 8192 - 1) Seq(s"WRAM 8K banks - 1 ${z(0x1D)}, want ${h.wramBytes / 8192 - 1}") else Nil
     val problems = wrong.map { case (k, v) => f"$k $v%02X, want ${want(k)}%02X" } ++ wramSize
@@ -124,21 +143,23 @@ object NesRoms {
     if (!source.isFile) Set()
     else {
       val s = scala.io.Source.fromFile(source)
-      try s.getLines().takeWhile(_.startsWith(";")).flatMap("\\b[0-9A-F]{8}\\b".r.findAllIn(_)).toSet finally s.close()
+      try s.getLines().takeWhile(_.startsWith(";")).flatMap("\\b[0-9A-F]{8}\\b".r.findAllIn(_)).toSet
+      finally s.close()
     }
   }
 
   /** The text on nametable 0, assuming the font maps tiles to ASCII as blargg's tests do. */
   def screenText(nes: NesReference): String =
-    (0 until 30).map(row => (0 until 32).map(c => nes.ppu.ciram(row * 32 + c)).map(t => if (t >= 0x20 && t < 0x7F) t.toChar else ' ').mkString.trim)
-      .filter(_.nonEmpty).mkString("\n")
+    (0 until 30)
+      .map(row => (0 until 32).map(c => nes.ppu.ciram(row * 32 + c)).map(t => if (t >= 0x20 && t < 0x7F) t.toChar else ' ').mkString.trim)
+      .filter(_.nonEmpty)
+      .mkString("\n")
 
   /** The 2C02 palette (as most emulators ship it), for saving frames. */
-  val rgb = Array(
-    0x666666, 0x002A88, 0x1412A7, 0x3B00A4, 0x5C007E, 0x6E0040, 0x6C0600, 0x561D00, 0x333500, 0x0B4800, 0x005200, 0x004F08, 0x00404D, 0, 0, 0,
-    0xADADAD, 0x155FD9, 0x4240FF, 0x7527FE, 0xA01ACC, 0xB71E7B, 0xB53120, 0x994E00, 0x6B6D00, 0x388700, 0x0C9300, 0x008F32, 0x007C8D, 0, 0, 0,
-    0xFFFEFF, 0x64B0FF, 0x9290FF, 0xC676FF, 0xF36AFF, 0xFE6ECC, 0xFE8170, 0xEA9E22, 0xBCBE00, 0x88D800, 0x5CE430, 0x45E082, 0x48CDDE, 0x4F4F4F, 0, 0,
-    0xFFFEFF, 0xC0DFFF, 0xD3D2FF, 0xE8C8FF, 0xFBC2FF, 0xFEC4EA, 0xFECCC5, 0xF7D8A5, 0xE4E594, 0xCFEF96, 0xBDF4AB, 0xB3F3CC, 0xB5EBF2, 0xB8B8B8, 0, 0)
+  val rgb = Array(0x666666, 0x002A88, 0x1412A7, 0x3B00A4, 0x5C007E, 0x6E0040, 0x6C0600, 0x561D00, 0x333500, 0x0B4800, 0x005200, 0x004F08, 0x00404D, 0, 0, 0,
+    0xADADAD, 0x155FD9, 0x4240FF, 0x7527FE, 0xA01ACC, 0xB71E7B, 0xB53120, 0x994E00, 0x6B6D00, 0x388700, 0x0C9300, 0x008F32, 0x007C8D, 0, 0, 0, 0xFFFEFF,
+    0x64B0FF, 0x9290FF, 0xC676FF, 0xF36AFF, 0xFE6ECC, 0xFE8170, 0xEA9E22, 0xBCBE00, 0x88D800, 0x5CE430, 0x45E082, 0x48CDDE, 0x4F4F4F, 0, 0, 0xFFFEFF, 0xC0DFFF,
+    0xD3D2FF, 0xE8C8FF, 0xFBC2FF, 0xFEC4EA, 0xFECCC5, 0xF7D8A5, 0xE4E594, 0xCFEF96, 0xBDF4AB, 0xB3F3CC, 0xB5EBF2, 0xB8B8B8, 0, 0)
 
   def save(frame: Array[Int], file: File): Unit = {
     val img = new BufferedImage(256, 240, BufferedImage.TYPE_INT_RGB)
@@ -162,18 +183,32 @@ class NesAudio {
     val mean = if (out.isEmpty) 0L else out.map(_.toLong).sum / out.size
     val data = out.map(v => math.max(-32768, math.min(32767, (v - mean).toInt)))
     val b = java.nio.ByteBuffer.allocate(44 + 2 * data.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-    b.put("RIFF".getBytes).putInt(36 + 2 * data.size).put("WAVEfmt ".getBytes).putInt(16).putShort(1).putShort(1)
-      .putInt(44100).putInt(88200).putShort(2).putShort(16).put("data".getBytes).putInt(2 * data.size)
+    b.put("RIFF".getBytes)
+      .putInt(36 + 2 * data.size)
+      .put("WAVEfmt ".getBytes)
+      .putInt(16)
+      .putShort(1)
+      .putShort(1)
+      .putInt(44100)
+      .putInt(88200)
+      .putShort(2)
+      .putShort(16)
+      .put("data".getBytes)
+      .putInt(2 * data.size)
     data.foreach(v => b.putShort(v.toShort))
     file.getParentFile.mkdirs()
     java.nio.file.Files.write(file.toPath, b.array())
   }
   /** RMS around the mean, per 4410 samples (a tenth of a second). */
   def loudness: Seq[Double] = rms(out.map(_.toDouble).toSeq)
-  private def rms(x: Seq[Double]) = x.grouped(4410).filter(_.size == 4410).map { g =>
-    val m = g.sum / g.size
-    math.sqrt(g.map(v => (v - m) * (v - m)).sum / g.size)
-  }.toSeq
+  private def rms(x: Seq[Double]) = x
+    .grouped(4410)
+    .filter(_.size == 4410)
+    .map { g =>
+      val m = g.sum / g.size
+      math.sqrt(g.map(v => (v - m) * (v - m)).sum / g.size)
+    }
+    .toSeq
   /** The console's output filters (high-pass at 90 and 440 Hz, low-pass at 14 kHz), first order. */
   def filtered: Seq[Double] = {
     val fs = 44100.0

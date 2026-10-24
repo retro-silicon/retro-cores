@@ -86,8 +86,9 @@ class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
     case 7 =>
       dataReadHold = 6
       val a = v & 0x3FFF
-      val r = if (a >= 0x3F00) { buffer = ciram(cart.ciram(a)); drive(palette(paletteIndex(a)) & (if ((mask & 1) != 0) 0x30 else 0x3F), 0x3F) }
-              else { val b = buffer; buffer = read(a); drive(b, 0xFF) }
+      val r =
+        if (a >= 0x3F00) { buffer = ciram(cart.ciram(a)); drive(palette(paletteIndex(a)) & (if ((mask & 1) != 0) 0x30 else 0x3F), 0x3F) }
+        else { val b = buffer; buffer = read(a); drive(b, 0xFF) }
       incrementV()
       if (!renderingNow) cart.ppuBus(v, dotCount)
       r
@@ -133,7 +134,9 @@ class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
     else {
       v &= ~0x7000
       var y = (v >> 5) & 0x1F
-      if (y == 29) { y = 0; v ^= 0x800 } else if (y == 31) y = 0 else y += 1
+      if (y == 29) { y = 0; v ^= 0x800 }
+      else if (y == 31) y = 0
+      else y += 1
       v = (v & ~0x3E0) | (y << 5)
     }
   }
@@ -226,9 +229,10 @@ class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {
       }
     }
     if (spZero && bgPix != 0 && x != 255) sprite0Hit = true
-    val index = if (bgPix == 0 && spPix == 0) 0
-                else if (spPix != 0 && (bgPix == 0 || !spBehind)) spPal << 2 | spPix
-                else bgPal << 2 | bgPix
+    val index =
+      if (bgPix == 0 && spPix == 0) 0
+      else if (spPix != 0 && (bgPix == 0 || !spBehind)) spPal << 2 | spPix
+      else bgPal << 2 | bgPix
     back(line * 256 + x) = palette(index)
     outPending0 = line * 256 + x
   }

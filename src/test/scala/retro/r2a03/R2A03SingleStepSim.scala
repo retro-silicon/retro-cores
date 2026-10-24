@@ -29,23 +29,24 @@ class R2A03SingleStepSim extends SingleStepSuite {
   val jams = Ricoh2A03.JAMS
 
   test("reference model") {
-    checkAll("reference")(body => body(_.map { t =>
-      val mem = mutable.HashMap[Int, Int]() ++= t.initial.ram
-      val log = ArrayBuffer[Cycle]()
-      val ref = new R2A03Reference(new R2A03Bus {
-        def read(a: Int) = { val v = mem.getOrElse(a, 0); log += Cycle('r', a, v); v }
-        def write(a: Int, v: Int) = { mem(a) = v; log += Cycle('w', a, v) }
-      })
-      val r = t.initial.regs
-      ref.a = r("a"); ref.x = r("x"); ref.y = r("y"); ref.s = r("s"); ref.p = r("p"); ref.pc = r("pc")
-      ref.fetch()
-      val jam = jams(t.initial.ram.find(_._1 == r("pc")).get._2)
-      if (jam) { while (log.size < t.cycles.size) ref.step() }
-      else ref.step()
-      val cycles = if (jam) log.take(t.cycles.size) else log.init
-      val pc = if (jam) ref.pc else ref.fetchAddress
-      Outcome(cycles.toSeq, Map("pc" -> pc, "s" -> ref.s, "a" -> ref.a, "x" -> ref.x, "y" -> ref.y, "p" -> ref.p), a => mem.getOrElse(a, 0))
-    }))
+    checkAll("reference")(body =>
+      body(_.map { t =>
+        val mem = mutable.HashMap[Int, Int]() ++= t.initial.ram
+        val log = ArrayBuffer[Cycle]()
+        val ref = new R2A03Reference(new R2A03Bus {
+          def read(a: Int) = { val v = mem.getOrElse(a, 0); log += Cycle('r', a, v); v }
+          def write(a: Int, v: Int) = { mem(a) = v; log += Cycle('w', a, v) }
+        })
+        val r = t.initial.regs
+        ref.a = r("a"); ref.x = r("x"); ref.y = r("y"); ref.s = r("s"); ref.p = r("p"); ref.pc = r("pc")
+        ref.fetch()
+        val jam = jams(t.initial.ram.find(_._1 == r("pc")).get._2)
+        if (jam) { while (log.size < t.cycles.size) ref.step() }
+        else ref.step()
+        val cycles = if (jam) log.take(t.cycles.size) else log.init
+        val pc = if (jam) ref.pc else ref.fetchAddress
+        Outcome(cycles.toSeq, Map("pc" -> pc, "s" -> ref.s, "a" -> ref.a, "x" -> ref.x, "y" -> ref.y, "p" -> ref.p), a => mem.getOrElse(a, 0))
+      }))
   }
 
   test("RTL") {
@@ -74,7 +75,9 @@ class R2A03SingleStepSim extends SingleStepSuite {
           cd.assertReset(); sleep(1); cd.deassertReset(); sleep(1)
           io.rdata #= 0
           var n = 0
-          while (!trace.fetch.toBoolean) { clock(); n += 1; assert(n < 10, s"reset sequence does not reach a fetch: opcode ${trace.opcode.toInt} step ${trace.step.toInt}") }
+          while (!trace.fetch.toBoolean) {
+            clock(); n += 1; assert(n < 10, s"reset sequence does not reach a fetch: opcode ${trace.opcode.toInt} step ${trace.step.toInt}")
+          }
           val r = t.initial.regs
           for ((reg, k) <- Seq(A -> "a", X -> "x", Y -> "y", SP -> "s", P -> "p")) rf(reg) #= r(k)
           rf(PCH) #= r("pc") >> 8; rf(PCL) #= r("pc") & 0xFF
@@ -86,8 +89,9 @@ class R2A03SingleStepSim extends SingleStepSuite {
           val jam = jams(t.initial.ram.find(_._1 == r("pc")).get._2)
           while (nextPc < 0 && i < 12 && !(jam && i == t.cycles.size)) {
             val a = io.cmd.address.toInt
-            val c = if (io.cmd.write.toBoolean) { mem(a) = io.cmd.data.toInt; Cycle('w', a, io.cmd.data.toInt) }
-                    else Cycle('r', a, mem.getOrElse(a, 0))
+            val c =
+              if (io.cmd.write.toBoolean) { mem(a) = io.cmd.data.toInt; Cycle('w', a, io.cmd.data.toInt) }
+              else Cycle('r', a, mem.getOrElse(a, 0))
             if (c.kind == 'r') io.rdata #= c.data
             if (i > 0 && trace.fetch.toBoolean) nextPc = a else log += c
             clock()

@@ -223,8 +223,9 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     if (a >= 0) apu.addressBus = a
     apu.pc = cpu.pc
     val v = if (conflict) dmaByte else if (a >= 0) peek(a) else 0
-    if (conflict) for (_ <- wdata)
-      oam(dmaRaw & 0xFF) = if (dmaRaw >= 0xC000) dmaByte & d else d
+    if (conflict)
+      for (_ <- wdata)
+        oam(dmaRaw & 0xFF) = if (dmaRaw >= 0xC000) dmaByte & d else d
     if (a >= 0xFF00 && (a < 0xFF80 || a == 0xFFFF)) onIoAccess(wdata.isDefined, a, wdata.getOrElse(v))
     for (_ <- wdata if !conflict) {
       val (counterTicked, tacTicked) = (counter, tac)

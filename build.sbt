@@ -1,5 +1,5 @@
 ThisBuild / organization := "retro"
-ThisBuild / version      := "0.1.0-SNAPSHOT"
+ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := "2.13.12"
 
 val spinalVersion = "1.15.0"
@@ -9,7 +9,7 @@ lazy val root = (project in file("."))
     name := "retro-cores",
     libraryDependencies ++= Seq(
       "com.github.spinalhdl" %% "spinalhdl-core" % spinalVersion,
-      "com.github.spinalhdl" %% "spinalhdl-lib"  % spinalVersion,
+      "com.github.spinalhdl" %% "spinalhdl-lib" % spinalVersion,
       compilerPlugin("com.github.spinalhdl" %% "spinalhdl-idsl-plugin" % spinalVersion),
       "org.scalatest" %% "scalatest" % "3.2.19" % Test,
       "com.lihaoyi" %% "ujson" % "4.0.2" % Test

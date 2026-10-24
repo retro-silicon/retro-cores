@@ -16,10 +16,12 @@ import scala.collection.mutable
   * must match in every cycle. */
 object NesRtl {
   private val compiled = mutable.Map[(NesCartSpec, NesTiming), SimCompiled[RetroCore]]()
-  def compile(spec: NesCartSpec, timing: NesTiming = NesTiming.ntsc) = synchronized(compiled.getOrElseUpdate((spec, timing),
-    FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz)))
-      .workspaceName(f"Nes_${spec.prgBytes}%x_${spec.chrBytes}%x_${spec.chrRam}_${spec.mapper}_${spec.verticalMirroring}${if (timing.pal) "_pal" else ""}")
-      .compile(Nes(spec, romDecoder = true, timing = timing))))
+  def compile(spec: NesCartSpec, timing: NesTiming = NesTiming.ntsc) = synchronized(compiled.getOrElseUpdate(
+      (spec, timing),
+      FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz)))
+        .workspaceName(f"Nes_${spec.prgBytes}%x_${spec.chrBytes}%x_${spec.chrRam}_${spec.mapper}_${spec.verticalMirroring}${if (timing.pal) "_pal" else ""}")
+        .compile(Nes(spec, romDecoder = true, timing = timing))
+    ))
 
   case class Result(verdict: NesRoms.Verdict, frames: Int, instructions: Long, cycles: Long, ref: NesReference)
 
@@ -52,7 +54,8 @@ object NesRtl {
           if (e.opcode == Ricoh2A03.RESET) ref.reset()
           val opcode = ref.cpu.opcode
           val (bus, cycles) = ref.cpu.step()
-          def ctx = f"instruction #${e.index} at ${e.address}%04X ${e.opcode}%03X ${Ricoh2A03.names.getOrElse(e.opcode, "?")} (frame ${ref.ppu.frames}, line ${ref.ppu.line}, dot ${ref.ppu.dot})"
+          def ctx =
+            f"instruction #${e.index} at ${e.address}%04X ${e.opcode}%03X ${Ricoh2A03.names.getOrElse(e.opcode, "?")} (frame ${ref.ppu.frames}, line ${ref.ppu.line}, dot ${ref.ppu.dot})"
           assert(e.opcode == opcode, f"$ctx: the model runs $opcode%03X")
           assert(e.bus == bus, s"$ctx: bus\n  rtl ${e.bus.mkString(", ")}\n  ref ${bus.mkString(", ")}")
           assert(e.mcycles + e.stalls == cycles, s"$ctx: ${e.mcycles}+${e.stalls} cycles, reference says $cycles")
@@ -134,9 +137,14 @@ object NesRtl {
 
 class NesSim extends AnyFunSuite {
   // Short ROMs covering the CPU, PPU registers and timing, rendering, sprites and DMA.
-  val quick = Seq("ppu_vbl_nmi/rom_singles/01-vbl_basics", "ppu_vbl_nmi/rom_singles/02-vbl_set_time",
-    "sprite_hit_tests_2005.10.05/01.basics", "sprite_overflow_tests/1.Basics", "cpu_interrupts_v2/rom_singles/4-irq_and_dma",
-    "blargg_ppu_tests_2005.09.15b/vram_access")
+  val quick = Seq(
+    "ppu_vbl_nmi/rom_singles/01-vbl_basics",
+    "ppu_vbl_nmi/rom_singles/02-vbl_set_time",
+    "sprite_hit_tests_2005.10.05/01.basics",
+    "sprite_overflow_tests/1.Basics",
+    "cpu_interrupts_v2/rom_singles/4-irq_and_dma",
+    "blargg_ppu_tests_2005.09.15b/vram_access"
+  )
   for (name <- quick) test(s"cosim: $name") {
     val file = new File(NesRoms.dir, s"$name.nes")
     assume(file.isFile, s"$file missing: run scripts/fetch-nes-test-roms.sh")
@@ -160,20 +168,23 @@ object NesRomReport extends App {
   // Compile each cartridge configuration once, before the runs share it.
   roms.map { case (_, file) => (NesCartSpec.of(NesRoms.cartridge(file)), NesRoms.timing(file)) }.distinct.foreach { case (s, t) => NesRtl.compile(s, t) }
   val start = System.nanoTime()
-  val results = Future.sequence(roms.map { case (name, file) => Future {
-    val t = System.nanoTime()
-    val (pass, line) = try {
-      val r = NesRtl.cosim(file, budget)
-      val secs = (System.nanoTime() - t) / 1e9
-      r.verdict match {
-        case NesRoms.Done(true, _, _) => (true, f"PASS      $name (${r.frames} frames, $secs%.0f s)")
-        case NesRoms.Done(false, code, text) => (false, f"FAIL $code%-4d $name (${r.frames} frames)\n${text.linesIterator.map("    " + _).mkString("\n")}")
-        case NesRoms.Running => (false, f"timeout   $name (${r.frames} frames)")
-      }
-    } catch { case t: Throwable => (false, s"MISMATCH  $name\n    ${String.valueOf(t.getMessage).linesIterator.mkString("\n    ")}") }
-    synchronized(println(line))
-    pass
-  } })
+  val results = Future.sequence(roms.map { case (name, file) =>
+    Future {
+      val t = System.nanoTime()
+      val (pass, line) =
+        try {
+          val r = NesRtl.cosim(file, budget)
+          val secs = (System.nanoTime() - t) / 1e9
+          r.verdict match {
+            case NesRoms.Done(true, _, _) => (true, f"PASS      $name (${r.frames} frames, $secs%.0f s)")
+            case NesRoms.Done(false, code, text) => (false, f"FAIL $code%-4d $name (${r.frames} frames)\n${text.linesIterator.map("    " + _).mkString("\n")}")
+            case NesRoms.Running => (false, f"timeout   $name (${r.frames} frames)")
+          }
+        } catch { case t: Throwable => (false, s"MISMATCH  $name\n    ${String.valueOf(t.getMessage).linesIterator.mkString("\n    ")}") }
+      synchronized(println(line))
+      pass
+    }
+  })
   val passed = Await.result(results, Duration.Inf).count(identity)
   pool.shutdown()
   println(f"$passed/${roms.size} pass (${(System.nanoTime() - start) / 1e9}%.0f s, $jobs jobs)")

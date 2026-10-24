@@ -28,11 +28,21 @@ class R2A03NestestSim extends AnyFunSuite {
     assume(rom.isFile, s"$rom missing: run scripts/fetch-nes-test-roms.sh")
     val image = Files.readAllBytes(rom.toPath).map(_ & 0xFF)
     val prg = image.slice(16, 16 + 0x4000)
-    val log = Source.fromFile(new File(dir, "nestest.log")).getLines().map {
-      case Line(pc, a, x, y, p, s, cyc) =>
-        Step(Integer.parseInt(pc, 16), Integer.parseInt(a, 16), Integer.parseInt(x, 16), Integer.parseInt(y, 16),
-          Integer.parseInt(p, 16), Integer.parseInt(s, 16), cyc.toLong)
-    }.toIndexedSeq
+    val log = Source
+      .fromFile(new File(dir, "nestest.log"))
+      .getLines()
+      .map { case Line(pc, a, x, y, p, s, cyc) =>
+        Step(
+          Integer.parseInt(pc, 16),
+          Integer.parseInt(a, 16),
+          Integer.parseInt(x, 16),
+          Integer.parseInt(y, 16),
+          Integer.parseInt(p, 16),
+          Integer.parseInt(s, 16),
+          cyc.toLong
+        )
+      }
+      .toIndexedSeq
 
     SimConfig.withVerilator.compile(R2A03Core()).doSim { dut =>
       val cd = dut.clockDomain

@@ -17,8 +17,7 @@ case class CycleEvent(cycle: Long, opcode: Int, step: Int, done: Boolean, bus: O
   * `address` is where its opcode was fetched. `opcode` is the full IR value: prefixed opcodes
   * include their page (SM83 CB xx = 0x1xx), and an overridden fetch reports the opcode that
   * replaced it (interrupt dispatch). `regs` are the values after it completed. */
-case class RetireEvent(index: Long, address: Int, opcode: Int, startCycle: Long, mcycles: Int, stalls: Int,
-                       bus: Seq[BusAccess], regs: Map[String, BigInt])
+case class RetireEvent(index: Long, address: Int, opcode: Int, startCycle: Long, mcycles: Int, stalls: Int, bus: Seq[BusAccess], regs: Map[String, BigInt])
 
 trait TraceBackend {
   def onCycle(e: CycleEvent): Unit = {}
@@ -35,7 +34,8 @@ class RecordingBackend extends TraceBackend {
 class PrintBackend(names: Map[Int, String] = Map.empty, out: String => Unit = println) extends TraceBackend {
   override def onRetire(e: RetireEvent) = {
     val regs = e.regs.toSeq.sortBy(_._1).map { case (n, v) => s"$n=${v.toString(16).toUpperCase}" }.mkString(" ")
-    out(f"${e.startCycle}%6d  ${e.address}%04X  ${e.opcode}%02X  ${names.getOrElse(e.opcode, "?")}%-12s ${e.mcycles}M${if (e.stalls > 0) s"+${e.stalls}" else ""}  $regs")
+    out(
+      f"${e.startCycle}%6d  ${e.address}%04X  ${e.opcode}%02X  ${names.getOrElse(e.opcode, "?")}%-12s ${e.mcycles}M${if (e.stalls > 0) s"+${e.stalls}" else ""}  $regs")
   }
 }
 

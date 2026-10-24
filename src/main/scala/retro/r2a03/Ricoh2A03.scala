@@ -350,8 +350,8 @@ object Ricoh2A03 {
   case object IndX extends Mode; case object IndY extends Mode
   case class ZpIdx(ix: Agu.Index) extends Mode; case class AbsIdx(ix: Agu.Index) extends Mode
   val ZpX = ZpIdx(Agu.byX); val ZpY = ZpIdx(Agu.byY); val AbsX = AbsIdx(Agu.byX); val AbsY = AbsIdx(Agu.byY)
-  val modeNames = Map[Mode, String](Imm -> "#n", Zp -> "zp", Abs -> "abs", IndX -> "(zp,X)", IndY -> "(zp),Y",
-    ZpX -> "zp,X", ZpY -> "zp,Y", AbsX -> "abs,X", AbsY -> "abs,Y")
+  val modeNames =
+    Map[Mode, String](Imm -> "#n", Zp -> "zp", Abs -> "abs", IndX -> "(zp,X)", IndY -> "(zp),Y", ZpX -> "zp,X", ZpY -> "zp,Y", AbsX -> "abs,X", AbsY -> "abs,Y")
 
   /** The cycles after the opcode fetch for an addressing mode and an operand use. Indexed reads
     * skip the fix-up cycle when the low byte did not carry; writes and read-modify-writes never
@@ -366,10 +366,11 @@ object Ricoh2A03 {
     // (zp) pointer: low byte into D, high byte into ADH while D moves to ADL.
     val pointer = Seq(read(Agu.ZP).assign(D -> RDATA, ADL -> Agu.ADL_INC), read(Agu.ZP).assign(ADH -> RDATA, ADL -> D))
     mode match {
-      case Imm => kind match {
-        case Read(last) => Seq(imm(D), last(fetch))
-        case _ => sys.error("immediate operands are read only")
-      }
+      case Imm =>
+        kind match {
+          case Read(last) => Seq(imm(D), last(fetch))
+          case _ => sys.error("immediate operands are read only")
+        }
       case Zp => imm(ADL) +: access(kind, Agu.ZP)
       case ZpIdx(ix) => Seq(imm(ADL), read(Agu.ZP).assign(ADL -> ix.lo)) ++ access(kind, Agu.ZP)
       case Abs => Seq(imm(ADL), imm(ADH)) ++ access(kind, AD)
@@ -390,9 +391,15 @@ object Ricoh2A03 {
     // cc = 01: ORA AND EOR ADC STA LDA CMP SBC; bbb = (zp,X) zp #n abs (zp),Y zp,X abs,Y abs,X
     val mode01 = IndexedSeq(IndX, Zp, Imm, Abs, IndY, ZpX, AbsY, AbsX)
     val group01 = IndexedSeq[(String, Kind)](
-      "ORA" -> into(alu(Alu.ORA, A, NZ), A), "AND" -> into(alu(Alu.AND, A, NZ), A), "EOR" -> into(alu(Alu.EOR, A, NZ), A),
-      "ADC" -> into(alu(Alu.ADC, A, NZCV), A), "STA" -> Write(A), "LDA" -> load(A),
-      "CMP" -> into(alu(Alu.CMP, A, NZC)), "SBC" -> into(alu(Alu.SBC, A, NZCV), A))
+      "ORA" -> into(alu(Alu.ORA, A, NZ), A),
+      "AND" -> into(alu(Alu.AND, A, NZ), A),
+      "EOR" -> into(alu(Alu.EOR, A, NZ), A),
+      "ADC" -> into(alu(Alu.ADC, A, NZCV), A),
+      "STA" -> Write(A),
+      "LDA" -> load(A),
+      "CMP" -> into(alu(Alu.CMP, A, NZC)),
+      "SBC" -> into(alu(Alu.SBC, A, NZCV), A)
+    )
     for ((m, b) <- mode01.zipWithIndex; ((name, kind), a) <- group01.zipWithIndex if !(name == "STA" && m == Imm))
       op(s"$name ${modeNames(m)}", a << 5 | b << 2 | 1, addressed(m, kind))
 
@@ -404,9 +411,11 @@ object Ricoh2A03 {
       "RLA" -> Modify(shiftC(Alu.ROL), c => alu(Alu.AND, A, NZ)(c, A)),
       "SRE" -> Modify(shiftC(Alu.LSR), c => alu(Alu.EOR, A, NZ)(c, A)),
       "RRA" -> Modify(shiftC(Alu.ROR), c => alu(Alu.ADC, A, NZCV)(c, A)),
-      "SAX" -> Write(Isa.A_AND_X), "LAX" -> load(A, X),
+      "SAX" -> Write(Isa.A_AND_X),
+      "LAX" -> load(A, X),
       "DCP" -> Modify(AluOp(Alu.DEC, Alu.SRC_D, Nil), c => alu(Alu.CMP, A, NZC)(c)),
-      "ISC" -> Modify(AluOp(Alu.INC, Alu.SRC_D, Nil), c => alu(Alu.SBC, A, NZCV)(c, A)))
+      "ISC" -> Modify(AluOp(Alu.INC, Alu.SRC_D, Nil), c => alu(Alu.SBC, A, NZCV)(c, A))
+    )
     for ((m0, b) <- mode01.zipWithIndex; ((name, kind), a) <- group11.zipWithIndex if m0 != Imm) {
       val code = a << 5 | b << 2 | 3
       // SAX and LAX index by Y where the others index by X; SAX has no abs,Y form, LAX (zp),Y is normal
@@ -429,8 +438,7 @@ object Ricoh2A03 {
     def sh(name: String, code: Int, base: Seq[MCycleSpec], ix: Agu.Index, value: Isa.Sh, also: MCycleSpec => MCycleSpec = identity) =
       op(name, code, base ++ Seq(read(ix.uncarried).assign(AD -> ix.full, D -> Agu.ADH_INC), also(write(value.address, value.data)), fetch))
     val abs = Seq(imm(ADL), imm(ADH))
-    sh("SHA (zp),Y", 0x93, Seq(imm(ADL), read(Agu.ZP).assign(D -> RDATA, ADL -> Agu.ADL_INC), read(Agu.ZP).assign(ADH -> RDATA, ADL -> D)),
-      Agu.byY, Isa.SH_A_X)
+    sh("SHA (zp),Y", 0x93, Seq(imm(ADL), read(Agu.ZP).assign(D -> RDATA, ADL -> Agu.ADL_INC), read(Agu.ZP).assign(ADH -> RDATA, ADL -> D)), Agu.byY, Isa.SH_A_X)
     sh("SHA abs,Y", 0x9F, abs, Agu.byY, Isa.SH_A_X)
     sh("TAS abs,Y", 0x9B, abs, Agu.byY, Isa.SH_A_X, _.assign(SP -> Isa.A_AND_X))
     sh("SHY abs,X", 0x9C, abs, Agu.byX, Isa.SH_Y)
@@ -470,7 +478,7 @@ object Ricoh2A03 {
     for ((name, code, o, r) <- Seq(("INX", 0xE8, Alu.INC, X), ("INY", 0xC8, Alu.INC, Y), ("DEX", 0xCA, Alu.DEC, X), ("DEY", 0x88, Alu.DEC, Y)))
       implied(name, code, alu(o, r, NZ)(fetch, r))
     for ((name, code, f, v) <- Seq(("CLC", 0x18, CF, Isa.ZERO), ("SEC", 0x38, CF, Isa.ONE), ("CLV", 0xB8, VF, Isa.ZERO),
-                                   ("CLD", 0xD8, DF, Isa.ZERO), ("SED", 0xF8, DF, Isa.ONE)))
+        ("CLD", 0xD8, DF, Isa.ZERO), ("SED", 0xF8, DF, Isa.ONE)))
       implied(name, code, fetch.assign(f -> v))
     // I changes in the cycle after the poll of CLI and SEI, so the next instruction still runs
     // under the old I and its own poll (in its opcode fetch, for a 2-cycle one) sees the new one.
@@ -488,30 +496,86 @@ object Ricoh2A03 {
     val toAD = MCycleSpec.fetch(AD).assign(PC -> Agu.AD_INC)
     op("JMP abs", 0x4C, Seq(imm(ADL), read(PC).assign(ADH -> RDATA), toAD))
     op("JMP (abs)", 0x6C, Seq(imm(ADL), imm(ADH), read(AD).assign(D -> RDATA), read(Agu.AD_LO_INC).assign(PCH -> RDATA, PCL -> D), fetch))
-    op("JSR abs", 0x20, Seq(imm(ADL), read(Agu.STACK), write(Agu.STACK, PCH).assign(SP -> Agu.S_DEC),
-      write(Agu.STACK, PCL).assign(SP -> Agu.S_DEC), read(PC).assign(ADH -> RDATA), toAD))
-    op("RTS", 0x60, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(PCL -> RDATA, SP -> Agu.S_INC),
-      read(Agu.STACK).assign(PCH -> RDATA), read(PC).assign(PC -> Agu.PC_INC), fetch))
-    op("RTI", 0x40, Seq(dummy, read(Agu.STACK).assign(SP -> Agu.S_INC), read(Agu.STACK).assign(P -> Isa.RDATA_AS_P, SP -> Agu.S_INC),
-      read(Agu.STACK).assign(PCL -> RDATA, SP -> Agu.S_INC), read(Agu.STACK).assign(PCH -> RDATA), fetch))
+    op(
+      "JSR abs",
+      0x20,
+      Seq(imm(ADL), read(Agu.STACK), write(Agu.STACK, PCH).assign(SP -> Agu.S_DEC), write(Agu.STACK, PCL).assign(SP -> Agu.S_DEC), read(PC).assign(ADH -> RDATA),
+        toAD)
+    )
+    op(
+      "RTS",
+      0x60,
+      Seq(
+        dummy,
+        read(Agu.STACK).assign(SP -> Agu.S_INC),
+        read(Agu.STACK).assign(PCL -> RDATA, SP -> Agu.S_INC),
+        read(Agu.STACK).assign(PCH -> RDATA),
+        read(PC).assign(PC -> Agu.PC_INC),
+        fetch
+      )
+    )
+    op(
+      "RTI",
+      0x40,
+      Seq(
+        dummy,
+        read(Agu.STACK).assign(SP -> Agu.S_INC),
+        read(Agu.STACK).assign(P -> Isa.RDATA_AS_P, SP -> Agu.S_INC),
+        read(Agu.STACK).assign(PCL -> RDATA, SP -> Agu.S_INC),
+        read(Agu.STACK).assign(PCH -> RDATA),
+        fetch
+      )
+    )
     // Branches: operand into D; when taken, a dummy read while PCL moves, and one more while PCH
     // is fixed if the target is on another page.
-    for ((name, code, fail) <- Seq(("BPL", 0x10, NF.isSet), ("BMI", 0x30, NF.isClear), ("BVC", 0x50, VF.isSet), ("BVS", 0x70, VF.isClear),
-                                   ("BCC", 0x90, CF.isSet), ("BCS", 0xB0, CF.isClear), ("BNE", 0xD0, ZF.isSet), ("BEQ", 0xF0, ZF.isClear)))
-      op(s"$name rel", code, Seq(imm(D).set(Interrupts.HOLD_POLL, 1).branchIf(fail, 3), read(PC).assign(PCL -> Agu.PC_REL, AD -> Agu.PC_REL).branchIf(Agu.BRANCH_SAME_PAGE, 3),
-        read(PC).assign(PC -> AD), fetch))
+    for ((name, code, fail) <- Seq(
+        ("BPL", 0x10, NF.isSet),
+        ("BMI", 0x30, NF.isClear),
+        ("BVC", 0x50, VF.isSet),
+        ("BVS", 0x70, VF.isClear),
+        ("BCC", 0x90, CF.isSet),
+        ("BCS", 0xB0, CF.isClear),
+        ("BNE", 0xD0, ZF.isSet),
+        ("BEQ", 0xF0, ZF.isClear)
+      ))
+      op(
+        s"$name rel",
+        code,
+        Seq(
+          imm(D).set(Interrupts.HOLD_POLL, 1).branchIf(fail, 3),
+          read(PC).assign(PCL -> Agu.PC_REL, AD -> Agu.PC_REL).branchIf(Agu.BRANCH_SAME_PAGE, 3),
+          read(PC).assign(PC -> AD),
+          fetch
+        )
+      )
 
     // ---- BRK, interrupts, reset, JAM -----------------------------------------------------------
-    def vectored(p: Source, first: MCycleSpec) = Seq(first, write(Agu.STACK, PCH).assign(SP -> Agu.S_DEC),
+    def vectored(p: Source, first: MCycleSpec) = Seq(
+      first,
+      write(Agu.STACK, PCH).assign(SP -> Agu.S_DEC),
       write(Agu.STACK, PCL).assign(SP -> Agu.S_DEC).set(Interrupts.SELECT, 1),
       write(Agu.STACK, p).assign(SP -> Agu.S_DEC, IF -> Isa.ONE),
       read(Interrupts.VECTOR_LO).assign(PCL -> RDATA).set(Interrupts.CLEAR_POLL, 1),
-      read(Interrupts.VECTOR_HI).assign(PCH -> RDATA).set(Interrupts.CLEAR_POLL, 1), fetch)
+      read(Interrupts.VECTOR_HI).assign(PCH -> RDATA).set(Interrupts.CLEAR_POLL, 1),
+      fetch
+    )
     op("BRK", 0x00, vectored(Isa.P_BRK, read(PC).assign(PC -> Agu.PC_INC)))
     // The fetch that took the interrupt already stepped PC: read that byte again and step back.
     op("INT", DISPATCH, vectored(Isa.P_IRQ, read(Agu.PC_DEC).assign(PC -> Agu.PC_DEC)))
-    op("RESET", RESET, Seq(dummy, dummy, read(Agu.STACK).assign(SP -> Agu.S_DEC), read(Agu.STACK).assign(SP -> Agu.S_DEC),
-      read(Agu.STACK).assign(SP -> Agu.S_DEC, IF -> Isa.ONE), read(Isa.RESET_LO).assign(PCL -> RDATA), read(Isa.RESET_HI).assign(PCH -> RDATA), fetch))
+    op(
+      "RESET",
+      RESET,
+      Seq(
+        dummy,
+        dummy,
+        read(Agu.STACK).assign(SP -> Agu.S_DEC),
+        read(Agu.STACK).assign(SP -> Agu.S_DEC),
+        read(Agu.STACK).assign(SP -> Agu.S_DEC, IF -> Isa.ONE),
+        read(Isa.RESET_LO).assign(PCL -> RDATA),
+        read(Isa.RESET_HI).assign(PCH -> RDATA),
+        fetch
+      )
+    )
     // JAM halts with the address bus parked on FFFF; only reset leaves (the fetch is never reached).
     for (code <- JAMS.toSeq.sorted)
       op("JAM", code, Seq(dummy, read(Isa.JAM_FFFF), read(Isa.JAM_FFFE), read(Isa.JAM_FFFE), read(Isa.JAM_FFFF).branchIf(Isa.ALWAYS, 4), fetch))

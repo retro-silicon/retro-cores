@@ -22,18 +22,21 @@ object FastVerilator {
     val swapped = scala.collection.mutable.ArrayBuffer[SpinalTagReady]()
     val i = phases.indexWhere(_.isInstanceOf[SimVerilatorPhase])
     require(i >= 0, "SimVerilatorPhase not found")
-    phases.insert(i + 1, new PhaseNetlist {
-      override def impl(pc: PhaseContext): Unit = {
-        pc.walkDeclarations {
-          case d: SpinalTagReady if d.hasTag(Verilator.public) =>
-            d.removeTag(Verilator.public); d.addTag(publicRead); swapped += d
-          case _ =>
+    phases.insert(
+      i + 1,
+      new PhaseNetlist {
+        override def impl(pc: PhaseContext): Unit = {
+          pc.walkDeclarations {
+            case d: SpinalTagReady if d.hasTag(Verilator.public) =>
+              d.removeTag(Verilator.public); d.addTag(publicRead); swapped += d
+            case _ =>
+          }
+          // The C++ wrapper reaches signals through the scope Verilator generates only when one
+          // signal is `public`: a constant nothing reads.
+          pc.topLevel.rework { val scope = Bool().setName("verilator_scope"); scope := False; scope.addTag(Verilator.public) }
         }
-        // The C++ wrapper reaches signals through the scope Verilator generates only when one
-        // signal is `public`: a constant nothing reads.
-        pc.topLevel.rework { val scope = Bool().setName("verilator_scope"); scope := False; scope.addTag(Verilator.public) }
       }
-    })
+    )
     phases += new PhaseNetlist {
       override def impl(pc: PhaseContext): Unit = for (d <- swapped) { d.removeTag(publicRead); d.addTag(Verilator.public) }
     }

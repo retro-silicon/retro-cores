@@ -372,10 +372,9 @@ object Sm83 {
     def alu(c: MCycleSpec, op: Int, src: Int = 7) = c.set(Alu.OP, op).set(Alu.SRC, src)
     def shift(c: MCycleSpec, op: Int, src: Int, bit: Int = 0) = c.set(Shifter.OP, op).set(Shifter.SRC, src).set(Shifter.BIT, bit)
     // Push in the SM83 order: SP-1, write the high byte, SP-1, write the low byte.
-    def push(hi: Source, lo: Source, last: MCycleSpec => MCycleSpec = identity) = Seq(
-      idle.assign(SP -> Idu.dec(SP)), write(SP, hi).assign(SP -> Idu.dec(SP)), last(write(SP, lo)))
-    def pop(lo: Sink, hi: Sink) = Seq(
-      read(SP).assign(lo -> RDATA, SP -> Idu.inc(SP)), read(SP).assign(hi -> RDATA, SP -> Idu.inc(SP)))
+    def push(hi: Source, lo: Source, last: MCycleSpec => MCycleSpec = identity) =
+      Seq(idle.assign(SP -> Idu.dec(SP)), write(SP, hi).assign(SP -> Idu.dec(SP)), last(write(SP, lo)))
+    def pop(lo: Sink, hi: Sink) = Seq(read(SP).assign(lo -> RDATA, SP -> Idu.inc(SP)), read(SP).assign(hi -> RDATA, SP -> Idu.inc(SP)))
     val pushPC = (last: MCycleSpec => MCycleSpec) => push(Isa.PC_HI, Isa.PC_LO, last)
     val ops = Seq.newBuilder[OpSpec]
     def op(name: String, opcode: Int, cycles: MCycleSpec*) = ops += OpSpec(name, opcode, cycles)
@@ -416,22 +415,20 @@ object Sm83 {
       op(s"DEC $rr", 0x0B | i << 4, idle.assign(rr -> Idu.dec(rr)), fetch)
       op(s"ADD HL,$rr", 0x09 | i << 4, idle.assign(HL -> Alu.ADD_HL(rr), F -> Alu.ADD_HL_FLAGS(rr)), fetch)
     }
-    op("LD (nn),SP", 0x08, imm.assign(Z -> RDATA), imm.assign(W -> RDATA),
-      write(WZ, SPL).assign(WZ -> Idu.inc(WZ)), write(WZ, SPH), fetch)
+    op("LD (nn),SP", 0x08, imm.assign(Z -> RDATA), imm.assign(W -> RDATA), write(WZ, SPL).assign(WZ -> Idu.inc(WZ)), write(WZ, SPH), fetch)
     op("LD SP,HL", 0xF9, idle.assign(SP -> HL), fetch)
     op("ADD SP,e", 0xE8, imm.assign(Z -> RDATA), idle.assign(SP -> Alu.SP_E, F -> Alu.SP_E_FLAGS), idle, fetch)
     op("LD HL,SP+e", 0xF8, imm.assign(Z -> RDATA), idle.assign(HL -> Alu.SP_E, F -> Alu.SP_E_FLAGS), fetch)
     for ((rr, i) <- r16Stack.zipWithIndex) {
       op(s"PUSH $rr", 0xC5 | i << 4, push(rr.hi, rr.lo) :+ fetch: _*)
-      if (rr == Sm83Regs.AF) op("POP AF", 0xF1, read(SP).assign(Z -> RDATA, SP -> Idu.inc(SP)),
-        read(SP).assign(A -> RDATA, F -> Isa.Z_F0, SP -> Idu.inc(SP)), fetch)
+      if (rr == Sm83Regs.AF)
+        op("POP AF", 0xF1, read(SP).assign(Z -> RDATA, SP -> Idu.inc(SP)), read(SP).assign(A -> RDATA, F -> Isa.Z_F0, SP -> Idu.inc(SP)), fetch)
       else op(s"POP $rr", 0xC1 | i << 4, pop(rr.lo, rr.hi) :+ fetch: _*)
     }
 
     // ---- 8-bit ALU -------------------------------------------------------------------------
     for (r <- 0 to 7; (name, aop, code) <- Seq(("INC", Alu.INC, 0x04 | r << 3), ("DEC", Alu.DEC, 0x05 | r << 3))) {
-      if (r == 6) op(s"$name (HL)", code, read(HL).assign(Z -> RDATA),
-        alu(write(HL, Alu.RESULT).assign(F -> Alu.FLAGS), aop, 6), fetch)
+      if (r == 6) op(s"$name (HL)", code, read(HL).assign(Z -> RDATA), alu(write(HL, Alu.RESULT).assign(F -> Alu.FLAGS), aop, 6), fetch)
       else op(s"$name ${r8Names(r)}", code, alu(fetch.assign(r8(r) -> Alu.RESULT, F -> Alu.FLAGS), aop, r))
     }
     for (o <- 0 to 7) {
@@ -457,14 +454,14 @@ object Sm83 {
     op("CALL nn", 0xCD, imm.assign(Z -> RDATA) +: imm.assign(W -> RDATA) +: pushPC(_.assign(PC -> WZ)) :+ fetch: _*)
     op("RET", 0xC9, pop(Z, W) :+ idle.assign(PC -> WZ) :+ fetch: _*)
     op("RETI", 0xD9, pop(Z, W) :+ idle.assign(PC -> WZ) :+ fetch.set(Interrupts.IME_OP, Interrupts.RETI): _*)
-    for ((rst, n) <- Isa.RST.zipWithIndex) op(rst.name.patch(3, " ", 0), 0xC7 | n << 3,
-      pushPC(_.assign(PC -> rst)) :+ fetch: _*)
+    for ((rst, n) <- Isa.RST.zipWithIndex) op(rst.name.patch(3, " ", 0), 0xC7 | n << 3, pushPC(_.assign(PC -> rst)) :+ fetch: _*)
     // Conditional forms branch to their final fetch when the condition fails.
     for (((cc, fail), i) <- conditions.zipWithIndex) {
       op(s"JR $cc,e", 0x20 | i << 3, imm.assign(Z -> RDATA).branchIf(fail, 2), idle.assign(PC -> Isa.PC_E), fetch)
       op(s"JP $cc,nn", 0xC2 | i << 3, imm.assign(Z -> RDATA), imm.assign(W -> RDATA).branchIf(fail, 3), idle.assign(PC -> WZ), fetch)
-      op(s"CALL $cc,nn", 0xC4 | i << 3, imm.assign(Z -> RDATA) +: imm.assign(W -> RDATA).branchIf(fail, 5) +:
-        pushPC(_.assign(PC -> WZ)) :+ fetch: _*)
+      op(s"CALL $cc,nn", 0xC4 | i << 3,
+        imm.assign(Z -> RDATA) +: imm.assign(W -> RDATA).branchIf(fail, 5) +:
+          pushPC(_.assign(PC -> WZ)) :+ fetch: _*)
       op(s"RET $cc", 0xC0 | i << 3, idle.branchIf(fail, 4) +: pop(Z, W) :+ idle.assign(PC -> WZ) :+ fetch: _*)
     }
 

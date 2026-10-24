@@ -208,7 +208,8 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
       case o if (o & 0xCF) == 0xC5 => push16(if (o == 0xF5) a << 8 | f else getRR((o >> 4) & 3))
       case o if (o & 0xCF) == 0xC1 =>
         val v = pop16()
-        if (o == 0xF1) { a = v >> 8; f = v & 0xF0 } else setRR((o >> 4) & 3, v)
+        if (o == 0xF1) { a = v >> 8; f = v & 0xF0 }
+        else setRR((o >> 4) & 3, v)
       case o if (o & 0xC7) == 0x04 =>
         val r = (o >> 3) & 7; val v = getR(r); val n = (v + 1) & 0xFF
         f = (f & 0x10) | (if (n == 0) 0x80 else 0) | (if ((v & 0xF) == 0xF) 0x20 else 0); setR(r, n)
@@ -268,6 +269,8 @@ class Sm83Reference(bus: Sm83Bus, requests: Long => Int, ack: Int => Unit) {
     case "PC" => pc = v; case "W" | "Z" =>
   }
 
-  def regs: Map[String, BigInt] = Map("A" -> a, "F" -> f, "B" -> b, "C" -> c, "D" -> d, "E" -> e, "H" -> h, "L" -> l,
-    "SPH" -> (sp >> 8), "SPL" -> (sp & 0xFF), "PC" -> pc).map { case (k, v) => k -> BigInt(v) }
+  def regs: Map[String, BigInt] =
+    Map("A" -> a, "F" -> f, "B" -> b, "C" -> c, "D" -> d, "E" -> e, "H" -> h, "L" -> l, "SPH" -> (sp >> 8), "SPL" -> (sp & 0xFF), "PC" -> pc).map {
+      case (k, v) => k -> BigInt(v)
+    }
 }

@@ -30,7 +30,8 @@ object Toy8 {
     OpSpec("LD A,(HL)", 0x7E, Seq(read(HL).assign(Z -> RDATA), fetch.assign(A -> Z))),
     OpSpec("INC A", 0x3C, Seq(fetch.assign(A -> A_INC, ZF -> A_INC_ZERO))),
     OpSpec("INC HL", 0x23, Seq(idle.assign(HL -> HL_INC), fetch)),
-    OpSpec("JR NZ,e", 0x20, Seq(imm.assign(Z -> RDATA).branchIf(ZF.isSet, 2), idle.assign(PC -> PC_E), fetch)))
+    OpSpec("JR NZ,e", 0x20, Seq(imm.assign(Z -> RDATA).branchIf(ZF.isSet, 2), idle.assign(PC -> PC_E), fetch))
+  )
 
   val names = ops.map(o => o.opcode -> o.name).toMap
 
@@ -60,7 +61,7 @@ object Toy8 {
       val bus = host[BusService]
       val retainer = retains(bus.busLock)
       awaitBuild()
-      val steal = in Bool()
+      val steal = in Bool ()
       val m = bus.newMaster(priority = 1)
       m.cmd.valid := steal
       m.cmd.write := False

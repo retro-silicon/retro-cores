@@ -42,8 +42,7 @@ class BusMaster(c: RetroBusConfig, val priority: Int) extends Area {
   * combinationally in the same cycle and may raise `stall` to stretch it. A write takes effect
   * on `fire`, the cycle it is not stalled. `direct`: a memory's read port that bypasses the bus
   * (`BusService.directRead`). */
-class BusSlave(c: RetroBusConfig, val mapping: AddressMapping, val priority: Int,
-               val direct: Option[UInt => UInt]) extends Area {
+class BusSlave(c: RetroBusConfig, val mapping: AddressMapping, val priority: Int, val direct: Option[UInt => UInt]) extends Area {
   val cmd = Flow(BusCmd(c))
   val rdata = UInt(c.dataWidth bits)
   val stall = Bool()
@@ -91,9 +90,9 @@ class BusIntercept(c: RetroBusConfig) extends Area {
   * Addresses no slave claims go to the external `RetroBus` port `logic.io`, so a bare CPU (no
   * slaves at all) exposes its whole bus, and an SoC exposes only what is really off-chip, such
   * as a Game Boy cartridge. With `external = false` unclaimed reads return `openBus`. */
-class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(),
-                val external: Boolean = true,
-                val openBus: BigInt = 0xFF) extends FiberPlugin with BusService {
+class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(), val external: Boolean = true, val openBus: BigInt = 0xFF)
+    extends FiberPlugin
+    with BusService {
   val busLock = Retainer()
   private val masters = ArrayBuffer[BusMaster]()
   private val slaves = ArrayBuffer[BusSlave]()

@@ -375,7 +375,8 @@ class GbApuReference(postBoot: Boolean) {
     // APU glitch: enabling the length while the frame sequencer's next step clocks lengths ticks it once.
     if ((value & 0x40) != 0 && !lengthEnabled && (divDivider & 1) != 0 && length != 0) {
       val l = length - 1
-      if (l == 0) { if ((value & 0x80) != 0) reload else { stop(); 0 } } else l
+      if (l == 0) { if ((value & 0x80) != 0) reload else { stop(); 0 } }
+      else l
     } else length
   }
 
@@ -540,7 +541,8 @@ class GbApuReference(postBoot: Boolean) {
       case 0x0C =>
         waveShift = Array(4, 0, 1, 2)((value >> 5) & 3)
         if (active(2)) updateWave()
-      case 0x0D => wavePeriod = (wavePeriod & ~0xFF) | value
+      case 0x0D =>
+        wavePeriod = (wavePeriod & ~0xFF) | value
         if (waveBuggedRead == 1) waveCountdown = wavePeriod ^ 0x7FF
       case 0x0E =>
         wavePeriod = (wavePeriod & 0xFF) | (value & 7) << 8
@@ -666,16 +668,8 @@ object GbApuReference {
   val SkipInactive = 0
   val SkipSkipped = 1
   val SkipSkip = 2
-  val duties = Array(
-    0, 0, 0, 0, 0, 0, 0, 1,
-    1, 0, 0, 0, 0, 0, 0, 1,
-    1, 0, 0, 0, 0, 1, 1, 1,
-    0, 1, 1, 1, 1, 1, 1, 0)
+  val duties = Array(0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0)
   /** Bits that read as 1, FF10-FF2F. */
-  val readMask = Array(
-    0x80, 0x3F, 0x00, 0xFF, 0xBF,
-    0xFF, 0x3F, 0x00, 0xFF, 0xBF,
-    0x7F, 0xFF, 0x9F, 0xFF, 0xBF,
-    0xFF, 0xFF, 0x00, 0x00, 0xBF,
-    0x00, 0x00, 0x70, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
+  val readMask = Array(0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF, 0xBF, 0xFF, 0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x70,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
 }
