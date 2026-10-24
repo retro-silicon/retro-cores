@@ -1,0 +1,13 @@
+name: Setup
+description: JDK, sbt, Verilator and cc65, as every job needs them
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 21
+        cache: sbt
+    - uses: sbt/setup-sbt@v1
+    - shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq verilator cc65

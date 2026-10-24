@@ -155,7 +155,8 @@ class NesSim extends AnyFunSuite {
 }
 
 /** Every test ROM (or those whose path contains an argument) cosimulated on the RTL, `JOBS`
-  * (default: one per core) at a time; each result prints as it finishes:
+  * (default: one per core) at a time; each result prints as it finishes, and goes with the ROM's
+  * last screen into the `RomReport` `nes-rtl`:
   * {{{ sbt "Test/runMain retro.nes.NesRomReport sprite_hit" }}} */
 object NesRomReport extends App {
   import scala.concurrent._
@@ -165,27 +166,33 @@ object NesRomReport extends App {
   val pool = java.util.concurrent.Executors.newFixedThreadPool(jobs)
   implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
   val roms = NesRoms.all.filter { case (name, _) => args.isEmpty || args.exists(name.contains) }
+  val report = new RomReport("nes-rtl")
   // Compile each cartridge configuration once, before the runs share it.
   roms.map { case (_, file) => (NesCartSpec.of(NesRoms.cartridge(file)), NesRoms.timing(file)) }.distinct.foreach { case (s, t) => NesRtl.compile(s, t) }
   val start = System.nanoTime()
   val results = Future.sequence(roms.map { case (name, file) =>
     Future {
       val t = System.nanoTime()
-      val (pass, line) =
+      val rom = name.stripSuffix(".nes")
+      // The verdict, then the test's text.
+      val (pass, verdict, text) =
         try {
           val r = NesRtl.cosim(file, budget)
           val secs = (System.nanoTime() - t) / 1e9
+          NesRoms.save(r.ref.ppu.frame, report.frame(rom))
           r.verdict match {
-            case NesRoms.Done(true, _, _) => (true, f"PASS      $name (${r.frames} frames, $secs%.0f s)")
-            case NesRoms.Done(false, code, text) => (false, f"FAIL $code%-4d $name (${r.frames} frames)\n${text.linesIterator.map("    " + _).mkString("\n")}")
-            case NesRoms.Running => (false, f"timeout   $name (${r.frames} frames)")
+            case NesRoms.Done(true, _, _) => (true, f"PASS      $name (${r.frames} frames, $secs%.0f s)", "")
+            case NesRoms.Done(false, code, text) => (false, f"FAIL $code%-4d $name (${r.frames} frames)", text)
+            case NesRoms.Running => (false, f"timeout   $name (${r.frames} frames)", "")
           }
-        } catch { case t: Throwable => (false, s"MISMATCH  $name\n    ${String.valueOf(t.getMessage).linesIterator.mkString("\n    ")}") }
-      synchronized(println(line))
+        } catch { case t: Throwable => (false, s"MISMATCH  $name", String.valueOf(t.getMessage)) }
+      report.add(rom.takeWhile(_ != '/'), rom, if (pass) "PASS" else "FAIL", s"${verdict.replace(s"$name ", "")} $text")
+      synchronized(println((verdict +: text.linesIterator.map("    " + _).toSeq).mkString("\n")))
       pass
     }
   })
   val passed = Await.result(results, Duration.Inf).count(identity)
   pool.shutdown()
+  report.close()
   println(f"$passed/${roms.size} pass (${(System.nanoTime() - start) / 1e9}%.0f s, $jobs jobs)")
 }

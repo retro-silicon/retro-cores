@@ -1,5 +1,8 @@
 # retro-cores
 
+[![CI](https://github.com/retro-silicon/retro-cores/actions/workflows/ci.yml/badge.svg)](https://github.com/retro-silicon/retro-cores/actions/workflows/ci.yml)
+· [Screenshot gallery](https://retro-silicon.github.io/retro-cores/): the screen every test ROM ends on, on the RTL
+
 Cycle-accurate classic console CPUs (Sharp SM83, Ricoh 2A03) in SpinalHDL, built the way
 [VexiiRiscv](https://github.com/SpinalHDL/VexiiRiscv) is built: a core is an empty host plus a
 list of plugins, and every feature, including introspection, is a plugin that injects logic into
@@ -219,12 +222,24 @@ What it takes:
   every free address) and registers the controller pins, so no logic depends on an input.
 - The probe reads each cycle's bus as one packed signal and the registers as 64-bit words.
 
+### CI
+
+`.github/workflows/ci.yml` runs in parallel: formatting, `sbt test` and the Verilog of every core;
+the SM83 and 6502 SingleStepTests; the Game Boy suites on the model and on the RTL (8 shards); and
+the NES test ROMs on the RTL. Each ROM report (`GbSuiteReport`, `NesRomReport`) writes a
+`RomReport`: `out/<report>.tsv` and the screen every ROM ended on in `out/frames/<report>/`.
+`CiReport` gathers them into the run summary (pass, fail and skip counts per report), and on main
+publishes [the gallery](https://retro-silicon.github.io/retro-cores/), every ROM's screen beside
+its reference screenshot. A run fails when a ROM fails that `ci/known-failures/<report>.txt` does
+not list; a listed ROM that passes is named in the summary, and each run's gallery has the lists as
+it found them (`known-failures/`).
+
 ### Hardware test ROMs
 
 ```sh
 scripts/fetch-test-roms.sh                           # c-sp/game-boy-test-roms' DMG suites into ./roms/c-sp
 sbt "testOnly retro.gb.GbSuitesSim"                  # Blargg's CPU tests, Mooneye and dmg-acid2 on the RTL, a test per ROM
-sbt "Test/runMain retro.gb.GbSuiteReport rtl"        # every suite on the RTL; table in out/gb-suites-rtl.tsv
+sbt "Test/runMain retro.gb.GbSuiteReport rtl"        # every suite on the RTL; table in out/gb-rtl.tsv, screens in out/frames/gb-rtl/
 sbt "Test/runMain retro.gb.GbSuiteReport model m3_"  # on the reference model, filtered by name, in seconds
 sbt "Test/runMain retro.gb.GbRefFrame rom.gb out.png 20"  # a ROM's 20th frame from the reference model
 ```

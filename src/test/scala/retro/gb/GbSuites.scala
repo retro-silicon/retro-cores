@@ -2,12 +2,12 @@ package retro.gb
 
 import org.scalatest.funsuite.AnyFunSuite
 import retro.core._
-import retro.sim.FastVerilator
+import retro.sim.{FastVerilator, RomReport}
 import retro.sm83._
 import spinal.core._
 import spinal.core.sim._
 
-import java.io.{File, PrintWriter}
+import java.io.File
 import java.nio.file.Files
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
@@ -412,19 +412,17 @@ object GbSuites {
   }
 }
 
-/** Runs the c-sp suites and prints a line per ROM and a pass count per suite; also writes them to
-  * `out/gb-suites-<engine>.tsv`.
+/** Runs the c-sp suites and prints a line per ROM and a pass count per suite; also writes them,
+  * with every ROM's last screen, as the `RomReport` `gb-<engine>`.
   * {{{ sbt "Test/runMain retro.gb.GbSuiteReport [model|rtl] [name filters...]" }}}
   * `SHARD=i/n` runs every n-th ROM from the i-th, for parallel JVMs. */
 object GbSuiteReport extends App {
   val engine = args.headOption.filter(Set("model", "rtl")).getOrElse("rtl")
   val filters = args.dropWhile(Set("model", "rtl"))
-  val (shard, shards) = sys.env.get("SHARD").map(_.split('/')).map(a => (a(0).toInt, a(1).toInt)).getOrElse((0, 1))
+  val (shard, shards) = sys.env.get("SHARD").filter(_.nonEmpty).map(_.split('/')).map(a => (a(0).toInt, a(1).toInt)).getOrElse((0, 1))
   val all = GbSuites.roms.filter(r => filters.isEmpty || filters.exists(r.name.contains))
   val selected = all.zipWithIndex.collect { case (r, i) if i % shards == shard => r }
-  val suffix = if (shards > 1) s"-$shard" else ""
-  new File("out").mkdirs()
-  val log = new PrintWriter(new File(s"out/gb-suites-$engine$suffix.tsv"))
+  val report = new RomReport(s"gb-$engine", if (shards > 1) s"-$shard" else "")
   val results = for (rom <- selected) yield {
     val (status, detail) = rom.skip match {
       case Some(why) => ("SKIP", why)
@@ -432,15 +430,15 @@ object GbSuiteReport extends App {
         val o =
           try { if (engine == "model") GbSuites.runModel(rom) else GbSuites.runRtl(rom) }
           catch { case e: Throwable => GbSuites.Outcome(false, s"error: ${e.getMessage}", 0) }
-        if (!o.passed && o.frame != null) GbFrame.save(o.frame, new File(s"out/frames-$engine/${rom.name}.png"))
+        if (o.frame != null) GbFrame.save(o.frame, report.frame(rom.name))
+        rom.check match { case GbSuites.Screenshot(png +: _, _) => report.reference(rom.name, png); case _ => }
         (if (o.passed) "PASS" else "FAIL", f"${o.detail} (${o.mcycles / 1e6}%.2fM)")
     }
     println(f"$status  ${rom.name}%-90s $detail")
-    log.println(s"${rom.suite}\t${rom.name}\t$status\t$detail")
-    log.flush()
+    report.add(rom.suite, rom.name, status, detail)
     rom.suite -> status
   }
-  log.close()
+  report.close()
   for ((suite, rs) <- results.groupBy(_._1).toSeq.sortBy(_._1)) {
     val c = rs.groupBy(_._2).map { case (k, v) => k -> v.size }.withDefaultValue(0)
     println(f"$suite%-18s ${c("PASS")}%5d pass ${c("FAIL")}%5d fail ${c("SKIP")}%5d skipped")

@@ -1,38 +1,94 @@
 name: CI
 
+# Jobs in parallel: format, unit tests and Verilog; then every test-ROM suite on its own runner
+# (the Game Boy RTL run in 8 shards). The report job gathers their results into the run summary,
+# fails on a ROM that is not in ci/known-failures/, and on main publishes the screenshot gallery.
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  check:
+    name: Format, unit tests, Verilog
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-          cache: sbt
-
-      - uses: sbt/setup-sbt@v1
-
-      - name: Install Verilator
-        run: sudo apt-get update && sudo apt-get install -y verilator
-
-      - name: Check formatting
-        run: sbt -batch scalafmtCheckAll Test/scalafmtCheckAll scalafmtSbtCheck
-
-      - name: Test (elaboration + Verilator sims)
-        run: sbt -batch test
-
-      - name: Generate Verilog
-        run: sbt -batch "runMain retro.sm83.Sm83Verilog" "runMain retro.r2a03.R2A03Verilog" "runMain retro.gb.GameBoyVerilog" "runMain retro.nes.NesVerilog"
-
+      - uses: ./.github/actions/setup
+      - run: sbt -batch scalafmtCheckAll Test/scalafmtCheckAll scalafmtSbtCheck test
+      - run: sbt -batch "runMain retro.sm83.Sm83Verilog" "runMain retro.r2a03.R2A03Verilog" "runMain retro.gb.GameBoyVerilog" "runMain retro.nes.NesVerilog"
+      - if: always()
+        run: mkdir -p out/tests/unit && cp target/test-reports/*.xml out/tests/unit/ || true
       - uses: actions/upload-artifact@v4
         if: always()
+        with: { name: results-unit, path: out/, if-no-files-found: ignore }
+      - uses: actions/upload-artifact@v4
+        with: { name: verilog, path: gen/, if-no-files-found: ignore }
+
+  suite:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: sm83-sst, roms: fetch-sm83-tests.sh, run: testOnly retro.sm83.Sm83SingleStepSim }
+          - { name: nes6502-sst, roms: fetch-nes6502-tests.sh, run: testOnly retro.r2a03.R2A03SingleStepSim }
+          - { name: gb-model, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport model }
+          - { name: gb-rtl-0, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 0/8 }
+          - { name: gb-rtl-1, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 1/8 }
+          - { name: gb-rtl-2, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 2/8 }
+          - { name: gb-rtl-3, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 3/8 }
+          - { name: gb-rtl-4, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 4/8 }
+          - { name: gb-rtl-5, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 5/8 }
+          - { name: gb-rtl-6, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 6/8 }
+          - { name: gb-rtl-7, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 7/8 }
+          - { name: nes-rtl, roms: fetch-nes-test-roms.sh && sh scripts/make-nes-mapper-tests.sh, run: Test/runMain retro.nes.NesRomReport }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: actions/cache@v4
         with:
-          name: verilog
-          path: gen/
-          if-no-files-found: ignore
+          path: roms/
+          key: roms-${{ matrix.roms }}-${{ hashFiles('scripts/fetch-*.sh', 'scripts/make-nes-mapper-tests.sh', 'src/test/asm/**') }}
+      - run: test -d roms || sh scripts/${{ matrix.roms }}
+      - run: sbt -batch "${{ matrix.run }}"
+        env: { SHARD: "${{ matrix.shard }}" }
+      - if: always()
+        run: mkdir -p out/tests/${{ matrix.name }} && cp target/test-reports/*.xml out/tests/${{ matrix.name }}/ || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "results-${{ matrix.name }}", path: out/, if-no-files-found: ignore }
+
+  report:
+    name: Report
+    needs: [check, suite]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - uses: actions/download-artifact@v4
+        with: { pattern: results-*, path: out/, merge-multiple: true }
+      - run: sbt -batch "Test/runMain retro.sim.CiReport https://retro-silicon.github.io/retro-cores/"
+      - if: always()
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-pages-artifact@v3
+        if: always()
+        with: { path: out/site/ }
+
+  gallery:
+    name: Gallery
+    needs: report
+    if: always() && github.ref == 'refs/heads/main' && needs.report.result != 'skipped'
+    runs-on: ubuntu-24.04
+    permissions: { pages: write, id-token: write }
+    environment: { name: github-pages, url: "${{ steps.deploy.outputs.page_url }}" }
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
