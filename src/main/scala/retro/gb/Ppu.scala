@@ -96,10 +96,10 @@ class PpuPlugin(postBoot: Boolean = false)
     def boot(after: Int, before: Int = 0) = if (postBoot) after else before
     val lcdc = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.lcdc)).simPublic()
     lcdcReg.load(lcdc)
-    val statSelect = Reg(UInt(4 bits)) init 0
-    val scy, scx, lyc, wy, wx = Reg(UInt(8 bits)) init 0
-    val bgp = Reg(UInt(8 bits)) init boot(Gb.PostBoot.bgp)
-    val obp0, obp1 = Reg(UInt(8 bits)) init boot(Gb.PostBoot.obp)
+    val statSelect = Reg(UInt(4 bits)).init(0)
+    val scy, scx, lyc, wy, wx = Reg(UInt(8 bits)).init(0)
+    val bgp = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.bgp))
+    val obp0, obp1 = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.obp))
     val x = Reg(UInt(7 bits)).init(boot(Gb.PostBoot.ppuX)).simPublic()
     val ly = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.ppuLy)).simPublic()
     val statLine = RegInit(False)
@@ -108,24 +108,24 @@ class PpuPlugin(postBoot: Boolean = false)
     val lycLine = RegInit(False)
     val firstLine = RegInit(False)
     /** The last M-cycle's mode for the STAT interrupt. */
-    val irqModeLast = Reg(UInt(2 bits)) init 0
+    val irqModeLast = Reg(UInt(2 bits)).init(0)
     /** The transfer after the last M-cycle's second dot (a halted CPU's view of the first line). */
-    val transfer3 = Reg(Bool()) init False
+    val transfer3 = RegInit(False)
     val wyPending = RegInit(False)
-    val wyLast = Reg(UInt(8 bits)) init 0
+    val wyLast = Reg(UInt(8 bits)).init(0)
     val on = lcdc(7)
 
-    val objY, objX = Vec.fill(10)(Reg(UInt(8 bits)) init 0)
-    val objIndex = Vec.fill(10)(Reg(UInt(6 bits)) init 0)
-    val objCount = Reg(UInt(4 bits)) init 0
+    val objY, objX = Vec.fill(10)(Reg(UInt(8 bits)).init(0))
+    val objIndex = Vec.fill(10)(Reg(UInt(6 bits)).init(0))
+    val objCount = Reg(UInt(4 bits)).init(0)
     val wyHit = RegInit(False)
     /** The first frame after the LCD is turned on is not shown: it is drawn white (SameBoy). */
     val blankFrame = RegInit(False)
     val st = Reg(PpuDot())
-    st.transfer init False
-    st.active init False
-    st.winY init 0xFF
-    st.yBus init 0
+    st.transfer.init(False)
+    st.active.init(False)
+    st.winY.init(0xFF)
+    st.yBus.init(0)
 
     // ---- The tick: line and frame sequencing ---------------------------------------------
     val vblank = on && ly === Gb.visibleLines - 1 && x === Gb.lineCycles - 1
@@ -170,7 +170,7 @@ class PpuPlugin(postBoot: Boolean = false)
     // entry, then its own first. During OAM DMA the scan sees the OAM bus as it last read it
     // (or the last object tile number mode 3 read); a halted CPU stops the DMA, and the scan
     // then reads OAM but finds nothing (SameBoy).
-    val xBus = Reg(UInt(8 bits)) init 0
+    val xBus = Reg(UInt(8 bits)).init(0)
     val fresh = !dma.busy || dma.halted
     val scan = for (j <- 0 until 2) yield new Area {
       val entry = ((xTicked(4 downto 0) @@ U(0, 1 bits)).resize(6) - (1 - j)).resize(6)
@@ -228,7 +228,7 @@ class PpuPlugin(postBoot: Boolean = false)
     def lateWrite(a: UInt, d: UInt) = Seq(Gb.SCY, Gb.SCX, Gb.BGP, Gb.OBP0, Gb.OBP1, Gb.WX).map(a === _).orR ||
       a === Gb.LCDC && ((lcdc ^ d) & 0x84) === 0
     val cpuLate = slave.writeFire && lateWrite(slave.cmd.address, slave.cmd.data)
-    val held = RegNext(cpuLate) init False
+    val held = RegNext(cpuLate).init(False)
     val heldAddress = RegNextWhen(slave.cmd.address, cpuLate)
     val heldData = RegNextWhen(slave.cmd.data, cpuLate)
     val write = held || slave.writeFire && !cpuLate

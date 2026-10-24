@@ -54,12 +54,12 @@ class OamDmaPlugin extends FiberPlugin {
     val sources = host.list[DirectRead]
 
     // Registers rather than a RAM: the OAM bug rewrites up to three rows in one M-cycle.
-    val oam = Vec.fill(Gb.oamBytes)(Reg(UInt(8 bits)) init 0)
+    val oam = Vec.fill(Gb.oamBytes)(Reg(UInt(8 bits)).init(0))
     val register = Reg(UInt(8 bits)).init(0xFF).simPublic()
-    val startIn = Reg(UInt(2 bits)) init 0
+    val startIn = Reg(UInt(2 bits)).init(0)
     val active = RegInit(False).simPublic()
-    val source = Reg(UInt(8 bits)) init 0
-    val index = Reg(UInt(8 bits)) init 0
+    val source = Reg(UInt(8 bits)).init(0)
+    val index = Reg(UInt(8 bits)).init(0)
 
     // A copy's last M-cycle: the DMA still counts as running in the next.
     val last = RegInit(False)
@@ -102,7 +102,7 @@ class OamDmaPlugin extends FiberPlugin {
     // Halted in this M-cycle and the last (`GbReference`).
     val ir = host[SequencerService].opcode
     val now = ir === retro.sm83.Sm83.HALTED || ir === retro.sm83.Sm83.JUST_HALTED
-    logic.halted := now && RegNext(now, False)
+    logic.halted := now && RegNext(now).init(False)
   }
 
   /** Apart from `logic`, so the PPU can use `oamRead` before it loads the locks. */

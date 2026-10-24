@@ -170,8 +170,8 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
     }
 
     // ---- Generated decoder ---------------------------------------------------------------
-    val ir = (Reg(Bits(opcodeWidth bits)) init resetOpcode).simPublic()
-    val step = Reg(UInt(stepWidth bits)) init 0
+    val ir = Reg(Bits(opcodeWidth bits)).init(resetOpcode).simPublic()
+    val step = Reg(UInt(stepWidth bits)).init(0)
 
     val spec = new DecodingSpec(HardType(Bits(wordWidth bits)))
     val all = BigInt(1) << (opcodeWidth + stepWidth)

@@ -145,7 +145,7 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
 
     irqLock.await()
     def any(ls: collection.Seq[(IrqLine, Bool)], i: Int) = ls.filter(_._1.index == i).map(_._2).foldLeft(False: Bool)(_ || _)
-    val ackedLast = Reg(Bits(5 bits)) init 0
+    val ackedLast = Reg(Bits(5 bits)).init(0)
     val raised = (0 until 5).map(i => any(lines, i) && !(ackedLast(i) && any(ackLines, i))).asBits()
     val ticked = flags | raised
     new RetroBusSlaveFactory(ifSlave, idleBits = 0xFF).read(ticked, Gb.IF)
@@ -252,10 +252,10 @@ class SerialPlugin extends PeripheralPlugin(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val tx = pins.tx
     val timer = host[TimerPlugin]
-    val sb = Reg(UInt(8 bits)) init 0
+    val sb = Reg(UInt(8 bits)).init(0)
     val active = RegInit(False)
     val internalClock = RegInit(False)
-    val bits = Reg(UInt(4 bits)) init 0
+    val bits = Reg(UInt(4 bits)).init(0)
 
     // The serial clock: a flip-flop toggled by falling edges of the counter's bit below it, also
     // when a DIV write resets the counter. The port shifts as it falls.
@@ -305,7 +305,7 @@ class JoypadPlugin extends PeripheralPlugin(SingleMapping(Gb.P1), Gb.Irq.JOYPAD)
   def buttons = pins.buttons
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val buttons = pins.buttons
-    val select = Reg(Bits(2 bits)) init 0
+    val select = Reg(Bits(2 bits)).init(0)
     val pressed = (!select(0) ? buttons(3 downto 0) | B"0000") | (!select(1) ? buttons(7 downto 4) | B"0000")
     val lines = ~pressed
     val previous = RegNext(lines).init(B"1111")
