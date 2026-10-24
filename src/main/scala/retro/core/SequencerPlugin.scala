@@ -46,6 +46,9 @@ trait SequencerService {
   /** IR: the opcode of the current M-cycle, page and overrides included. Usable from a build
     * phase that holds no `seqLock`. */
   def opcode: Bits
+  /** The CPU's own bus request, before arbitration (a DMA that halts the CPU on a read watches
+    * it). Usable from a build phase that holds no `seqLock`. */
+  def master: BusMaster
 }
 
 /** The M-cycle sequencer: a plain FSM holding the opcode register (IR) and the M-cycle counter
@@ -79,6 +82,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
   def cycleDone = early.cycleDone
   def rdata = early.rdata
   def opcode = logic.ir
+  def master = logic.master
   def addFetchOverride(valid: Bool, opcode: UInt) = overrides += valid -> opcode
 
   def addOp(op: OpSpec) = {

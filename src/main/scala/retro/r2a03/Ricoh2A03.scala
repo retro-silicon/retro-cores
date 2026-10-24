@@ -189,9 +189,9 @@ object Ricoh2A03 {
     def nmi: Bool
     /** The IRQ request, active high and level-triggered. */
     def irq: Bool
-    /** A soft reset request, or null: while high, the next opcode fetch enters the reset
-      * sequence instead, and the interrupt state is cleared. */
-    def reset: Bool = null
+    /** A soft reset request: while high, the next opcode fetch enters the reset sequence
+      * instead, and the interrupt state is cleared. */
+    def reset: Option[Bool] = None
   }
 
   /** NMI edge detection, IRQ masking and dispatch. With an `InterruptLines` plugin in the host
@@ -246,7 +246,7 @@ object Ricoh2A03 {
       }
 
       seq.addFetchOverride(decided, U(DISPATCH, 9 bits))
-      for (r <- lines.flatMap(l => Option(l.reset))) {
+      for (r <- lines.flatMap(_.reset)) {
         when(seq.fetchFire && r) { nmiLast := False; nmiPending := False; nmiVector := False; polled := False; decided := False }
         seq.addFetchOverride(r, U(RESET, 9 bits))
       }

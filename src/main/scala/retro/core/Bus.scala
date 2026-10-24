@@ -66,6 +66,9 @@ trait BusService {
   /** The access on the bus this cycle, the granted master's, for blocks that watch it (DMA bus
     * conflicts, the OAM bug). Usable from a build phase that holds no `busLock`. */
   def access: Flow[BusCmd]
+  /** The access completing this cycle, if any, with the data on the bus: the byte written or
+    * the byte read. Usable from a build phase that holds no `busLock`. */
+  def completed: Flow[UInt]
 }
 
 /** While `hit` is high the bus access goes to no slave and a read returns `data`. The owner
@@ -99,6 +102,7 @@ class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(),
     s
   }
   def access = logic.cmd
+  def completed = logic.completed
   private val intercepts = ArrayBuffer[BusIntercept]()
   def newIntercept(): BusIntercept = {
     val i = new BusIntercept(busConfig)
@@ -137,6 +141,10 @@ class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(),
     rdata := decodedData
     for (i <- intercepts.reverse) when(i.hit) { rdata := i.data }
     val stall = decodedStall && !intercepted
+
+    val completed = Flow(UInt(busConfig.dataWidth bits))
+    completed.valid := cmd.valid && !stall
+    completed.payload := cmd.write ? cmd.data | rdata
 
     for ((m, i) <- ordered.zipWithIndex) {
       m.rdata := rdata

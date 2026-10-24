@@ -11,9 +11,9 @@ import spinal.lib.misc.plugin._
 class IrqLine(val name: String, val index: Int) { override def toString = name }
 object IrqLine { def apply(name: String, index: Int) = new IrqLine(name, index) }
 
-/** Implemented by whatever latches interrupt requests (the Game Boy IF register). Peripherals
-  * get a `Bool` per line and pulse it for one cycle to raise the request; several drivers of the
-  * same line are ORed. */
+/** Implemented by whatever takes interrupt requests to the CPU. Peripherals get a `Bool` per
+  * line; several drivers of the same line are ORed. What the level means is the console's: the
+  * Game Boy's IF latches a one-cycle pulse, the NES CPU sees the line as driven. */
 trait IrqService {
   /** Retain this before calling `request` from a build phase. */
   def irqLock: Retainer
@@ -94,14 +94,22 @@ class RamPlugin(val ramName: String, val mapping: AddressMapping, val size: Int,
 }
 
 /** Answers a constant and ignores writes: unmapped I/O. Low priority by default, so it only gets
-  * the addresses no other slave in its range claims. */
-class OpenBusPlugin(val mapping: AddressMapping, val value: BigInt = 0xFF, val priority: Int = -1) extends FiberPlugin {
+  * the addresses no other slave in its range claims. `latched`: answers the data last on the bus
+  * instead (the NES's data bus keeps it), refreshed by every completed access, a DMA's too. */
+class OpenBusPlugin(val mapping: AddressMapping, val value: BigInt = 0xFF, val priority: Int = -1,
+                    val latched: Boolean = false) extends FiberPlugin {
+  /** What a read nothing answers returns this cycle. */
+  def data: UInt = logic.data
   val logic = during setup new Area {
     val bus = host[BusService]
     val retainer = retains(bus.busLock)
     awaitBuild()
     val slave = bus.newSlave(mapping, priority)
     retainer.release()
-    slave.rdata := U(value, bus.busConfig.dataWidth bits)
+    val width = bus.busConfig.dataWidth
+    val latch = latched generate Reg(UInt(width bits)).init(0)
+    if (latched) when(bus.completed.valid) { latch := bus.completed.payload }
+    val data = if (latched) latch else U(value, width bits)
+    slave.rdata := data
   }
 }

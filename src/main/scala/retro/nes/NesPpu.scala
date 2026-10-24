@@ -76,7 +76,8 @@ case class NesPpuState() extends Bundle {
   * 66 instead of all at once at dot 65, with the same result unless OAM or the sprite size
   * changes during the scan. Pixels come out on `pixel`, one per fast clock. */
 class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
-  var pixel: Flow[NesPixel] = null
+  val pins = during setup new Area { val pixel = out(Flow(NesPixel())).setName("ppu_pixel") }
+  def pixel = pins.pixel
 
   /** Power-up palette, as in `NesPpuReference`. */
   val powerUpPalette = Seq(0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0D, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2C,
@@ -84,13 +85,13 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
 
   val logic = during setup new Area {
     val bus = host[BusService]
-    val retainer = retains(bus.busLock)
+    val ctrl = host[IrqService]
+    val retainers = Seq(retains(bus.busLock), retains(ctrl.irqLock))
     awaitBuild()
     val slave = bus.newSlave(SizeMapping(0x2000, 0x2000))
-    retainer.release()
+    val nmi = ctrl.request(Nes.Irq.NMI)
+    retainers.foreach(_.release())
     val cart = host[NesCartridgePlugin]
-    val ints = host[NesInterruptsPlugin]
-    pixel = out(Flow(NesPixel())).setName("ppu_pixel")
     val clocks = RetroCore.clocks.get
     require(clocks.cycleClocks == timing.dotsPerCycle, "the PPU runs a dot per fast clock, so the core's cycles need `timing.dotsPerCycle` clocks")
     val fast = new ClockingArea(clocks.fast) {
@@ -479,7 +480,7 @@ class NesPpuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
     /** The pixel as one value (valid, y, x, color from the MSB), so a sim reads it in one go. */
     val pixelTap = (px.valid ## px.y ## px.x ## px.color).setName("ppu_pixel_tap").simPublic()
     // The CPU takes NMI as the third dot leaves it.
-    ints.nmi := next.vblank && next.ctrl(7)
+    nmi := next.vblank && next.ctrl(7)
     }
     def pixelTap = fast.pixelTap
   }

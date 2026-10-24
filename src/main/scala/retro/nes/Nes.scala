@@ -9,6 +9,8 @@ import spinal.lib._
 import spinal.lib.bus.misc._
 import spinal.lib.misc.plugin._
 
+import scala.collection.mutable.ArrayBuffer
+
 /** NES (NTSC) constants shared by the RTL plugins and `NesReference`.
   *
   * Timing convention, the same as the model's: each CPU cycle the PPU runs two dots, the APU
@@ -18,18 +20,24 @@ import spinal.lib.misc.plugin._
   * third (`CoreClocks`). */
 object Nes {
   val OAMDMA = 0x4014; val APU_STATUS = 0x4015; val JOY1 = 0x4016; val FRAME_COUNTER = 0x4017
+  /** The CPU's interrupt lines (`NesInterruptsPlugin`): the PPU drives NMI, the APU and the
+    * mapper IRQ. */
+  object Irq {
+    val NMI = IrqLine("NMI", 0)
+    val IRQ = IrqLine("IRQ", 1)
+  }
   /** APU length counter loads, indexed by the top 5 bits of the 4003/4007/400B/400F write. */
   val lengthTable = Seq(10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
                         12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30)
 
-  /** The 2A03 plugins plus the NES ones, in one host. `NesOpenBusPlugin` claims every address
-    * no other slave does, so the CPU has no external bus port. `romDecoder`: see `SequencerPlugin`
+  /** The 2A03 plugins plus the NES ones, in one host. The open bus claims every address no
+    * other slave does, so the CPU has no external bus port. `romDecoder`: see `SequencerPlugin`
     * (the simulations use it). */
   def plugins(cart: NesCartSpec, withTrace: Boolean = true, romDecoder: Boolean = false, image: Option[NesCartridge] = None,
               timing: NesTiming = NesTiming.ntsc): Seq[Hostable] =
     Ricoh2A03.plugins(withTrace, external = false, romDecoder = romDecoder) ++ Seq(
     new NesInterruptsPlugin,
-    new NesOpenBusPlugin,
+    new OpenBusPlugin(SizeMapping(0x0000, 0x10000), latched = true),
     new RamPlugin("ram", SizeMapping(0x0000, 0x2000), 0x800, midCycleRead = true), // 0800-1FFF mirror it
     new NesPpuPlugin(timing),
     new NesApuPlugin(timing),
@@ -65,17 +73,26 @@ object NesTiming {
   val pal = NesTiming(pal = true)
 }
 
-/** The CPU's NMI and IRQ inputs: the PPU drives `nmi`, the APU `irq`. `Ricoh2A03.InterruptPlugin`
-  * finds this plugin and wires its lines to them. */
-class NesInterruptsPlugin extends FiberPlugin with Ricoh2A03.InterruptLines {
+/** The CPU's NMI and IRQ inputs (`Nes.Irq`): peripherals drive them through `IrqService`, as
+  * levels. `Ricoh2A03.InterruptPlugin` finds this plugin and wires its lines to them. */
+class NesInterruptsPlugin extends FiberPlugin with IrqService with Ricoh2A03.InterruptLines {
+  val irqLock = Retainer()
+  private val requests = ArrayBuffer[(IrqLine, Bool)]()
+  def request(line: IrqLine): Bool = {
+    val b = Bool()
+    requests += line -> b
+    b
+  }
   val early = during setup new Area { val nmi, irq, reset = Bool() }
   def nmi = early.nmi
   def irq = early.irq
-  override def reset = early.reset
+  override def reset = Some(early.reset)
+  /** High in the opcode fetch that takes a reset button press, for the APU. */
+  def resetTaken: Bool = logic.resetTaken
   /** The reset button (`reset_button` pin): a pulse is held as a request until the CPU's next
-    * opcode fetch takes it; `resetTaken` is high in that fetch cycle, for the APU. */
+    * opcode fetch takes it. */
   val logic = during setup new Area {
-    val seq = host[SequencerPlugin]
+    val seq = host[SequencerService]
     awaitBuild()
     val button = in(Bool()).setName("reset_button")
     val request = RegInit(False)
@@ -83,23 +100,10 @@ class NesInterruptsPlugin extends FiberPlugin with Ricoh2A03.InterruptLines {
     val resetTaken = seq.fetchFire && request
     when(resetTaken) { request := False }
     early.reset := request
-  }
-}
-
-/** The data bus keeps the last value driven on it: reads nothing answers return it, and the APU
-  * and controller registers leave some bits undriven. Every completed access, the DMA's too,
-  * refreshes it. */
-class NesOpenBusPlugin extends FiberPlugin {
-  val logic = during setup new Area {
-    val bus = host[BusPlugin]
-    val retainer = retains(bus.busLock)
-    awaitBuild()
-    val slave = bus.newSlave(SizeMapping(0x0000, 0x10000), priority = -1)
-    retainer.release()
-    val latch = Reg(UInt(8 bits)).init(0)
-    slave.rdata := latch
-    val b = bus.logic.get
-    when(b.cmd.valid && !b.stall) { latch := b.cmd.write ? b.cmd.data | b.rdata }
+    irqLock.await()
+    def any(line: IrqLine) = requests.filter(_._1 == line).map(_._2).foldLeft(False: Bool)(_ || _)
+    early.nmi := any(Nes.Irq.NMI)
+    early.irq := any(Nes.Irq.IRQ)
   }
 }
 
@@ -122,25 +126,28 @@ class NesOpenBusPlugin extends FiberPlugin {
   * running OAM copy. Each cycle the unit decides from its state at the start of the cycle, then
   * the DMC's tick can schedule or cancel a fetch, then the register writes land. */
 class NesApuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
-  var buttons: Bits = null
+  val pins = during setup new Area {
+    val buttons = in(Bits(8 bits)).setName("joypad1")
+    val audio = out(UInt(16 bits)).setName("audio")
+  }
+  def buttons = pins.buttons
   /** The mixed output, `NesMixer`'s scale, from the state at the start of the cycle. */
-  var audio: UInt = null
+  def audio = pins.audio
   val logic = during setup new Area {
     val bus = host[BusService]
-    val seq = host[SequencerPlugin]
-    val retainer = retains(bus.busLock)
+    val ctrl = host[IrqService]
+    val retainers = Seq(retains(bus.busLock), retains(ctrl.irqLock))
     awaitBuild()
     val slave = bus.newSlave(SizeMapping(0x4000, 0x18))
     val master = bus.newMaster(priority = 1)
-    retainer.release()
-    val open = host[NesOpenBusPlugin].logic.get.latch
+    val irqLine = ctrl.request(Nes.Irq.IRQ)
+    retainers.foreach(_.release())
+    val open = host[OpenBusPlugin].data
     val ints = host[NesInterruptsPlugin]
-    val cpu = seq.logic.get.master
-    buttons = in(Bits(8 bits)).setName("joypad1")
+    val cpu = host[SequencerService].master
     // The pins are registered, as asynchronous inputs should be. It also keeps the bus read data,
     // and so most of the design, off the inputs, which Verilator re-evaluates on every edge.
     val pad = RegNext(buttons).init(0)
-    audio = out(UInt(16 bits)).setName("audio")
 
     val odd = RegInit(False)
     odd := !odd
@@ -365,7 +372,7 @@ class NesApuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
       }
     }
     // The reset button, as `NesReference.reset` (after this cycle's register writes).
-    when(ints.logic.get.resetTaken) {
+    when(ints.resetTaken) {
       dmcIrqNext := False
       when(dmc.disableDelay === 0) { dmc.disableDelay := 2 }
       enabled := 0
@@ -379,7 +386,7 @@ class NesApuPlugin(timing: NesTiming = NesTiming.ntsc) extends FiberPlugin {
     audio := mixer.mix(pulse1.output(length(0) =/= 0), pulse2.output(length(1) =/= 0), triangle.output, noise.output(length(3) =/= 0), dmc.level)
     dmc.irq := dmcIrqNext
     // The CPU samples its IRQ line at the end of the cycle: the flags as this cycle leaves them.
-    ints.irq := irqNext || dmcIrqNext || host[NesCartridgePlugin].logic.get.irq
+    irqLine := irqNext || dmcIrqNext
   }
 }
 
@@ -405,11 +412,13 @@ object NesCartSpec {
 class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = None) extends FiberPlugin {
   val logic = during setup new Area {
     val bus = host[BusService]
-    val retainer = retains(bus.busLock)
+    val ctrl = host[IrqService]
+    val retainers = Seq(retains(bus.busLock), retains(ctrl.irqLock))
     awaitBuild()
     val prgSlave = bus.newSlave(SizeMapping(0x8000, 0x8000))
     val ramSlave = bus.newSlave(SizeMapping(0x6000, 0x2000))
-    retainer.release()
+    val irqLine = ctrl.request(Nes.Irq.IRQ)
+    retainers.foreach(_.release())
 
     // ---- Mapper registers, and their values once this cycle's access has written them -------
     val chrBank0, chrBank1 = Reg(UInt(5 bits)).init(0)
@@ -553,6 +562,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     val irq = Bool()
     if (spec.mapper == 69) irq := fme7.irqAfter
     else if (spec.mapper != 4) irq := False
+    irqLine := irq
 
     val prg = Mem.fill(spec.prgBytes)(UInt(8 bits)).setName("cart_prg").simPublic()
     for (c <- image) prg.init(c.prg.map(U(_, 8 bits)).toSeq)
@@ -621,7 +631,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
       case _ => True
     }
     val ramWritable = ramReadable && (if (spec.mapper == 4) !mmc3.ramProtect else True)
-    val openBus = host[NesOpenBusPlugin].logic.get.latch
+    val openBus = host[OpenBusPlugin].data
     if (spec.mapper == 69) {
       val banks8 = spec.prgBytes >> 13
       val romData = MidCycleRead(prg, fme7.regs(8)(5 downto 0).resize(log2Up(banks8)) @@ ra)
@@ -634,7 +644,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     else for (c <- image) chr.init(c.chr.map(U(_, 8 bits)).toSeq)
     /** CHR index of a PPU address; `after` uses the registers as this cycle's access leaves them.
       * `latches`: MMC2/MMC4's latches to use. */
-    def chrIndex(a: UInt, after: Boolean = false, latches: Vec[Bool] = null): UInt = {
+    def chrIndex(a: UInt, after: Boolean = false, latches: Option[Vec[Bool]] = None): UInt = {
       val (bank0, bank1, ctrl) = if (after) (chrBank0After, chrBank1After, controlAfter) else (chrBank0, chrBank1, control)
       val i = spec.mapper match {
         case 3 => bank0(1 downto 0) @@ a(12 downto 0)
@@ -642,7 +652,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
         case 69 => (if (after) fme7.regsAfter else fme7.regs)(a(12 downto 10).resize(4)) @@ a(9 downto 0)
         case 9 | 10 =>
           val banks = if (after) mmc2.banksAfter else mmc2.banks
-          val l = if (latches != null) latches else mmc2.accessLatch
+          val l = latches.getOrElse(mmc2.accessLatch)
           banks((a(12) ## (a(12) ? l(1) | l(0))).asUInt) @@ a(11 downto 0)
         case 11 => (if (after) latchAfter else latch)(7 downto 4) @@ a(12 downto 0)
         case 1 => ctrl(4) ? ((a(12) ? bank1 | bank0) @@ a(11 downto 0)) | (bank0(4 downto 1) @@ a(12 downto 0))
@@ -681,7 +691,7 @@ class NesCartridgePlugin(val spec: NesCartSpec, image: Option[NesCartridge] = No
     * clock. Returns the two ports' data. */
   def chrPorts(dotAddress: UInt, dotAfter: Bool, address: UInt, data: UInt, enable: Bool, write: Bool): (UInt, UInt) = {
     val l = logic.get
-    val dotLatches = if (spec.mapper == 9 || spec.mapper == 10) l.mmc2.nextLatch else null
+    val dotLatches = if (spec.mapper == 9 || spec.mapper == 10) Some(l.mmc2.nextLatch) else None
     val dotIndex = dotAfter ? l.chrIndex(dotAddress, after = true, dotLatches) | l.chrIndex(dotAddress, latches = dotLatches)
     val index = l.chrIndex(address)
     if (spec.chrRam) {

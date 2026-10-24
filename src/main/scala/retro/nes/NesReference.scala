@@ -37,7 +37,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: 
   /** The mixed output (see `NesMixer`) as the previous cycle left the APU. */
   var sample = 0
   /** Called with `sample` once per CPU cycle. */
-  var onSample: Int => Unit = null
+  var onSample: Int => Unit = _ => ()
   /** Length counters of pulse 1, pulse 2, triangle and noise. */
   val length = Array.fill(4)(0)
   private val lengthHalt = Array.fill(4)(false)
@@ -68,7 +68,7 @@ class NesReference(val cart: NesCartridge, val dotsBefore: Int = 2, val timing: 
     * of the write cycle; the IRQ flag is then raised 29828-29830 cycles after the reset. */
   private def apuCycle(): Unit = {
     sample = NesMixer.mix(pulse1.output(length(0) > 0), pulse2.output(length(1) > 0), triangle.output, noise.output(length(3) > 0), dmcLevel)
-    if (onSample != null) onSample(sample)
+    onSample(sample)
     dmcCycle()
     frameCounter += 1
     if (counterReset > 0) {
