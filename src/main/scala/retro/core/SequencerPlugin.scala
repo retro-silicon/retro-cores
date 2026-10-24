@@ -43,6 +43,9 @@ trait SequencerService {
     * pulls P from the stack as `rdata` with two bits forced). Usable from any build phase. A source
     * made from it is added with `fromRdata = true`. */
   def rdata: UInt
+  /** IR: the opcode of the current M-cycle, page and overrides included. Usable from a build
+    * phase that holds no `seqLock`. */
+  def opcode: Bits
 }
 
 /** The M-cycle sequencer: a plain FSM holding the opcode register (IR) and the M-cycle counter
@@ -75,6 +78,7 @@ class SequencerPlugin(val opcodeWidth: Int = 8,
   def fetchFire = early.fetchFire
   def cycleDone = early.cycleDone
   def rdata = early.rdata
+  def opcode = logic.ir
   def addFetchOverride(valid: Bool, opcode: UInt) = overrides += valid -> opcode
 
   def addOp(op: OpSpec) = {

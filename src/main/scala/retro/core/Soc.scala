@@ -20,6 +20,26 @@ trait IrqService {
   def request(line: IrqLine): Bool
 }
 
+/** The usual shape of a peripheral: one bus slave at `mapping` and the interrupt lines `irqs`.
+  * `body` builds the logic once the bus and the interrupt controller hold them. */
+abstract class PeripheralPlugin(mapping: AddressMapping, irqs: IrqLine*) extends FiberPlugin {
+  def body(slave: BusSlave, irq: Seq[Bool]): Area
+  /** Called while the interrupt controller is still open, for requests beyond `irqs`. */
+  def whileIrqOpen(): Unit = {}
+
+  val logic = during setup new Area {
+    val bus = host[BusService]
+    val ctrl = host[IrqService]
+    val retainers = Seq(retains(bus.busLock), retains(ctrl.irqLock))
+    awaitBuild()
+    val slave = bus.newSlave(mapping)
+    val lines = irqs.map(ctrl.request)
+    whileIrqOpen()
+    retainers.foreach(_.release())
+    val impl = body(slave, lines)
+  }
+}
+
 /** A memory that another on-chip block can read without going through the bus, the way a DMA
   * engine with its own path to memory does (Game Boy OAM DMA runs alongside the CPU). */
 trait DirectRead {

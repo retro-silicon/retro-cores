@@ -2,6 +2,7 @@ package retro.gb
 
 import retro.core._
 import spinal.core._
+import spinal.core.fiber._
 import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.misc._
@@ -73,30 +74,28 @@ case class PpuDot() extends Bundle {
   * between the dots (`PpuReference.writeDot`). The timing, and what it leaves out, is described
   * at `PpuReference`, the model the system cosim checks this against dot for dot. */
 class PpuPlugin(postBoot: Boolean = false)
-    extends GbPeripheral(SizeMapping(Gb.LCDC, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
-  var lcd: LcdPixels = null
+    extends PeripheralPlugin(SizeMapping(Gb.LCDC, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
+  val pins = during setup new Area { val lcd = out(LcdPixels()).setName("lcd") }
+  def lcd = pins.lcd
   /** LCDC, for a sim to tell whether the LCD is on. */
-  var lcdcReg: UInt = null
-  private var statLateHalted: Bool = null
-  private var statAckClears: Bool = null
-  private var statWriteAcks: Bool = null
-  override def withController(ctrl: IrqService): Unit = ctrl match {
-    case c: InterruptControllerPlugin =>
-      statLateHalted = c.late(Gb.Irq.STAT, halted = true)
-      statAckClears = c.ackClears(Gb.Irq.STAT)
-      statWriteAcks = c.writeAcks(Gb.Irq.STAT)
-      c.ackClears(Gb.Irq.VBLANK) := True
-    case _ =>
+  val lcdcReg = Handle[UInt]()
+  private val statLateHalted, statAckClears, statWriteAcks = Handle[Bool]()
+  override def whileIrqOpen() = {
+    val c = host[InterruptControllerPlugin]
+    statLateHalted.load(c.late(Gb.Irq.STAT, halted = true))
+    statAckClears.load(c.ackClears(Gb.Irq.STAT))
+    statWriteAcks.load(c.writeAcks(Gb.Irq.STAT))
+    c.ackClears(Gb.Irq.VBLANK) := True
   }
 
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
-    lcd = out(LcdPixels()).setName("lcd")
+    val lcd = pins.lcd
     val vram = host.list[RamPlugin].find(_.ramName == "vram").get
     val dma = host[OamDmaPlugin]
 
     def boot(after: Int, before: Int = 0) = if (postBoot) after else before
     val lcdc = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.lcdc)).simPublic()
-    lcdcReg = lcdc
+    lcdcReg.load(lcdc)
     val statSelect = Reg(UInt(4 bits)) init 0
     val scy, scx, lyc, wy, wx = Reg(UInt(8 bits)) init 0
     val bgp = Reg(UInt(8 bits)) init boot(Gb.PostBoot.bgp)
@@ -614,7 +613,7 @@ class PpuPlugin(postBoot: Boolean = false)
     // in the next M-cycle; see `PpuReference`.
     val ending = irqMode === 3 && transferPart
     // An IF write lands a dot after the M-cycle: after the mode 0 source rises at its end.
-    if (statWriteAcks != null) statWriteAcks := ending && mode === 0
+    statWriteAcks.get := ending && mode === 0
     val lineNext = Bool()
     lineNext := line
     when(slave.writeFire && on && slave.cmd.address === Gb.LYC && compared) {
@@ -627,10 +626,10 @@ class PpuPlugin(postBoot: Boolean = false)
     irq(0) := vblank
     irq(1) := stat
     // A halted CPU sees the STAT line as it was before the dots.
-    if (statLateHalted != null) statLateHalted := stat && !(writeRise && !statLine) && !lineFor(irqModeBefore, lycLineTicked || lycLine)
+    statLateHalted.get := stat && !(writeRise && !statLine) && !lineFor(irqModeBefore, lycLineTicked || lycLine)
     // The mode 0 interrupt as the transfer ends during the dots, and the mode 2 interrupt of lines
     // 1 to 143, rise too late for an acknowledge in the last M-cycle to clear them.
-    if (statAckClears != null) statAckClears := !(stat && !(statSelect(3) && lycLineTicked) &&
+    statAckClears.get := !(stat && !(statSelect(3) && lycLineTicked) &&
       (irqMode === 2 && xTicked === Gb.lineCycles - 1 || irqMode === 0 && statSelect(0) && transferPart && s0.transfer && !firstLineTicked))
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)

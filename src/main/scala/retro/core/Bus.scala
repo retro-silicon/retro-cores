@@ -49,6 +49,8 @@ class BusSlave(c: RetroBusConfig, val mapping: AddressMapping, val priority: Int
   def fire = cmd.valid && !stall
   def writeFire = fire && cmd.write
   def readFire = fire && !cmd.write
+  def writes(address: Int) = writeFire && cmd.address === address
+  def reads(address: Int) = readFire && cmd.address === address
 }
 
 trait BusService {
@@ -61,10 +63,13 @@ trait BusService {
   def newSlave(mapping: AddressMapping, priority: Int = 0): BusSlave
   /** Lets a block take over accesses (Game Boy OAM DMA bus conflicts): see `BusIntercept`. */
   def newIntercept(): BusIntercept
+  /** The access on the bus this cycle, the granted master's, for blocks that watch it (DMA bus
+    * conflicts, the OAM bug). Usable from a build phase that holds no `busLock`. */
+  def access: Flow[BusCmd]
 }
 
 /** While `hit` is high the bus access goes to no slave and a read returns `data`. The owner
-  * decodes the access from `BusPlugin.logic.cmd`. */
+  * decodes the access from `BusService.access`. */
 class BusIntercept(c: RetroBusConfig) extends Area {
   val hit = Bool()
   val data = UInt(c.dataWidth bits)
@@ -93,7 +98,7 @@ class BusPlugin(val busConfig: RetroBusConfig = RetroBusConfig(),
     slaves += s
     s
   }
-  def slaveList: Seq[BusSlave] = slaves.toSeq
+  def access = logic.cmd
   private val intercepts = ArrayBuffer[BusIntercept]()
   def newIntercept(): BusIntercept = {
     val i = new BusIntercept(busConfig)

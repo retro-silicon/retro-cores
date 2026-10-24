@@ -162,25 +162,6 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
   }
 }
 
-/** Plugins that need a bus slave and maybe interrupt lines, wired the same way. */
-abstract class GbPeripheral(mapping: AddressMapping, irqs: IrqLine*) extends FiberPlugin {
-  def body(slave: BusSlave, irq: Seq[Bool]): Area
-  /** Called before the interrupt controller builds, for other uses of it. */
-  def withController(ctrl: IrqService): Unit = {}
-
-  val logic = during setup new Area {
-    val bus = host[BusService]
-    val ctrl = host[IrqService]
-    val retainers = Seq(retains(bus.busLock), retains(ctrl.irqLock))
-    awaitBuild()
-    val slave = bus.newSlave(mapping)
-    val lines = irqs.map(ctrl.request)
-    withController(ctrl)
-    retainers.foreach(_.release())
-    val impl = body(slave, lines)
-  }
-}
-
 /** DIV, TIMA, TMA, TAC. A 16-bit counter advances by 4 each M-cycle (one per T-cycle); DIV is
   * its top byte, and TIMA counts falling edges of the counter bit TAC selects, gated by the TAC
   * enable, so writing DIV or TAC can itself tick TIMA, as on the DMG.
@@ -189,12 +170,9 @@ abstract class GbPeripheral(mapping: AddressMapping, irqs: IrqLine*) extends Fib
   * then sees, or writes over, the ticked state (see `Gb`). On overflow TIMA reads 0x00 for one
   * M-cycle (A); the next tick loads TMA and requests the interrupt (B), which a halted CPU sees
   * an M-cycle later. Writing TIMA during A cancels both. During B a TIMA write is ignored and a TMA write also lands in TIMA. */
-class TimerPlugin(val resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
-  private var lateHalted: Bool = null
-  override def withController(ctrl: IrqService): Unit = ctrl match {
-    case c: InterruptControllerPlugin => lateHalted = c.late(Gb.Irq.TIMER, halted = true)
-    case _ =>
-  }
+class TimerPlugin(val resetCounter: Int = 0) extends PeripheralPlugin(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
+  private val lateHalted = Handle[Bool]()
+  override def whileIrqOpen() = lateHalted.load(host[InterruptControllerPlugin].late(Gb.Irq.TIMER, halted = true))
 
   /** The 16-bit counter, its value after this M-cycle's tick, and after this M-cycle's DIV
     * write: other peripherals (serial) divide their clocks from it. */
@@ -229,7 +207,7 @@ class TimerPlugin(val resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb
       ticked.overflowed := tima === 0xFF
     }
     // A halted CPU sees the interrupt an M-cycle later.
-    if (lateHalted != null) lateHalted := ticked.reloading
+    lateHalted.get := ticked.reloading
 
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
     regs.read(ticked.counter(15 downto 8), Gb.DIV)
@@ -237,7 +215,7 @@ class TimerPlugin(val resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb
     regs.read(tma, Gb.TMA)
     regs.read(tac, Gb.TAC)
 
-    def writes(a: Int) = slave.writeFire && slave.cmd.address === a
+    import slave.writes
     val data = slave.cmd.data
     val counterNext = writes(Gb.DIV) ? U(0, 16 bits) | ticked.counter
     nextCounter.load(counterNext)
@@ -268,10 +246,11 @@ class TimerPlugin(val resetCounter: Int = 0) extends GbPeripheral(SizeMapping(Gb
   * being on the link) on each falling edge of bit 8 of the timer's counter (8192 Hz), so eight
   * bits take 1024 M-cycles but start aligned to that clock, not to the SC write. `tx` is a pin
   * that pulses with each byte sent, which is how test ROMs report results. */
-class SerialPlugin extends GbPeripheral(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
-  var tx: Flow[UInt] = null
+class SerialPlugin extends PeripheralPlugin(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
+  val pins = during setup new Area { val tx = master(Flow(UInt(8 bits))).setName("serial_tx") }
+  def tx = pins.tx
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
-    tx = master(Flow(UInt(8 bits))).setName("serial_tx")
+    val tx = pins.tx
     val timer = host[TimerPlugin]
     val sb = Reg(UInt(8 bits)) init 0
     val active = RegInit(False)
@@ -297,7 +276,7 @@ class SerialPlugin extends GbPeripheral(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
     regs.read(internalClock, Gb.SC, 0)
     regs.read(activeTicked, Gb.SC, 7)
 
-    def writes(a: Int) = slave.writeFire && slave.cmd.address === a
+    import slave.writes
     val data = slave.cmd.data
     sb := divShift ? (sbTicked(6 downto 0) @@ U"1") | sbTicked
     active := activeTicked && !done
@@ -321,10 +300,11 @@ class SerialPlugin extends GbPeripheral(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
 
 /** P1. `buttons` pins, high when pressed: bits 0-3 Right Left Up Down, bits 4-7 A B Select Start.
   * Any selected input going from released to pressed requests the joypad interrupt. */
-class JoypadPlugin extends GbPeripheral(SingleMapping(Gb.P1), Gb.Irq.JOYPAD) {
-  var buttons: Bits = null
+class JoypadPlugin extends PeripheralPlugin(SingleMapping(Gb.P1), Gb.Irq.JOYPAD) {
+  val pins = during setup new Area { val buttons = in(Bits(8 bits)).setName("joypad_buttons") }
+  def buttons = pins.buttons
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
-    buttons = in(Bits(8 bits)).setName("joypad_buttons")
+    val buttons = pins.buttons
     val select = Reg(Bits(2 bits)) init 0
     val pressed = (!select(0) ? buttons(3 downto 0) | B"0000") | (!select(1) ? buttons(7 downto 4) | B"0000")
     val lines = ~pressed

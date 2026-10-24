@@ -74,7 +74,8 @@ op("LD A,(HL+)", 0x2A,
 - **Transfers** happen at the end of the cycle. Sources and sinks of different widths are resized.
 - **Branches:** `.branchIf(cond, target)` jumps to M-cycle `target` of the same opcode at the end
   of the cycle. Conditional timing is written this way: `JR NZ,e` skips its adder cycle with
-  `branchIf(ZF.isSet, 2)`. `HALT` loops on one cycle with `branchIf(Interrupts.NOT_PENDING, 1)`.
+  `branchIf(ZF.isSet, 2)`. A loop is a branch to its own cycle (the unused SM83 opcodes lock up
+  with `branchIf(Interrupts.LOCKED, 0)`).
 - **Control keys:** `.set(key, value)` sets a `CtrlKey` for that cycle. Keys left unset take their
   default value.
 
@@ -179,15 +180,16 @@ What the NES system added:
 
 ## SM83 timing notes
 
-The opcode table follows the documented M-cycle counts and bus order. A few behaviours are the
-model's own choice and have not yet been checked against hardware test ROMs:
+The opcode table follows the documented M-cycle counts and bus order. Where the documents are
+silent, the timing is the one the Blargg and Mooneye test ROMs pin down:
 
 - Interrupt dispatch takes 5 M-cycles after the discarded fetch: PC-1, SP-1, write PCH, write PCL
-  and jump, then fetch at the vector. The interrupt index is latched when dispatch starts.
-- HALT takes one cycle to enter, then waits until an interrupt is pending, then fetches. Entered
-  with an interrupt already pending and IME off, the exit fetch does not increment PC (the HALT
-  bug).
-- STOP and the unused opcodes run as a 1 M-cycle NOP.
+  and jump, then fetch at the vector. The vector and the IF bit to clear are chosen while PCL is
+  pushed, so a push of PCH into IE can redirect or cancel it (Mooneye ie_push).
+- A halted CPU fetches at PC every M-cycle: HALT's fetch is overridden to the `HALTED` opcode
+  until an interrupt is pending. Entered with one already pending and IME off, the next fetch
+  does not increment PC (the HALT bug).
+- The unused opcodes lock the CPU up. STOP runs as a 1 M-cycle NOP.
 
 ## Adding a peripheral
 
@@ -217,8 +219,10 @@ class DividerPlugin extends FiberPlugin {
 }
 ```
 
-- **Timing.** One clock is one M-cycle. A read is answered combinationally in the cycle it is
-  issued; a write lands at the end of it (`slave.writeFire`). The slave may raise `slave.stall`
+- **Timing.** Plugins run on the `cpu` clock, one tick per M-cycle. A core built with a
+  divided clock (`RetroCore(plugins, cycleClocks)`, the NES) also has a `fast` clock, several per
+  M-cycle, for logic that works per dot (`ClockingArea(RetroCore.clocks.get.fast)`). A read is
+  answered combinationally in the cycle it is issued; a write lands at the end of it (`slave.writeFire`). The slave may raise `slave.stall`
   to hold the cycle.
 - **Overlap.** Where mappings overlap the highest priority wins. `OpenBusPlugin` uses priority -1
   so it only answers what nothing else claims.

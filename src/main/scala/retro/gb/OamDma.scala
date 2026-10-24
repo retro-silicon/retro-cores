@@ -100,7 +100,7 @@ class OamDmaPlugin extends FiberPlugin {
 
   val halting = during build new Area {
     // Halted in this M-cycle and the last (`GbReference`).
-    val ir = host[SequencerPlugin].logic.ir
+    val ir = host[SequencerService].opcode
     val now = ir === retro.sm83.Sm83.HALTED || ir === retro.sm83.Sm83.JUST_HALTED
     logic.halted := now && RegNext(now, False)
   }
@@ -112,7 +112,7 @@ class OamDmaPlugin extends FiberPlugin {
   }
 
   val conflicts = during build new Area {
-    val cmd = host[BusPlugin].logic.cmd
+    val cmd = host[BusService].access
     val copying = logic.copying
     val at = logic.at
     val data = logic.data
@@ -126,7 +126,7 @@ class OamDmaPlugin extends FiberPlugin {
   }
 
   val bug = during build new Area {
-    val cmd = host[BusPlugin].logic.cmd
+    val cmd = host[BusService].access
     val isa = host[retro.sm83.Sm83.IsaPlugin]
     val oam = logic.oam
     val row = scanRow.get

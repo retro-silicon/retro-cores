@@ -24,7 +24,7 @@ console, see [docs/EXTENDING.md](docs/EXTENDING.md).
 Requirements: JDK 17+ (21 tested), sbt 1.10, Verilator 5, a C++ toolchain.
 
 ```sh
-sbt test                               # all Verilator sims: demo, toy CPU, SM83 and Game Boy cosim
+sbt test                               # all Verilator sims: toy CPU, SM83, 2A03, Game Boy and NES
 sbt "runMain retro.sm83.Sm83Verilog"   # writes gen/Sm83Core.v (the bare CPU)
 sbt "runMain retro.gb.GameBoyVerilog"  # writes gen/GameBoy.v (CPU + SoC, cartridge bus external)
 ```
@@ -280,7 +280,7 @@ one of: tests SameBoy fails too, mid-line timing that depends on the post-boot P
 cycle-exact corner cases of HALT and of interrupts raised in an instruction's last cycle.
 
 SpinalHDL comes from Maven Central (`1.15.0`, set in `build.sbt`). Nothing is vendored from
-VexiiRiscv: the plugin, fiber, database and pipeline APIs it uses all live in SpinalHDL's own
+VexiiRiscv: the plugin, fiber and database APIs it uses all live in SpinalHDL's own
 `spinal.lib` and `spinal.core.fiber`.
 
 ## Design
@@ -292,12 +292,12 @@ class RetroCore extends Component {
   val database = new Database
   val host = database on (new PluginHost)
 }
-val core = RetroCore(Seq(new StagePipelinePlugin, new SourcePlugin(8), new AddPlugin(1, 3), ...))
+val core = RetroCore(Sm83.plugins())   // bus, sequencer, register file, ALU, shifter, interrupts, ISA, trace
 ```
 
 `RetroCore` contains no logic. Each plugin is a `FiberPlugin` whose body runs in two phases:
 
-- **setup**: find other plugins by type (`host[StagePipelinePlugin]`), publish parameters into the
+- **setup**: find other plugins by type (`host[SequencerService]`), publish parameters into the
   database, and `retains(...)` any lock the plugin must contribute to before it closes;
 - **build**: generate hardware, then `release()` the lock.
 
@@ -305,28 +305,8 @@ Because elaboration is a set of cooperating fibers, plugin order in the list doe
 a plugin can add logic to a stage, decoder or bus that another plugin owns without that owner
 knowing it exists. Removing a feature is removing a plugin from the list.
 
-Parameters shared between plugins are `Database.blocking` keys (`Demo.WIDTH`): one plugin sets
+Parameters shared between plugins are `Database` keys (`RetroCore.clocks`): one plugin sets
 the value, readers block until it is set.
-
-### Decoupled control links
-
-`StagePipelinePlugin` (`retro.core`) owns a chain of SpinalHDL `pipeline.CtrlLink`s created
-lazily by id. Any plugin can say `pp.ctrl(2)` and place logic there:
-
-- payloads are typed keys (`Payload(UInt(8 bits))`) that the `pipeline.Builder` propagates from
-  where they are written to where they are read, so stages only declare what they touch;
-- `c.bypass(KEY) := ...` rewrites a payload as it passes a stage;
-- `haltWhen`, `throwWhen`, `duplicateWhen` give per-stage flow control without the stage owner
-  wiring valid/ready by hand. For the retro CPUs this is the hook for bus wait states, DMA
-  stalls and interrupt entry.
-
-Contributors hold `elaborationLock`; once every one has released it the stage list is frozen,
-introspection plugins (holding `tapLock`) attach, and only then are the `StageLink`s and Builder
-run.
-
-The CPUs' M-cycle sequencer is **not** one of these pipelines. It is a plain FSM (opcode
-register plus M-cycle counter) built on the plugin layer; see below. `CtrlLink`s stay available
-for parts that really are decoupled stages, such as a PPU/APU front end or a DMA engine.
 
 ### The retro layer
 
@@ -446,41 +426,17 @@ every M-cycle that steps a pair with the `Idu.PAIR` key, derived from the microc
 exports the IDU's address; `OamDmaPlugin` holds OAM in registers so one M-cycle can rewrite three
 rows. `Sm83Bus.idu` marks the same M-cycles in the reference model.
 
-### Introspection
-
-`WhiteboxPlugin(payloads*)` taps every stage's `down.isValid` and the listed payloads into named
-`simPublic` signals (`whitebox_s<id>_<name>`), without editing the plugins it observes. A sim
-reads them through `dut.host[WhiteboxPlugin].logic`. This is the first link of the
-VexiiRiscv-style chain: whitebox plugin, then a sim probe, then trace backends (cosim against a
-reference model, file traces, Konata).
-
-### The demo core
-
-`retro.demo.DemoCore` is not a CPU; it exists to prove the mechanics:
-
-| Plugin | Stage | Role |
-|---|---|---|
-| `SourcePlugin(width)` | 0 | sets `WIDTH`, emits an incrementing counter, stalls under backpressure |
-| `AddPlugin(at, k)` ×2 | 1, 2 | adds a constant via `bypass`; the two don't know each other |
-| `HaltPlugin(at)` | 1 | `haltWhen(stall)` from an input pin |
-| `SinkPlugin(at)` | 3 | drives the result out as a `Flow` |
-| `WhiteboxPlugin(VALUE)` | all | introspection taps |
-
-`DemoCoreSim` drives random halts for 400 cycles and checks that the output sequence is exactly
-`n + 13` with nothing dropped or duplicated, and that the whitebox saw every stage valid.
-
 ## Layout
 
 ```
 src/main/scala/retro/core/   framework: RetroCore, Bus (masters, slaves, register factory), RegFile,
                              Sequencer, Microcode, Soc (IrqService, RamPlugin, OpenBusPlugin),
-                             Trace, StagePipelinePlugin, WhiteboxPlugin
+                             Trace, MidCycleRead
 src/main/scala/retro/sim/    Probe and trace backends
 src/main/scala/retro/sm83/   SM83: registers, ALU, shifter, interrupt and ISA plugins, reference model
 src/main/scala/retro/gb/     Game Boy SoC plugins, the GameBoy composition, system reference model
 src/main/scala/retro/r2a03/  Ricoh 2A03 CPU plugins and reference model
 src/main/scala/retro/nes/    NES plugins (PPU, APU and DMA, cartridge), the Nes composition, system model
-src/main/scala/retro/demo/   toy pipeline exercising the CtrlLink layer
 src/test/scala/retro/toy/    toy CPU testing sequencer, pairs, flags, branches, stalls, DMA
 src/test/scala/retro/sm83/   SM83 cosimulation (hand-written and random code)
 src/test/scala/retro/gb/     Game Boy system cosimulation, known-answer tests of the reference model

@@ -279,7 +279,7 @@ object GbSuites {
       io.rdata #= 0xFF
       io.stall #= false
       val lcd = dut.host[PpuPlugin].lcd
-      val lcdc = dut.host[PpuPlugin].lcdcReg
+      val lcdc = dut.host[PpuPlugin].lcdcReg.get
       val ir = dut.host[SequencerPlugin].logic.ir
       val hramMem = dut.host.list[RamPlugin].find(_.ramName == "hram").get.logic.mem
       val cartRam = Option(dut.host[CartridgePlugin].logic.ram).map(_.mem)

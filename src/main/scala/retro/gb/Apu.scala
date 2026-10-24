@@ -81,15 +81,15 @@ class SeqLogic {
   *
   * `audio` is the mixed output after each of the two ticks: left, right, left, right, each a
   * signed sum over channels of (15 - 2 * sample) * (NR50 volume + 1). */
-class ApuPlugin(postBoot: Boolean = true) extends GbPeripheral(SizeMapping(0xFF10, 0x30)) {
-  var audio: Vec[SInt] = null
+class ApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping(0xFF10, 0x30)) {
+  val pins = during setup new Area { val audio = out(Vec.fill(4)(SInt(10 bits))).setName("apu_audio").simPublic() }
+  def audio = pins.audio
   def body(slave: BusSlave, irq: Seq[Bool]): Area = new Area {
     import ApuReference._
     val timer = host[TimerPlugin]
-    val busCmd = host[BusPlugin].logic.cmd
+    val busCmd = host[BusService].access
     val pcNow = host[RegFileService].read(Sm83Regs.PC)
-    audio = out(Vec.fill(4)(SInt(10 bits))).setName("apu_audio")
-    audio.simPublic()
+    val audio = pins.audio
 
     val s = new SeqLogic
     import s._
