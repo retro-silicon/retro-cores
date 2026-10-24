@@ -33,7 +33,7 @@ object NesRtl {
       dut.host[NesCartridgePlugin].load(NesRoms.cartridge(file))
       val ref = new NesReference(NesRoms.cartridge(file), timing = timing)
       val crcs = NesRoms.expectedCrcs(file)
-      dut.host[NesApuPlugin].buttons #= 0
+      dut.host[NesJoypadPlugin].buttons #= 0
       val resetButton = dut.host[NesInterruptsPlugin].logic.get.button
       resetButton #= false
       var pressNow = false

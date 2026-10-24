@@ -19,7 +19,7 @@ object NesSpeed extends App {
   time("model") { val ref = new NesReference(NesCartridge.load(file)); var c = 0L; while (c < n) c += ref.cpu.step()._2 }
   NesRtl.compile(NesCartSpec.of(NesCartridge.load(file))).doSim { dut =>
     dut.host[NesCartridgePlugin].load(NesCartridge.load(file))
-    dut.host[NesApuPlugin].buttons #= 0
+    dut.host[NesJoypadPlugin].buttons #= 0
     dut.host[NesInterruptsPlugin].logic.get.button #= false
     dut.clockDomain.forkStimulus(10)
     dut.clockDomain.waitSampling(30)
