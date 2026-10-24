@@ -1,31 +1,35 @@
 package retro.gb
 
+import org.scalatest.funsuite.AnyFunSuite
 import retro.core._
+import retro.sim.FastVerilator
 import retro.sm83._
+import spinal.core._
 import spinal.core.sim._
 
 import java.io.{File, PrintWriter}
 import java.nio.file.Files
+import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
 /** The test ROMs `scripts/fetch-test-roms.sh` takes from c-sp/game-boy-test-roms into
-  * `roms/c-sp`, as a DMG runs them, and how each one reports its result:
-  *  - Mealybug Tearoom Tests and AGE's screenshot tests: the frame when `LD B,B` executes must
-  *    match the DMG reference screenshot;
-  *  - AGE, SameSuite and wilbertpol's Mooneye fork: B C D E H L = 3 5 8 13 21 34 when `LD B,B`
-  *    (Mooneye's old `ED`) executes;
+  * `roms/c-sp` (or `$GB_TEST_ROMS/c-sp`), as a DMG runs them, and how each one reports its result:
+  *  - Mealybug Tearoom Tests, dmg-acid2 and AGE's screenshot tests: the frame when `LD B,B`
+  *    executes must match the DMG reference screenshot;
+  *  - AGE, SameSuite, the Mooneye Test Suite and wilbertpol's fork of it: B C D E H L =
+  *    3 5 8 13 21 34 when `LD B,B` (the fork's old `ED`) executes;
   *  - Gambatte: after 15 frames' time, the hex digits in the ROM's name drawn as tiles at the
   *    top left (`_dmg08_out<hex>`), or the frame matching `<name>_dmg08.png`;
   *  - Gambatte's audio tests (`_outaudio0/1`): the output stays constant, or changes, in the
   *    last frame's time;
   *  - GBMicrotest: FF82 = 01 for a pass, FF for a failure;
-  *  - blargg's dmg_sound: A000 = 00 under the DE B0 61 signature;
+  *  - blargg's: "Passed" over serial, or A000 = 00 under the DE B0 61 signature;
   *  - Scribbltests, Bully, Strikethrough, firstwhite, TurtleTests, MBC3 Tester: the frame
   *    matching the DMG screenshot after a fixed time.
   * ROMs for other models, or needing hardware not built (APU, MBC2/3, button presses) are listed
   * with the reason they are skipped. */
 object GbSuites {
-  val root = new File(GbRomRunner.root, "c-sp")
+  val root = new File(sys.env.getOrElse("GB_TEST_ROMS", "roms"), "c-sp")
   val frameCycles = Gb.lineCycles * Gb.frameLines
   val LdBB = 0x40
 
@@ -37,7 +41,8 @@ object GbSuites {
   case object Micro extends Check
   /** Gambatte's audio tests: in the last frame's time the output must change (`sound`) or not. */
   case class Audio(sound: Boolean) extends Check
-  /** Blargg's newer tests: A001-A003 = DE B0 61 and A000 the result, 00 for a pass. */
+  /** Blargg's: "Passed" or "Failed" over serial, or A001-A003 = DE B0 61 and A000 the result,
+    * 00 for a pass. */
   case object Blargg extends Check
 
   case class Rom(suite: String, name: String, file: File, check: Check, mcycles: Long, skip: Option[String] = None)
@@ -52,7 +57,23 @@ object GbSuites {
   private def sibling(f: File, name: String) = Some(new File(f.getParentFile, name)).filter(_.isFile)
   private def name(f: File) = root.toPath.relativize(f.toPath).toString.take(root.toPath.relativize(f.toPath).toString.lastIndexOf('.'))
 
-  def roms: Seq[Rom] = mealybug ++ age ++ gambatte ++ micro ++ wilbertpol ++ same ++ blargg ++ screenshots
+  def roms: Seq[Rom] = blargg ++ mooneye ++ acid ++ mealybug ++ age ++ gambatte ++ micro ++ wilbertpol ++ same ++ screenshots
+
+  /** Blargg's DMG tests; the combined ROMs repeat or run long, so they get their own time. */
+  def blargg = files("blargg", ".gb").map { f =>
+    val skip =
+      if (Seq("cgb_sound", "interrupt_time").exists(f.getPath.contains)) Some("CGB test")
+      // Alone it prints every corrupted OAM dump and its text log grows slower to append to, far
+      // past the budget; part 7 of the combined oam_bug ROM checks the same CRC.
+      else if (base(f) == "7-timing_effect") Some("slow alone; checked as part 7 of oam_bug")
+      else None
+    val seconds = f.getName match { case "cpu_instrs.gb" => 60; case "dmg_sound.gb" => 36; case _ => 30 }
+    Rom("blargg", name(f), f, Blargg, seconds * 60L * frameCycles, skip)
+  }
+
+  def acid = files("dmg-acid2", ".gb").map { f =>
+    Rom("dmg-acid2", name(f), f, Screenshot(sibling(f, "dmg-acid2-dmg.png").toSeq, Some(LdBB)), 60 * frameCycles)
+  }
 
   def mealybug = files("mealybug-tearoom-tests", ".gb").map { f =>
     val pngs = Seq("_dmg_blob.png", "_dmg_b.png").flatMap(s => sibling(f, base(f) + s))
@@ -94,18 +115,21 @@ object GbSuites {
     Rom("gbmicrotest", name(f), f, Micro, (if (f.getName == "is_if_set_during_ime0.gb") 30 else 4) * frameCycles, skip)
   }
 
-  def wilbertpol = files("mooneye-test-suite-wilbertpol", ".gb").map { f =>
+  /** A Mooneye suite: the model a test is for is the tag after its last `-` (`G` the DMG). */
+  def mooneyeSuite(suite: String, dir: String, check: Check) = files(dir, ".gb").map { f =>
     val n = name(f)
     val tag = base(f).split('-').drop(1).lastOption.getOrElse("")
     val dmg = tag.isEmpty || tag.contains("G") || tag.contains("dmgABC") || tag == "dmg"
     val skip =
-      if (!n.startsWith("mooneye-test-suite-wilbertpol/acceptance") && !n.startsWith("mooneye-test-suite-wilbertpol/emulator-only")) Some("not an acceptance test")
+      if (!n.startsWith(s"$dir/acceptance") && !n.startsWith(s"$dir/emulator-only")) Some("not an acceptance test")
       else if (!dmg) Some("another Game Boy model")
       else if (n.contains("/mbc2")) Some("MBC2 not modelled")
       else if (n.contains("multicart")) Some("MBC1 multicart wiring not modelled")
       else None
-    Rom("wilbertpol", n, f, Fibonacci(0xED), 500 * frameCycles, skip)
+    Rom(suite, n, f, check, 500 * frameCycles, skip)
   }
+  def mooneye = mooneyeSuite("mooneye", "mooneye-test-suite", Fibonacci(LdBB))
+  def wilbertpol = mooneyeSuite("wilbertpol", "mooneye-test-suite-wilbertpol", Fibonacci(0xED))
 
   def same = files("same-suite", ".gb").map { f =>
     val n = name(f)
@@ -113,11 +137,6 @@ object GbSuites {
     val skip = if (n.contains("/apu/")) { if (base(f).startsWith("div_write_trigger") && !base(f).contains("volume")) None else Some("CGB PCM registers") }
       else if (!n.contains("/interrupt/")) Some("CGB or SGB test") else None
     Rom("samesuite", n, f, Fibonacci(LdBB), 600 * frameCycles, skip)
-  }
-
-  /** dmg_sound's singles and the combined ROM (which repeats forever, so it is judged at 36 s). */
-  def blargg = files("blargg/dmg_sound", ".gb").map { f =>
-    Rom("blargg", name(f), f, Blargg, (if (f.getName == "dmg_sound.gb") 36 * 60 else 30 * 60).toLong * frameCycles)
   }
 
   def screenshots: Seq[Rom] = {
@@ -145,6 +164,7 @@ object GbSuites {
     def hram(address: Int): Int
     /** Cartridge RAM, offset from A000. */
     def cart(offset: Int): Int
+    def serial: String
     def audioVaried: Boolean
     def audioDone: Boolean
   }
@@ -209,9 +229,12 @@ object GbSuites {
       Some(Outcome(v.audioDone && v.audioVaried == sound, if (!v.audioDone) "no audio" else if (v.audioVaried) "sound" else "silence", cycles))
     case Blargg if frameEnd || end =>
       val signed = v.cart(1) == 0xDE && v.cart(2) == 0xB0 && v.cart(3) == 0x61
-      if (signed && v.cart(0) == 0) Some(Outcome(true, "A000 = 00", cycles))
+      val serial = v.serial.replace('\n', ' ').trim
+      if (serial.contains("Passed")) Some(Outcome(true, serial, cycles))
+      else if (serial.contains("Failed")) Some(Outcome(false, serial, cycles))
+      else if (signed && v.cart(0) == 0) Some(Outcome(true, "A000 = 00", cycles))
       else if (signed && v.cart(0) != 0x80) Some(Outcome(false, f"A000 = ${v.cart(0)}%02X: " + text(v), cycles))
-      else if (end) Some(Outcome(false, if (signed) "timeout: " + text(v) else "timeout", cycles))
+      else if (end) Some(Outcome(false, if (signed) "timeout: " + text(v) else s"timeout; serial: $serial", cycles))
       else None
     case _ if end => Some(Outcome(false, "timeout", cycles))
     case _ => None
@@ -241,6 +264,7 @@ object GbSuites {
       def frame = gb.ppu.frame
       def hram(a: Int) = gb.hram(a)
       def cart(o: Int) = cart0(0xA000 + o)
+      def serial = gb.serialOut.map(_.toChar).mkString
       def audioVaried = gb.audioWindows.varied
       def audioDone = gb.audioWindows.done
     }
@@ -263,16 +287,23 @@ object GbSuites {
     outcome.get.copy(frame = gb.ppu.frame.clone())
   }
 
+  private val compiled = mutable.Map[CartridgeSpec, SimCompiled[RetroCore]]()
+  def compile(spec: CartridgeSpec) = synchronized { compiled.getOrElseUpdate(spec,
+    FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz))).workspacePath(sys.env.getOrElse("SIM_WORKSPACE", "simWorkspace")).workspaceName(f"GameBoyRom_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
+      .compile(GameBoy(withTrace = false, cartridge = Some(spec), romDecoder = true))) }
+
   /** On the `GameBoy` RTL with a `CartridgePlugin`; frames come from its `lcd` pixel port. */
   def runRtl(rom: Rom): Outcome = {
     val image = Files.readAllBytes(rom.file.toPath)
+    // Blargg's ROMs write their report to cartridge RAM even when the header declares none
+    // (halt_bug), as emulators provide; give every MBC cartridge at least one RAM bank.
     val spec = CartridgeSpec.fromHeader(image) match {
       case s if s.mbc != Mbc.None && s.ramBytes < 0x2000 => s.copy(ramBytes = 0x2000)
       case s => s
     }
     val op = opcodeOf(rom)
     var outcome: Outcome = null
-    GbRomRunner.compile(spec).doSimUntilVoid { dut =>
+    compile(spec).doSimUntilVoid { dut =>
       dut.host[CartridgePlugin].load(image)
       dut.host[JoypadPlugin].buttons #= 0
       val io = dut.host[BusPlugin].logic.io
@@ -280,10 +311,12 @@ object GbSuites {
       io.stall #= false
       val lcd = dut.host[PpuPlugin].lcd
       val lcdc = dut.host[PpuPlugin].lcdcReg.get
-      val ir = dut.host[SequencerPlugin].logic.ir
+      val ir = dut.host[SequencerService].opcode
       val hramMem = dut.host.list[RamPlugin].find(_.ramName == "hram").get.logic.mem
       val cartRam = Option(dut.host[CartridgePlugin].logic.ram).map(_.mem)
       val cartBytes = spec.ramBytes max 1
+      val tx = dut.host[SerialPlugin].tx
+      val serialText = new StringBuilder
       val rf = dut.host[RegFilePlugin].regs.byReg
       import Sm83Regs._
       val buf = Array.fill(160 * 144)(0)
@@ -295,6 +328,7 @@ object GbSuites {
         def frame = buf
         def hram(a: Int) = hramMem.getBigInt(a).toInt
         def cart(o: Int) = cartRam.map(_.getBigInt(o % cartBytes).toInt).getOrElse(0xFF)
+        def serial = serialText.toString
         def audioVaried = windows.varied
         def audioDone = windows.done
       }
@@ -306,6 +340,7 @@ object GbSuites {
       dut.clockDomain.onSamplings {
         if (outcome == null || cycles < shownAt) {
           LcdPixels.capture(lcd, buf)
+          if (tx.valid.toBoolean) serialText += tx.payload.toInt.toChar
           val y = lcd.y.toInt
           val vblank = lastY == Gb.visibleLines - 1 && y == Gb.visibleLines
           var frameEnd = vblank
@@ -364,4 +399,21 @@ object GbSuiteReport extends App {
     val c = rs.groupBy(_._2).map { case (k, v) => k -> v.size }.withDefaultValue(0)
     println(f"$suite%-18s ${c("PASS")}%5d pass ${c("FAIL")}%5d fail ${c("SKIP")}%5d skipped")
   }
+}
+
+/** The CPU and PPU suites on the RTL, a test per ROM (about 15 minutes); `GB_ROMS=a,b` picks the
+  * ROMs whose name contains one of them instead. Skipped ROMs are registered as ignored, with the
+  * reason in the name. */
+class GbSuitesSim extends AnyFunSuite {
+  val filters = sys.env.get("GB_ROMS").map(_.split(',').toSeq).getOrElse(Seq("blargg/cpu_instrs/individual",
+    "blargg/instr_timing", "blargg/mem_timing", "blargg/halt_bug", "blargg/oam_bug", "mooneye-test-suite/", "dmg-acid2"))
+  val roms = GbSuites.roms.filter(r => filters.exists(r.name.contains))
+  for (rom <- roms) rom.skip match {
+    case Some(why) => ignore(s"${rom.name} ($why)") {}
+    case None => test(rom.name) {
+      val o = GbSuites.runRtl(rom)
+      assert(o.passed, o.detail)
+    }
+  }
+  if (roms.isEmpty) test("test ROMs") { cancel(s"no ROMs under ${GbSuites.root}: run scripts/fetch-test-roms.sh") }
 }

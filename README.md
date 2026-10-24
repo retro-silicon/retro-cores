@@ -213,50 +213,31 @@ What it takes:
 ### Hardware test ROMs
 
 ```sh
-scripts/fetch-test-roms.sh                         # Blargg's CPU tests, the Mooneye Test Suite and dmg-acid2 into ./roms
-sbt "testOnly retro.gb.GameBoyRomSim"              # each ROM as a test on the RTL (about 10 minutes)
-sbt "Test/runMain retro.gb.GbRomReport timer/"     # pass/fail table for ROMs whose name matches
-sbt "Test/runMain retro.gb.GbRefRom timer/"        # the same ROMs on the reference model, in seconds
-sbt "testOnly retro.gb.GameBoyLcdSim"              # dmg-acid2 on the RTL; frames saved to out/
+scripts/fetch-test-roms.sh                           # c-sp/game-boy-test-roms' DMG suites into ./roms/c-sp
+sbt "testOnly retro.gb.GbSuitesSim"                  # Blargg's CPU tests, Mooneye and dmg-acid2 on the RTL, a test per ROM
+sbt "Test/runMain retro.gb.GbSuiteReport rtl"        # every suite on the RTL; table in out/gb-suites-rtl.tsv
+sbt "Test/runMain retro.gb.GbSuiteReport model m3_"  # on the reference model, filtered by name, in seconds
 sbt "Test/runMain retro.gb.GbRefFrame rom.gb out.png 20"  # a ROM's 20th frame from the reference model
 ```
 
-Only freely distributable test ROMs are used: Blargg's tests and the MIT-licensed Mooneye Test
-Suite; `./roms` is gitignored and `GameBoyRomSim` is skipped when it is empty. The ROM runs on
-`GameBoy(cartridge = ...)` with a `CartridgePlugin` built from the ROM header (ROM only, MBC1 or
-MBC5). Blargg's ROMs report over serial or in cartridge RAM, Mooneye's send the Fibonacci
-registers.
-
-Result on the RTL: 114 of the 134 ROMs pass, including all of Blargg's `cpu_instrs`,
-`instr_timing`, `mem_timing`, `mem_timing-2` and `halt_bug`, every Mooneye acceptance test for
-CPU timing, interrupts, HALT, the timer, the serial clock and OAM DMA, eleven of the twelve PPU
-tests (mode 3 lengths with objects and SCX, VRAM/OAM locking, LCD-on timing), Blargg's `oam_bug`
-(the DMG OAM corruption bug), and the MBC1 and MBC5 tests. The other 19 are registered as
-ignored with the reason: nine are for other models (DMG-0, MGB, SGB), MBC2 and the MBC1 multicart are not modelled, and `oam_bug`'s `7-timing_effect` alone
-runs far past its budget (part 7 of the combined `oam_bug` ROM, which passes, checks the same CRC).
-`intr_1_2_timing` fails since line 0's mode 2 interrupt reaches a running CPU an M-cycle late,
-as Mealybug's tests need; the two are not reconciled yet.
-
-`GameBoyLcdSim` runs [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) (MIT, fetched by the
-same script) and checks the RTL's frame against the test's reference image and the reference
-model's frame, pixel for pixel; it writes both to `out/`.
-
-The same script fetches the DMG-relevant suites of
-[c-sp/game-boy-test-roms](https://github.com/c-sp/game-boy-test-roms) v7.0, Mealybug Tearoom
-Tests included (mid-scanline PPU register writes, checked by screenshot). Test ROMs are used
-whatever their license (some state none); commercial games never are.
-
-```sh
-sbt "Test/runMain retro.gb.GbSuiteReport rtl"        # every suite on the RTL; table in out/gb-suites-rtl.tsv
-sbt "Test/runMain retro.gb.GbSuiteReport model m3_"  # on the reference model, filtered by name
-```
-
-`SHARD=i/n` runs every n-th ROM, for parallel JVMs (give each its own `SIM_WORKSPACE`). Results
-on the RTL (DMG ROMs; CGB-only, MBC3 and button-driven ROMs are skipped, as are GBMicrotest's 31
-scratch ROMs that never write a verdict):
+The ROMs are the DMG-relevant suites of
+[c-sp/game-boy-test-roms](https://github.com/c-sp/game-boy-test-roms) v7.0: Blargg's tests, the
+Mooneye Test Suite, dmg-acid2, Mealybug Tearoom Tests (mid-scanline PPU register writes, checked
+by screenshot) and the rest listed in `GbSuites`, which also says how each suite reports its
+result. Test ROMs are used whatever their license (some state none); commercial games never are.
+`./roms` is gitignored and `GbSuitesSim` is skipped when it is empty; `GB_ROMS=a,b` makes it run
+the ROMs whose name contains `a` or `b` instead. Each ROM runs on `GameBoy(cartridge = ...)` with
+a `CartridgePlugin` built from its header (ROM only, MBC1 or MBC5); the reference model maps
+ROMs of up to 32 KB flat. `SHARD=i/n` makes the report run every n-th ROM, for parallel JVMs
+(give each its own `SIM_WORKSPACE`). Results on the RTL (DMG ROMs; CGB-only, MBC2/3, other
+models' and button-driven ROMs are skipped, as are GBMicrotest's 31 scratch ROMs that never write
+a verdict):
 
 | Suite | Pass | Fail |
 |---|---|---|
+| Blargg's CPU tests, `halt_bug`, `oam_bug` | 29 | 0 |
+| Mooneye Test Suite | 86 | 0 |
+| dmg-acid2 | 1 | 0 |
 | Mealybug Tearoom Tests | 20 | 4 |
 | Gambatte | 1846 | 27 |
 | GBMicrotest | 480 | 2 |
