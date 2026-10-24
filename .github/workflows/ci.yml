@@ -48,7 +48,7 @@ jobs:
           - { name: gb-rtl-5, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 5/8 }
           - { name: gb-rtl-6, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 6/8 }
           - { name: gb-rtl-7, roms: fetch-test-roms.sh, run: Test/runMain retro.gb.GbSuiteReport rtl, shard: 7/8 }
-          - { name: nes-rtl, roms: fetch-nes-test-roms.sh && sh scripts/make-nes-mapper-tests.sh, run: Test/runMain retro.nes.NesRomReport }
+          - { name: nes-rtl, roms: fetch-nes-test-roms.sh make-nes-mapper-tests.sh, run: Test/runMain retro.nes.NesRomReport }
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
@@ -56,7 +56,7 @@ jobs:
         with:
           path: roms/
           key: roms-${{ matrix.roms }}-${{ hashFiles('scripts/fetch-*.sh', 'scripts/make-nes-mapper-tests.sh', 'src/test/asm/**') }}
-      - run: test -d roms || sh scripts/${{ matrix.roms }}
+      - run: test -d roms || for s in ${{ matrix.roms }}; do sh scripts/$s; done
       - run: sbt -batch "${{ matrix.run }}"
         env: { SHARD: "${{ matrix.shard }}" }
       - if: always()

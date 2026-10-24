@@ -1,5 +1,5 @@
 name: Setup
-description: JDK, sbt, Verilator and cc65, as every job needs them
+description: JDK, sbt, Verilator, and cc65 and Pillow for building test ROMs
 runs:
   using: composite
   steps:
@@ -10,4 +10,4 @@ runs:
         cache: sbt
     - uses: sbt/setup-sbt@v1
     - shell: bash
-      run: sudo apt-get update -qq && sudo apt-get install -y -qq verilator cc65
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq verilator cc65 python3-pil
