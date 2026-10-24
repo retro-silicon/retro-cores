@@ -94,8 +94,7 @@ class ApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping(0
     val s = new SeqLogic
     import s._
 
-    def regInit(r: Int) = if (!postBoot) 0 else Map(0x00 -> 0x80, 0x01 -> 0x80, 0x02 -> 0xF3, 0x03 -> 0xC1, 0x04 -> 0x87,
-      0x14 -> 0x77, 0x15 -> 0xF3, 0x16 -> 0x80).getOrElse(r, 0)
+    def regInit(r: Int) = if (!postBoot) 0 else Gb.PostBoot.apu.getOrElse(r, 0)
     val regs = (0 until 0x17).map(r => reg(8, regInit(r), f"apu_nr$r%02x"))
     val wave = (0 until 16).map(k => reg(8, 0, s"apu_wave_$k"))
     val lastAddress = Reg(UInt(16 bits)).init(0)

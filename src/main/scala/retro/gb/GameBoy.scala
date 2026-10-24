@@ -61,6 +61,9 @@ object Gb {
     val obp = 0xFF
     /** IF: the VBlank request is pending. */
     val iflag = 0x01
+    /** The APU registers FF10 + r: channel 1 on (the boot sound's second note, faded out), the
+      * mixer at full volume. */
+    val apu = Map(0x00 -> 0x80, 0x01 -> 0x80, 0x02 -> 0xF3, 0x03 -> 0xC1, 0x04 -> 0x87, 0x14 -> 0x77, 0x15 -> 0xF3, 0x16 -> 0x80)
 
     /** The VRAM the boot ROM leaves: the cartridge header's logo (0x104-0x133) as tiles 1-24,
       * each bit doubled, the (R) tile as tile 25, and the map rows at 0x9904 and 0x9924 that
@@ -81,8 +84,9 @@ object Gb {
     }
   }
 
-  def timerTap(counter: Int, tac: Int): Boolean =
-    (tac & 4) != 0 && ((counter >> Seq(9, 3, 5, 7)(tac & 3)) & 1) == 1
+  /** The counter bit TIMA counts the falls of, for TAC's clock select. */
+  val timerTaps = Seq(9, 3, 5, 7)
+  def timerTap(counter: Int, tac: Int): Boolean = (tac & 4) != 0 && ((counter >> timerTaps(tac & 3)) & 1) == 1
 }
 
 /** IF (0xFF0F) and IE (0xFFFF). Peripherals raise requests through `IrqService`; the CPU's
@@ -185,7 +189,7 @@ class TimerPlugin(val resetCounter: Int = 0) extends PeripheralPlugin(SizeMappin
     val tac = Reg(UInt(3 bits)).init(0).simPublic()
     val overflowed = RegInit(False)
 
-    def tap(c: UInt, t: UInt) = t(2) && t(1 downto 0).muxListDc(Seq(0 -> c(9), 1 -> c(3), 2 -> c(5), 3 -> c(7)))
+    def tap(c: UInt, t: UInt) = t(2) && t(1 downto 0).muxListDc(Gb.timerTaps.zipWithIndex.map { case (b, k) => k -> c(b) })
     // The tick: this M-cycle's four T-cycles, before the CPU's access.
     val ticked = new Area {
       val counter = UInt(16 bits)

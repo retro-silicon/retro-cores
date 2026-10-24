@@ -106,8 +106,7 @@ class ApuReference(postBoot: Boolean) {
     // The boot ROM leaves channel 1 on (its second note, faded out) and the mixer at full volume.
     enabled = true
     divDivider = 1 // the frame sequencer step, from Gambatte's ch2_init_env_counter_timing tests
-    for ((r, v) <- Seq(0x00 -> 0x80, 0x01 -> 0x80, 0x02 -> 0xF3, 0x03 -> 0xC1, 0x04 -> 0x87, 0x14 -> 0x77, 0x15 -> 0xF3, 0x16 -> 0x80))
-      regs(r) = v
+    for ((r, v) <- Gb.PostBoot.apu) regs(r) = v
     active(0) = true
     square(0).period = 0x7C1
     square(0).length = 0x40
