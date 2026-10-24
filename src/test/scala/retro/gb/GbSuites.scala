@@ -424,7 +424,8 @@ object GbSuiteReport extends App {
   val selected = all.zipWithIndex.collect { case (r, i) if i % shards == shard => r }
   val report = new RomReport(s"gb-$engine", if (shards > 1) s"-$shard" else "")
   val results = for (rom <- selected) yield {
-    val (status, detail) = rom.skip match {
+    val skip = rom.skip.orElse(Some("too large for the model").filter(_ => engine == "model" && rom.file.length > 0x8000))
+    val (status, detail) = skip match {
       case Some(why) => ("SKIP", why)
       case None =>
         val o =

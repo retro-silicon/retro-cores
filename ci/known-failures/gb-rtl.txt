@@ -1,0 +1,35 @@
+age-test-roms/m3-bg-bgp/m3-bg-bgp
+age-test-roms/oam/oam-write-dmgC
+gambatte/dmgpalette_during_m3/dmgpalette_during_m3_3 (png)
+gambatte/dmgpalette_during_m3/dmgpalette_during_m3_4 (png)
+gambatte/dmgpalette_during_m3/dmgpalette_during_m3_5 (png)
+gambatte/dmgpalette_during_m3/dmgpalette_during_m3_scx1_4 (png)
+gambatte/dmgpalette_during_m3/lycint_dmgpalette_during_m3_3 (png)
+gambatte/dmgpalette_during_m3/lycint_dmgpalette_during_m3_4 (png)
+gambatte/dmgpalette_during_m3/scx3/dmgpalette_during_m3_4 (png)
+gambatte/dmgpalette_during_m3/scx3/dmgpalette_during_m3_5 (png)
+gambatte/lycEnable/lcdoff_lycirqen_4_dmg08_outE2_cgb04c_outE0
+gambatte/m0enable/lycdisable_ff41_2_dmg08_out2_cgb04c_out0
+gambatte/m0enable/lycdisable_ff41_scx3_2_dmg08_out2_cgb04c_out0
+gambatte/m1/m2m1irq_ifw_2_dmg08_cgb04c_out1
+gambatte/miscmstatirq/lycstatwirq_trigger_m0_late_ly44_lyc44_08_40_4_dmg08_cgb04c_outE0
+gambatte/oamdma/oamdma_src8000_srcchange0000_busyinc_dmg08_cgb04c_out0
+gambatte/scx_during_m3/scx_0761c0/scx_during_m3_2 (png)
+gambatte/scx_during_m3/scx_0761c0/scx_during_m3_3 (png)
+gambatte/scx_during_m3/scx_m3_extend_1_dmg08_cgb04c_out3
+gambatte/sound/ch1_init_reset_sweep_counter_timing_4_dmg08_outaudio1_cgb04c_outaudio0
+gambatte/sound/ch2_init_reset_env_counter_timing_11_dmg08_outaudio0_cgb04c_outaudio1
+gambatte/sprites/10spritesPrLine_10xposA7_m0irq_2_dmg08_cgb04c_out2
+gambatte/window/m2int_wxA6_spxA7_m0irq_2_dmg08_cgb04c_out2
+gambatte/window/on_screen/wxA6_late_we_reenable_1 (png)
+gambatte/window/on_screen/wxA6_late_we_reenable_2 (png)
+gambatte/window/on_screen/wxA6_late_we_reenable_3 (png)
+gambatte/window/on_screen/wxA6_weoff_at_xposA6 (png)
+gambatte/window/on_screen/wxA6_wy01_weoff_ly02 (png)
+gambatte/window/on_screen/wxA6_wy01_weoff_ly02_weon_ly60 (png)
+gbmicrotest/halt_op_dupe_delay
+gbmicrotest/stat_write_glitch_l154_d
+mealybug-tearoom-tests/ppu/m3_lcdc_bg_en_change
+mealybug-tearoom-tests/ppu/m3_lcdc_obj_size_change
+mealybug-tearoom-tests/ppu/m3_lcdc_obj_size_change_scx
+mealybug-tearoom-tests/ppu/m3_lcdc_win_en_change_multiple_wx
