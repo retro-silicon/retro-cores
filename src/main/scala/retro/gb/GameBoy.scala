@@ -93,7 +93,7 @@ object Gb {
   * `Sm83.InterruptPlugin` finds this plugin as its `InterruptController`. Requests raised by
   * this M-cycle's tick are visible in the same cycle, to a read of IF and to the CPU's interrupt
   * check; a write to IF then lands over them, and the CPU's acknowledge clears last. */
-class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with IrqService with Sm83.InterruptController {
+class GbInterruptsPlugin(resetFlags: Int = 0) extends FiberPlugin with IrqService with Sm83.InterruptController {
   val irqLock = Retainer()
   private val lines = ArrayBuffer[(IrqLine, Bool)]()
   private val lateLines = ArrayBuffer[(IrqLine, Boolean, Bool)]()
@@ -174,16 +174,16 @@ class InterruptControllerPlugin(resetFlags: Int = 0) extends FiberPlugin with Ir
   * then sees, or writes over, the ticked state (see `Gb`). On overflow TIMA reads 0x00 for one
   * M-cycle (A); the next tick loads TMA and requests the interrupt (B), which a halted CPU sees
   * an M-cycle later. Writing TIMA during A cancels both. During B a TIMA write is ignored and a TMA write also lands in TIMA. */
-class TimerPlugin(val resetCounter: Int = 0) extends PeripheralPlugin(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
+class GbTimerPlugin(val resetCounter: Int = 0) extends PeripheralPlugin(SizeMapping(Gb.DIV, 4), Gb.Irq.TIMER) {
   private val lateHalted = Handle[Bool]()
-  override def whileIrqOpen() = lateHalted.load(host[InterruptControllerPlugin].late(Gb.Irq.TIMER, halted = true))
+  override def whileIrqOpen() = lateHalted.load(host[GbInterruptsPlugin].late(Gb.Irq.TIMER, halted = true))
 
   /** The 16-bit counter, its value after this M-cycle's tick, and after this M-cycle's DIV
     * write: other peripherals (serial) divide their clocks from it. */
   val counter, tickedCounter, nextCounter = Handle[UInt]()
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val counter = Reg(UInt(16 bits)).init(resetCounter).simPublic()
-    TimerPlugin.this.counter.load(counter)
+    GbTimerPlugin.this.counter.load(counter)
     val tima = Reg(UInt(8 bits)).init(0).simPublic()
     val tma = Reg(UInt(8 bits)).init(0).simPublic()
     val tac = Reg(UInt(3 bits)).init(0).simPublic()
@@ -250,12 +250,12 @@ class TimerPlugin(val resetCounter: Int = 0) extends PeripheralPlugin(SizeMappin
   * being on the link) on each falling edge of bit 8 of the timer's counter (8192 Hz), so eight
   * bits take 1024 M-cycles but start aligned to that clock, not to the SC write. `tx` is a pin
   * that pulses with each byte sent, which is how test ROMs report results. */
-class SerialPlugin extends PeripheralPlugin(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
+class GbSerialPlugin extends PeripheralPlugin(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL) {
   val pins = during setup new Area { val tx = master(Flow(UInt(8 bits))).setName("serial_tx") }
   def tx = pins.tx
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val tx = pins.tx
-    val timer = host[TimerPlugin]
+    val timer = host[GbTimerPlugin]
     val sb = Reg(UInt(8 bits)).init(0)
     val active = RegInit(False)
     val internalClock = RegInit(False)
@@ -304,7 +304,7 @@ class SerialPlugin extends PeripheralPlugin(SizeMapping(Gb.SB, 2), Gb.Irq.SERIAL
 
 /** P1. `buttons` pins, high when pressed: bits 0-3 Right Left Up Down, bits 4-7 A B Select Start.
   * Any selected input going from released to pressed requests the joypad interrupt. */
-class JoypadPlugin extends PeripheralPlugin(SingleMapping(Gb.P1), Gb.Irq.JOYPAD) {
+class GbJoypadPlugin extends PeripheralPlugin(SingleMapping(Gb.P1), Gb.Irq.JOYPAD) {
   val pins = during setup new Area { val buttons = in(Bits(8 bits)).setName("joypad_buttons") }
   def buttons = pins.buttons
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
@@ -322,48 +322,48 @@ class JoypadPlugin extends PeripheralPlugin(SingleMapping(Gb.P1), Gb.Irq.JOYPAD)
 
 /** Puts the CPU and timer in the state the DMG boot ROM leaves, so a cartridge starts at 0x0100
   * without a boot ROM image. */
-class PostBootPlugin extends FiberPlugin {
+class GbPostBootPlugin extends FiberPlugin {
   val logic = during setup new Area {
     val rf = host[RegFileService]
     for ((r, v) <- Gb.PostBoot.regs) rf.setReset(r, v)
   }
 
   /** For sims: fills VRAM as the boot ROM leaves it for the cartridge `rom` reads
-    * (`Gb.PostBoot.vram`). `CartridgePlugin.load` calls it. */
+    * (`Gb.PostBoot.vram`). `GbCartridgePlugin.load` calls it. */
   def simLoadVram(rom: Int => Int): Unit = {
     import spinal.core.sim._
-    val mem = host[VramPlugin].logic.mem
+    val mem = host[GbVramPlugin].logic.mem
     for ((v, i) <- Gb.PostBoot.vram(rom).zipWithIndex) mem.setBigInt(i, v)
   }
 }
 
 /** VRAM (8000-9FFF), locked by the PPU. */
-class VramPlugin extends RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000, lockable = true)
+class GbVramPlugin extends RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000, lockable = true)
 /** HRAM (FF80-FFFE). */
-class HramPlugin extends RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F)
+class GbHramPlugin extends RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F)
 
 /** The Game Boy: the SM83 plugins plus the SoC plugins, in one host. Whatever no plugin maps
   * (cartridge ROM 0000-7FFF and cartridge RAM A000-BFFF) is the external bus, unless a
-  * `cartridge` is given, in which case a `CartridgePlugin` answers there. */
+  * `cartridge` is given, in which case a `GbCartridgePlugin` answers there. */
 object GameBoy {
-  def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None,
+  def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[GbCartSpec] = None,
               romDecoder: Boolean = false): Seq[Hostable] = Sm83.plugins(withTrace, romDecoder) ++ Seq(
-    new VramPlugin,
+    new GbVramPlugin,
     new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000, init = Gb.wramInit), // E000-FDFF echoes C000-DDFF
-    new OamDmaPlugin,
-    new HramPlugin,
+    new GbOamDmaPlugin,
+    new GbHramPlugin,
     new OpenBusPlugin(SizeMapping(0xFEA0, 0x60), value = 0x00),
     new OpenBusPlugin(SizeMapping(0xFF00, 0x100)),
-    new InterruptControllerPlugin(if (postBoot) Gb.PostBoot.iflag else 0),
-    new TimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
-    new SerialPlugin,
-    new ApuPlugin(postBoot),
-    new PpuPlugin(postBoot),
-    new JoypadPlugin
-  ) ++ (if (postBoot) Seq(new PostBootPlugin) else Nil) ++ cartridge.map(new CartridgePlugin(_))
+    new GbInterruptsPlugin(if (postBoot) Gb.PostBoot.iflag else 0),
+    new GbTimerPlugin(if (postBoot) Gb.PostBoot.counter else 0),
+    new GbSerialPlugin,
+    new GbApuPlugin(postBoot),
+    new GbPpuPlugin(postBoot),
+    new GbJoypadPlugin
+  ) ++ (if (postBoot) Seq(new GbPostBootPlugin) else Nil) ++ cartridge.map(new GbCartridgePlugin(_))
 
   /** `romDecoder`: see `SequencerPlugin` (faster in Verilator). */
-  def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None,
+  def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[GbCartSpec] = None,
             romDecoder: Boolean = false): RetroCore =
     RetroCore(plugins(withTrace, postBoot, cartridge, romDecoder)).setDefinitionName("GameBoy")
 }

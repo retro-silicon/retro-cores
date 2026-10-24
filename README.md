@@ -235,7 +235,7 @@ by screenshot) and the rest listed in `GbSuites`, which also says how each suite
 result. Test ROMs are used whatever their license (some state none); commercial games never are.
 `./roms` is gitignored and `GbSuitesSim` is skipped when it is empty; `GB_ROMS=a,b` makes it run
 the ROMs whose name contains `a` or `b` instead. Each ROM runs on `GameBoy(cartridge = ...)` with
-a `CartridgePlugin` built from its header (ROM only, MBC1 or MBC5); the reference model maps
+a `GbCartridgePlugin` built from its header (ROM only, MBC1 or MBC5); the reference model maps
 ROMs of up to 32 KB flat. `SHARD=i/n` makes the report run every n-th ROM, for parallel JVMs
 (give each its own `SIM_WORKSPACE`). Results on the RTL (DMG ROMs; CGB-only, MBC2/3, other
 models' and button-driven ROMs are skipped, as are GBMicrotest's 31 scratch ROMs that never write
@@ -258,11 +258,11 @@ a verdict):
 
 The pixel transfer is a port of SameBoy's DMG FIFO and fetcher, which passes 15 of the Mealybug
 DMG tests; with Gambatte's timing where SameBoy fails (the fetcher takes LCDC's selects and SCY
-when it reads VRAM, the first line after LCD on starts a dot later) it passes 20; `PpuReference` lists the timing it pins down (register writes landing between
+when it reads VRAM, the first line after LCD on starts a dot later) it passes 20; `GbPpuReference` lists the timing it pins down (register writes landing between
 a cycle's dots, mode 3 ending 3 dots before the last pixel, when a halted or running CPU sees a
-STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`OamDmaPlugin`). The reference
+STAT interrupt, LY in line 153). OAM DMA bus conflicts are modelled (`GbOamDmaPlugin`). The reference
 model has no MBC, so the 40 Gambatte OAM DMA tests that bank-switch or push to cartridge RAM
-pass only on the RTL. The APU (`ApuReference`, a port of SameBoy's `apu.c`, and `ApuPlugin`)
+pass only on the RTL. The APU (`GbApuReference`, a port of SameBoy's `apu.c`, and `GbApuPlugin`)
 passes 153 of the 155 sound tests (Gambatte's, blargg's dmg_sound, SameSuite's DMG ones); Gambatte's
 audio tests are judged the way its test runner does (`AudioWindows`). Most of what still fails is
 one of: tests SameBoy fails too, mid-line timing that depends on the post-boot PPU phase, and
@@ -346,7 +346,7 @@ generates a console:
 val cpu = RetroCore(Sm83.plugins())                     // the SM83 alone, bus and IRQs as pins
 val gb  = RetroCore(Sm83.plugins() ++ Seq(              // the same plugins, plus the SoC
   new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000),
-  new InterruptControllerPlugin, new TimerPlugin, new SerialPlugin, new PpuPlugin, ...))
+  new GbInterruptsPlugin, new GbTimerPlugin, new GbSerialPlugin, new GbPpuPlugin, ...))
 ```
 
 What makes that work:
@@ -359,10 +359,10 @@ What makes that work:
   gives a peripheral `read`, `readAndWrite`, `createReadAndWrite`, `onWrite` on absolute
   addresses, with unused bits reading as 1 where the console does that.
 - **Interrupt lines are a service.** `IrqService.request(Gb.Irq.TIMER)` returns a line to pulse.
-  The Game Boy's `InterruptControllerPlugin` provides it, holds IF and IE, and implements
+  The Game Boy's `GbInterruptsPlugin` provides it, holds IF and IE, and implements
   `Sm83.InterruptController`. The CPU's `InterruptPlugin` looks for one: present, it wires to it;
   absent, `requests` and `ack` become pins.
-- **Reset state is contributed.** `RegFileService.setReset` lets `PostBootPlugin` start the CPU
+- **Reset state is contributed.** `RegFileService.setReset` lets `GbPostBootPlugin` start the CPU
   where the DMG boot ROM would leave it (PC=0100, SP=FFFE, AF=01B0...).
 - **Generic blocks live in the core.** `RamPlugin` (on-chip RAM, mirrors by address masking) and
   `OpenBusPlugin` (a low-priority constant answer for unmapped I/O) serve any console.
@@ -370,15 +370,15 @@ What makes that work:
 | Game Boy plugin | Addresses | What it does |
 |---|---|---|
 | `RamPlugin` ×3 | 8000, C000 (+echo), FF80 | VRAM, WRAM, HRAM |
-| `OamDmaPlugin` | FE00, FF46 | OAM and its DMA, which runs alongside the CPU and reads its source through `DirectRead` ports |
-| `InterruptControllerPlugin` | FF0F, FFFF | IF, IE, `IrqService`, `Sm83.InterruptController` |
-| `TimerPlugin` | FF04-FF07 | DIV/TIMA/TMA/TAC from a 16-bit counter: falling-edge ticks (DIV and TAC write glitches) and the delayed TMA reload |
-| `SerialPlugin` | FF01-FF02 | internally clocked transfers, shifting on the 8192 Hz edges of the timer's counter; `serial_tx` pin with each byte sent |
-| `PpuPlugin` | FF40-FF4B | the PPU: dot-level pixel FIFO (background, window, objects), `lcd` pixel port, LCD registers, VBlank and STAT interrupts |
-| `JoypadPlugin` | FF00 | P1 matrix, `joypad_buttons` pins, joypad interrupt |
+| `GbOamDmaPlugin` | FE00, FF46 | OAM and its DMA, which runs alongside the CPU and reads its source through `DirectRead` ports |
+| `GbInterruptsPlugin` | FF0F, FFFF | IF, IE, `IrqService`, `Sm83.InterruptController` |
+| `GbTimerPlugin` | FF04-FF07 | DIV/TIMA/TMA/TAC from a 16-bit counter: falling-edge ticks (DIV and TAC write glitches) and the delayed TMA reload |
+| `GbSerialPlugin` | FF01-FF02 | internally clocked transfers, shifting on the 8192 Hz edges of the timer's counter; `serial_tx` pin with each byte sent |
+| `GbPpuPlugin` | FF40-FF4B | the PPU: dot-level pixel FIFO (background, window, objects), `lcd` pixel port, LCD registers, VBlank and STAT interrupts |
+| `GbJoypadPlugin` | FF00 | P1 matrix, `joypad_buttons` pins, joypad interrupt |
 | `OpenBusPlugin` ×2 | FEA0-FEFF, FF00-FFFF | 00 and FF for everything unmapped |
-| `PostBootPlugin` | | post-boot-ROM register state |
-| `CartridgePlugin` | 0000-7FFF, A000-BFFF | optional: ROM, RAM and an MBC1 or MBC5, for sims and FPGA builds with the game in block RAM |
+| `GbPostBootPlugin` | | post-boot-ROM register state |
+| `GbCartridgePlugin` | 0000-7FFF, A000-BFFF | optional: ROM, RAM and an MBC1 or MBC5, for sims and FPGA builds with the game in block RAM |
 
 The Game Boy runs with no wait states, and the peripherals tick every clock, so a held bus
 cycle would advance the timer; that matches the hardware, which never stalls the CPU.
@@ -391,28 +391,28 @@ CPU's interrupt check sees requests raised by that tick too. Mooneye's `div_timi
 
 ### The PPU
 
-`PpuPlugin` is a dot-level pixel FIFO: OAM scan (two entries per M-cycle, ten objects per line),
+`GbPpuPlugin` is a dot-level pixel FIFO: OAM scan (two entries per M-cycle, ten objects per line),
 then a background fetcher that fills an 8-pixel FIFO, an object fetcher that stalls it, and an
 object FIFO that mixes by priority, so mode 3 stretches by SCX, the window and each object exactly
 as on the DMG. The design runs one clock per M-cycle, so each clock chains four copies of the
 one-dot step, each with its own VRAM read port. VRAM and OAM are read through their own ports
-(`RamPlugin.directRead`, `OamDmaPlugin.oamRead`), not over the CPU's bus.
+(`RamPlugin.directRead`, `GbOamDmaPlugin.oamRead`), not over the CPU's bus.
 
 Pixels leave on the `lcd` port, up to four per clock with their x, y and shade, for a sim to
-collect or an FPGA build to write into a scan-out framebuffer. `PpuReference` is the same
+collect or an FPGA build to write into a scan-out framebuffer. `GbPpuReference` is the same
 pipeline as a Scala model inside `GbReference`; the system cosim checks every STAT read and every
 frame against it, including a test with random tiles, objects, scroll and window. The timing
 rules the Mooneye tests pin down (when STAT and the STAT interrupt see mode changes, LY reading
 the next line early, the LY = LYC flag freezing while the LCD is off, the first line after the
 LCD is turned on, when VRAM and OAM are locked against the CPU) are listed there. The PPU locks
 the CPU out through `readLock`/`writeLock` handles on the VRAM `RamPlugin` (`lockable = true`)
-and on `OamDmaPlugin`.
+and on `GbOamDmaPlugin`.
 
 The DMG OAM corruption bug is modelled too: an address in FE00-FEFF on the CPU's address bus, or
 stepped by its 16-bit incrementer (INC/DEC rr, PUSH, POP, LD A,(HL±)), while the PPU scans OAM
 rewrites the row being scanned from the rows before it (formulas from Pan Docs). `IsaPlugin` tags
 every M-cycle that steps a pair with the `Idu.PAIR` key, derived from the microcode's assigns, and
-exports the IDU's address; `OamDmaPlugin` holds OAM in registers so one M-cycle can rewrite three
+exports the IDU's address; `GbOamDmaPlugin` holds OAM in registers so one M-cycle can rewrite three
 rows. `Sm83Bus.idu` marks the same M-cycles in the reference model.
 
 ## Layout

@@ -4,7 +4,7 @@ package retro.nes
   * with its shift registers, sprite evaluation into secondary OAM (with the overflow flag's
   * scanning bug), sprite 0 hit, the VBlank flag and NMI output, the odd-frame skipped dot, and
   * the CPU-visible registers 2000-2007 with the loopy v/t/x/w scroll registers and the 2007 read
-  * buffer. Written first so test ROMs run in seconds; the RTL `PpuPlugin` mirrors it.
+  * buffer. Written first so test ROMs run in seconds; the RTL `NesPpuPlugin` mirrors it.
   *
   * Each `tick()` is one dot. `frame` holds the last 256x240 frame as palette indices (0-63). */
 class NesPpuReference(cart: NesCartridge, timing: NesTiming = NesTiming.ntsc) {

@@ -5,7 +5,7 @@ import retro.sm83._
 import scala.collection.mutable.ArrayBuffer
 
 /** Game Boy system reference model for cosimulation: `Sm83Reference` attached to models of the
-  * on-chip RAMs, IF/IE, timer, serial port, PPU (`PpuReference`) and joypad, written from the Pan Docs
+  * on-chip RAMs, IF/IE, timer, serial port, PPU (`GbPpuReference`) and joypad, written from the Pan Docs
   * descriptions independently of the RTL plugins.
   *
   * Every M-cycle the peripherals tick first, then the bus access sees the ticked state and a
@@ -14,7 +14,7 @@ import scala.collection.mutable.ArrayBuffer
   * @param external what the cartridge answers at every address no on-chip block claims; writes
   *                 below 0x8000 are ignored (ROM), others are stored
   * @param postBoot start in the state the DMG boot ROM leaves, as `GameBoy(postBoot = true)`
-  * @param externalDma OAM DMA can read `external` (the RTL has a `CartridgePlugin`); otherwise
+  * @param externalDma OAM DMA can read `external` (the RTL has a `GbCartridgePlugin`); otherwise
   *                    DMA sources outside VRAM and WRAM read FF, as with the external bus */
 class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDma: Boolean = false) extends Sm83Bus {
   /** IE & IF after each M-cycle's tick, for the CPU's interrupt decisions. */
@@ -41,8 +41,8 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   var serialClock = ((counter >> Gb.serialClockBit) & 1) == 1
   /** Bytes sent with the internal clock. */
   val serialOut = ArrayBuffer[Int]()
-  val ppu = new PpuReference(vram, oam, postBoot)
-  val apu = new ApuReference(postBoot)
+  val ppu = new GbPpuReference(vram, oam, postBoot)
+  val apu = new GbApuReference(postBoot)
   /** The APU's mixed output after each of the last M-cycle's two 2 MHz ticks: left, right, left, right. */
   val audio = Array.fill(4)(0)
   /** Gambatte's audio test verdict over this output (`AudioWindows`). */
@@ -165,7 +165,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
       audioWindows.sample(apu.left, apu.right)
     }
     onAudio(audio)
-    // PPU. A write to its registers lands during its dots (`PpuReference.writeDots`).
+    // PPU. A write to its registers lands during its dots (`GbPpuReference.writeDots`).
     if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
     // A CPU halted in this M-cycle and the last stops OAM DMA (SameBoy).
     val dmaStopped = cpu.halted && haltedBefore

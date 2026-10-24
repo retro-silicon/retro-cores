@@ -34,11 +34,11 @@ object LcdPixels {
 }
 
 /** The pixel transfer state that changes dot by dot: SameBoy's DMG FIFO and fetcher, as
-  * `PpuReference` describes them; the names follow it. */
+  * `GbPpuReference` describes them; the names follow it. */
 case class PpuDot() extends Bundle {
   /** Mode 3 as the CPU sees it, and the transfer running. */
   val transfer, active = Bool()
-  /** `PpuReference.sbStep`'s state (`PpuStep`), and dots to wait before its next step. */
+  /** `GbPpuReference.sbStep`'s state (`PpuStep`), and dots to wait before its next step. */
   val st = UInt(4 bits)
   val sleep = UInt(4 bits)
   val pos = SInt(9 bits)
@@ -61,21 +61,21 @@ case class PpuDot() extends Bundle {
   val slot = UInt(4 bits)
   val oTile, oFlags, objLo = UInt(8 bits)
   val lastShade = UInt(2 bits)
-  /** The OAM bus's Y byte as the scan last read it, or the last object tile number (`PpuReference.yBus`). */
+  /** The OAM bus's Y byte as the scan last read it, or the last object tile number (`GbPpuReference.yBus`). */
   val yBus = UInt(8 bits)
 }
 
 /** The DMG PPU: LCDC, STAT, SCY, SCX, LY, LYC, BGP, OBP0, OBP1, WY, WX, the VBlank and STAT
   * interrupts, and the pixels, sent out on `lcd`. It reads VRAM and OAM through their own ports
-  * (`RamPlugin.directRead`, `OamDmaPlugin.oamRead`), not over the CPU's bus.
+  * (`RamPlugin.directRead`, `GbOamDmaPlugin.oamRead`), not over the CPU's bus.
   *
   * The design runs one clock per M-cycle and the PPU works in dots, four per M-cycle, so each
   * clock chains four copies of the one-dot step (`dot`), each with its own VRAM read port; the
   * OAM scan checks two OAM entries a clock. Mode 3 ends for the CPU 3 dots before the transfer
   * does, so three more copies look ahead, without VRAM. A CPU write to a PPU register lands
-  * between the dots (`PpuReference.writeDot`). The timing, and what it leaves out, is described
-  * at `PpuReference`, the model the system cosim checks this against dot for dot. */
-class PpuPlugin(postBoot: Boolean = false)
+  * between the dots (`GbPpuReference.writeDot`). The timing, and what it leaves out, is described
+  * at `GbPpuReference`, the model the system cosim checks this against dot for dot. */
+class GbPpuPlugin(postBoot: Boolean = false)
     extends PeripheralPlugin(SizeMapping(Gb.LCDC, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
   val pins = during setup new Area { val lcd = out(LcdPixels()).setName("lcd") }
   def lcd = pins.lcd
@@ -83,7 +83,7 @@ class PpuPlugin(postBoot: Boolean = false)
   val lcdcReg = Handle[UInt]()
   private val statLateHalted, statAckClears, statWriteAcks = Handle[Bool]()
   override def whileIrqOpen() = {
-    val c = host[InterruptControllerPlugin]
+    val c = host[GbInterruptsPlugin]
     statLateHalted.load(c.late(Gb.Irq.STAT, halted = true))
     statAckClears.load(c.ackClears(Gb.Irq.STAT))
     statWriteAcks.load(c.writeAcks(Gb.Irq.STAT))
@@ -92,8 +92,8 @@ class PpuPlugin(postBoot: Boolean = false)
 
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val lcd = pins.lcd
-    val vram = host[VramPlugin]
-    val dma = host[OamDmaPlugin]
+    val vram = host[GbVramPlugin]
+    val dma = host[GbOamDmaPlugin]
 
     def boot(after: Int, before: Int = 0) = if (postBoot) after else before
     val lcdc = Reg(UInt(8 bits)).init(boot(Gb.PostBoot.lcdc)).simPublic()
@@ -155,7 +155,7 @@ class PpuPlugin(postBoot: Boolean = false)
     s0 := st
     val wyHitTicked = Bool()
     val countScanned = UInt(4 bits)
-    // A WY match found after a WY write counts from the next M-cycle (`PpuReference`).
+    // A WY match found after a WY write counts from the next M-cycle (`GbPpuReference`).
     wyHitTicked := wyHit || wyPending && on
     countScanned := objCount
     when(lineStart) {
@@ -226,7 +226,7 @@ class PpuPlugin(postBoot: Boolean = false)
 
     // ---- The pixel transfer: one dot -----------------------------------------------------
     // The CPU's write this M-cycle, or the one before to a register the transfer reads
-    // (`PpuReference.lateWrite`): it lands between the dots.
+    // (`GbPpuReference.lateWrite`): it lands between the dots.
     def lateWrite(a: UInt, d: UInt) = Seq(Gb.SCY, Gb.SCX, Gb.BGP, Gb.OBP0, Gb.OBP1, Gb.WX).map(a === _).orR ||
       a === Gb.LCDC && ((lcdc ^ d) & 0x84) === 0
     val cpuLate = slave.writeFire && lateWrite(slave.cmd.address, slave.cmd.data)
@@ -597,7 +597,7 @@ class PpuPlugin(postBoot: Boolean = false)
     // The held LY = LYC line still counts at this M-cycle's first dot, against a STAT just written;
     // entering VBlank, LY = LYC is compared before the mode changes.
     // A STAT write on the DMG first enables every STAT interrupt source for a dot, as they are this
-    // M-cycle (line 0's mode 2 an M-cycle late); see `PpuReference`.
+    // M-cycle (line 0's mode 2 an M-cycle late); see `GbPpuReference`.
     val statWrite = slave.writeFire && slave.cmd.address === Gb.STAT
     val glitchSelect2 = !(irqModeLast === 2 && x === Gb.lineCycles - 1 && statSelect(0) && !statSelect(2))
     val line0Mode2 = irqModeLast === 2 && ly === 0 && x === 0
@@ -612,7 +612,7 @@ class PpuPlugin(postBoot: Boolean = false)
     val vblankEarly = on && lyTicked === Gb.visibleLines - 1 && xTicked === Gb.lineCycles - 1 && statSelect(2) && !line && !statLine
     val stat = !statLine && start || !start && mid || !mid && line || glitchLate || vblankEarly
     // LYC and STAT writes land after the dots, and can drop the STAT line before a source rises
-    // in the next M-cycle; see `PpuReference`.
+    // in the next M-cycle; see `GbPpuReference`.
     val ending = irqMode === 3 && transferPart
     // An IF write lands a dot after the M-cycle: after the mode 0 source rises at its end.
     statWriteAcks.get := ending && mode === 0
@@ -637,14 +637,14 @@ class PpuPlugin(postBoot: Boolean = false)
     val regs = new RetroBusSlaveFactory(slave, idleBits = 0xFF)
     regs.read(lcdc, Gb.LCDC)
     regs.readAndWrite(statSelect, Gb.STAT, 3)
-    // The CPU's VRAM and OAM accesses the PPU blocks; see `PpuReference.vramReadLocked`.
+    // The CPU's VRAM and OAM accesses the PPU blocks; see `GbPpuReference.vramReadLocked`.
     val lastOfScan = mode === 2 && xTicked === Gb.oamEnd - 1
     vram.readLock.load(mode === 3 || lastOfScan)
     vram.writeLock.load(mode === 3)
     dma.readLock.load(mode >= 2 || on && xTicked === Gb.lineCycles - 1 &&
       (lyTicked < Gb.visibleLines - 1 || lyTicked === Gb.frameLines - 1))
     dma.writeLock.load(mode === 3 || mode === 2 && !lastOfScan)
-    // The OAM row the scan reads, for the OAM corruption bug; see `PpuReference.oamBugRow`.
+    // The OAM row the scan reads, for the OAM corruption bug; see `GbPpuReference.oamBugRow`.
     dma.scanRow.load((mode === 2 && xTicked < Gb.oamEnd - 1) ? (xTicked + 1).resize(5) | U(0, 5 bits))
 
     regs.read(coincidenceTicked, Gb.STAT, 2)

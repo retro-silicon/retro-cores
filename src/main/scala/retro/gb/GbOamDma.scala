@@ -27,7 +27,7 @@ import spinal.lib.misc.plugin._
   * (VRAM, or the external bus for everything else below FE00) goes nowhere: a read returns the
   * byte being copied, and a write replaces it in OAM, or for a source in WRAM (C000-FDFF) ANDs
   * into it (Gambatte). FEA0-FEFF reads FF. */
-class OamDmaPlugin extends FiberPlugin {
+class GbOamDmaPlugin extends FiberPlugin {
   val readLock, writeLock = Handle[Bool]()
   /** The 8-byte OAM row the PPU's scan reads this M-cycle, 0 when it reads none (row 0 is never
     * corrupted). */

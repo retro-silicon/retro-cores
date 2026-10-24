@@ -287,40 +287,40 @@ object GbSuites {
     outcome.get.copy(frame = gb.ppu.frame.clone())
   }
 
-  private val compiled = mutable.Map[CartridgeSpec, SimCompiled[RetroCore]]()
-  def compile(spec: CartridgeSpec) = synchronized { compiled.getOrElseUpdate(spec,
+  private val compiled = mutable.Map[GbCartSpec, SimCompiled[RetroCore]]()
+  def compile(spec: GbCartSpec) = synchronized { compiled.getOrElseUpdate(spec,
     FastVerilator(SpinalConfig(defaultClockDomainFrequency = FixedFrequency(1 MHz))).workspacePath(sys.env.getOrElse("SIM_WORKSPACE", "simWorkspace")).workspaceName(f"GameBoyRom_${spec.romBytes}%x_${spec.ramBytes}%x_${spec.mbc}")
       .compile(GameBoy(withTrace = false, cartridge = Some(spec), romDecoder = true))) }
 
-  /** On the `GameBoy` RTL with a `CartridgePlugin`; frames come from its `lcd` pixel port. */
+  /** On the `GameBoy` RTL with a `GbCartridgePlugin`; frames come from its `lcd` pixel port. */
   def runRtl(rom: Rom): Outcome = {
     val image = Files.readAllBytes(rom.file.toPath)
     // Blargg's ROMs write their report to cartridge RAM even when the header declares none
     // (halt_bug), as emulators provide; give every MBC cartridge at least one RAM bank.
-    val spec = CartridgeSpec.fromHeader(image) match {
+    val spec = GbCartSpec.fromHeader(image) match {
       case s if s.mbc != Mbc.None && s.ramBytes < 0x2000 => s.copy(ramBytes = 0x2000)
       case s => s
     }
     val op = opcodeOf(rom)
     var outcome: Outcome = null
     compile(spec).doSimUntilVoid { dut =>
-      dut.host[CartridgePlugin].load(image)
-      dut.host[JoypadPlugin].buttons #= 0
+      dut.host[GbCartridgePlugin].load(image)
+      dut.host[GbJoypadPlugin].buttons #= 0
       val io = dut.host[BusPlugin].logic.io
       io.rdata #= 0xFF
       io.stall #= false
-      val lcd = dut.host[PpuPlugin].lcd
-      val lcdc = dut.host[PpuPlugin].lcdcReg.get
+      val lcd = dut.host[GbPpuPlugin].lcd
+      val lcdc = dut.host[GbPpuPlugin].lcdcReg.get
       val ir = dut.host[SequencerService].opcode
-      val hramMem = dut.host[HramPlugin].logic.mem
-      val cartRam = Option(dut.host[CartridgePlugin].logic.ram).map(_.mem)
+      val hramMem = dut.host[GbHramPlugin].logic.mem
+      val cartRam = Option(dut.host[GbCartridgePlugin].logic.ram).map(_.mem)
       val cartBytes = spec.ramBytes max 1
-      val tx = dut.host[SerialPlugin].tx
+      val tx = dut.host[GbSerialPlugin].tx
       val serialText = new StringBuilder
       val rf = dut.host[RegFilePlugin].regs.byReg
       import Sm83Regs._
       val buf = Array.fill(160 * 144)(0)
-      val audio = dut.host[ApuPlugin].audio
+      val audio = dut.host[GbApuPlugin].audio
       val windows = new AudioWindows
       val view = new View {
         def fib = Seq(B, C, D, E, H, L).map(rf(_).toInt)

@@ -27,14 +27,14 @@ class GameBoySim extends AnyFunSuite {
     var result: Result = null
     compiled.doSimUntilVoid(seed = seed) { dut =>
       val io = dut.host[BusPlugin].logic.io
-      val buttons = dut.host[JoypadPlugin].buttons
-      val tx = dut.host[SerialPlugin].tx
+      val buttons = dut.host[GbJoypadPlugin].buttons
+      val tx = dut.host[GbSerialPlugin].tx
       val done = dut.host[TracePlugin].logic.done
-      val lcd = dut.host[PpuPlugin].lcd
+      val lcd = dut.host[GbPpuPlugin].lcd
       val mem = cart.clone()
       val buttonLog = ArrayBuffer[Int]()
       val ref = new GbReference(cart.clone())
-      dut.host[PostBootPlugin].simLoadVram(cart)
+      dut.host[GbPostBootPlugin].simLoadVram(cart)
       val cpu = ref.cpu
       var refReset = false
       val serial = ArrayBuffer[Int]()
@@ -60,7 +60,7 @@ class GameBoySim extends AnyFunSuite {
       var lastY = 0
       val rtlFrames, refFrames = ArrayBuffer[Array[Int]]()
       ref.ppu.onFrame = f => refFrames += f.clone()
-      val audio = dut.host[ApuPlugin].audio
+      val audio = dut.host[GbApuPlugin].audio
       val rtlAudio, refAudio = ArrayBuffer[Int]()
       ref.onAudio = a => refAudio ++= a
 

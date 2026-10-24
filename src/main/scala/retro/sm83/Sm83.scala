@@ -250,7 +250,7 @@ object Sm83 {
   }
 
   /** The SoC side of the interrupt interface, implemented by the plugin holding IE and IF
-    * (`retro.gb.InterruptControllerPlugin`). Both signals must exist from setup on. */
+    * (`retro.gb.GbInterruptsPlugin`). Both signals must exist from setup on. */
   trait InterruptController {
     /** IE & IF, bit 0 VBlank ... bit 4 Joypad. */
     def cpuRequests: Bits

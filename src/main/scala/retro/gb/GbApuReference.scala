@@ -12,8 +12,8 @@ package retro.gb
   * `left` and `right` are the mixed output after each tick: per channel, a DAC that is on
   * outputs 15 - 2 * sample, scaled by NR50's volume where NR51 routes it; a DAC that is off
   * outputs nothing. */
-class ApuReference(postBoot: Boolean) {
-  import ApuReference._
+class GbApuReference(postBoot: Boolean) {
+  import GbApuReference._
 
   /** FF10-FF3F as last written (wave RAM at 0x20-0x2F). */
   val regs = Array.fill(0x30)(0)
@@ -662,7 +662,7 @@ class ApuReference(postBoot: Boolean) {
   }
 }
 
-object ApuReference {
+object GbApuReference {
   val SkipInactive = 0
   val SkipSkipped = 1
   val SkipSkip = 2

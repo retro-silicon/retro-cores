@@ -17,14 +17,14 @@ object Mbc {
 }
 
 /** What a cartridge holds, read from its header (0x147 type, 0x148 ROM size, 0x149 RAM size). */
-case class CartridgeSpec(romBytes: Int, ramBytes: Int, mbc: Mbc) {
+case class GbCartSpec(romBytes: Int, ramBytes: Int, mbc: Mbc) {
   require(isPow2(romBytes) && romBytes >= 0x8000, s"ROM size $romBytes")
   require(ramBytes == 0 || isPow2(ramBytes), s"RAM size $ramBytes")
 }
 
-object CartridgeSpec {
+object GbCartSpec {
   /** Supported types: 00 (ROM only), 01-03 (MBC1), 19-1E (MBC5), with optional RAM and battery. */
-  def fromHeader(rom: Array[Byte]): CartridgeSpec = {
+  def fromHeader(rom: Array[Byte]): GbCartSpec = {
     val kind = rom(0x147) & 0xFF
     val mbc = kind match {
       case 0x00 => Mbc.None
@@ -36,7 +36,7 @@ object CartridgeSpec {
     // mbc1_rom_banks is a 2 MB image with a 32 KB header).
     val romBytes = (0x8000 << (rom(0x148) & 0xFF)) max (1 << log2Up(rom.length))
     val ramBytes = Seq(0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000)(rom(0x149) & 0xFF)
-    CartridgeSpec(romBytes, if (mbc == Mbc.None) 0 else ramBytes, mbc)
+    GbCartSpec(romBytes, if (mbc == Mbc.None) 0 else ramBytes, mbc)
   }
 }
 
@@ -51,7 +51,7 @@ object CartridgeSpec {
   *
   * MBC5: RAMG (0000-1FFF, 0x0A enables RAM), ROMB (2000-2FFF low 8 bits, 3000-3FFF bit 8; bank 0
   * is allowed at 4000-7FFF), RAMB (4000-5FFF, 4 bits). 0000-3FFF is always bank 0. */
-class CartridgePlugin(val spec: CartridgeSpec) extends FiberPlugin with DirectRead {
+class GbCartridgePlugin(val spec: GbCartSpec) extends FiberPlugin with DirectRead {
   def directMappings = Seq(SizeMapping(0x0000, 0x8000), SizeMapping(0xA000, 0x2000))
   def directRead(address: UInt): UInt = {
     val l = logic.get
@@ -133,6 +133,6 @@ class CartridgePlugin(val spec: CartridgeSpec) extends FiberPlugin with DirectRe
     require(image.length <= spec.romBytes, s"${image.length}-byte image, ${spec.romBytes}-byte ROM")
     val rom = logic.rom
     for (i <- 0 until spec.romBytes) rom.setBigInt(i, if (i < image.length) image(i) & 0xFF else 0xFF)
-    for (p <- host.get[PostBootPlugin]) p.simLoadVram(a => if (a < image.length) image(a) & 0xFF else 0xFF)
+    for (p <- host.get[GbPostBootPlugin]) p.simLoadVram(a => if (a < image.length) image(a) & 0xFF else 0xFF)
   }
 }

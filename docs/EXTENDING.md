@@ -10,8 +10,8 @@ console. The SM83 in `src/main/scala/retro/sm83/Sm83.scala` and the Game Boy in
 |---|---|---|
 | `BusService` | `BusPlugin` | `newMaster(priority)` and `newSlave(mapping, priority)`: ports onto the bus |
 | `RegFileService` | `RegFilePlugin(spec)` | `read`, `flag`, `newWrite` on `Register`/`Pair`/`Flag` objects; `setReset` |
-| `IrqService` | a console's interrupt controller (`retro.gb.InterruptControllerPlugin`) | `request(line)`: a `Bool` to pulse |
-| `DirectRead` | memories (`RamPlugin`, `retro.gb.CartridgePlugin`) | a read port that bypasses the bus, for a DMA that runs alongside the CPU (`host.list[DirectRead]`) |
+| `IrqService` | a console's interrupt controller (`retro.gb.GbInterruptsPlugin`) | `request(line)`: a `Bool` to pulse |
+| `DirectRead` | memories (`RamPlugin`, `retro.gb.GbCartridgePlugin`) | a read port that bypasses the bus, for a DMA that runs alongside the CPU (`host.list[DirectRead]`) |
 | `SequencerService` | `SequencerPlugin` | `addOp`, `addSource`, `addSink`, `addCond`, `addKey`/`ctrl`, `addFetchOverride`, `fetchFire` |
 | (whitebox) | `TracePlugin` | `simPublic` taps read by `retro.sim.Probe` |
 
@@ -241,7 +241,7 @@ class DividerPlugin extends FiberPlugin {
 2. Add the on-chip memories (`RamPlugin`), unmapped regions (`OpenBusPlugin`), the interrupt
    controller and the peripherals. Whatever stays unmapped goes to the external bus: for the Game
    Boy, the cartridge.
-3. Add a reset-state plugin if the console boots into a known state (`PostBootPlugin`).
+3. Add a reset-state plugin if the console boots into a known state (`GbPostBootPlugin`).
 4. Write a system reference model: the CPU reference model takes an `Sm83Bus`, so the console
    model implements `read`, `write` and `idle` (one M-cycle each), answers from its state at the
    start of the cycle, then applies the write and ticks every peripheral. `GbReference` is the

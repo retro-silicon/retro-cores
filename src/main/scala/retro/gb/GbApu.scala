@@ -74,19 +74,19 @@ class SeqLogic {
   implicit def cellB(c: BCell): Bool = c.v
 }
 
-/** The DMG APU, FF10-FF3F: `ApuReference` in hardware, line by line, with the same timing. Each
+/** The DMG APU, FF10-FF3F: `GbApuReference` in hardware, line by line, with the same timing. Each
   * M-cycle the frame sequencer steps on the timer counter's bit 12 edges, then two 2 MHz ticks
   * run, then the CPU's access sees the ticked state and a write lands on it; a DIV write that
   * drops bit 12 steps the sequencer once more.
   *
   * `audio` is the mixed output after each of the two ticks: left, right, left, right, each a
   * signed sum over channels of (15 - 2 * sample) * (NR50 volume + 1). */
-class ApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping(0xFF10, 0x30)) {
+class GbApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping(0xFF10, 0x30)) {
   val pins = during setup new Area { val audio = out(Vec.fill(4)(SInt(10 bits))).setName("apu_audio").simPublic() }
   def audio = pins.audio
   def body(slave: BusSlave, irq: Seq[Bool]): Area = new Area {
-    import ApuReference._
-    val timer = host[TimerPlugin]
+    import GbApuReference._
+    val timer = host[GbTimerPlugin]
     val busCmd = host[BusService].access
     val pcNow = host[RegFileService].read(Sm83Regs.PC)
     val audio = pins.audio

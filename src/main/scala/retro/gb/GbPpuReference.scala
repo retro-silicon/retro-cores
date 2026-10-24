@@ -1,6 +1,6 @@
 package retro.gb
 
-/** Dot-level model of the DMG PPU for `GbReference`; `PpuPlugin` is its RTL. Each M-cycle is four
+/** Dot-level model of the DMG PPU for `GbReference`; `GbPpuPlugin` is its RTL. Each M-cycle is four
   * dots; `tick` runs them.
   *
   * A line is 456 dots: OAM scan (80 dots, two OAM entries per M-cycle, up to ten objects), pixel
@@ -37,7 +37,7 @@ package retro.gb
   *  - entering VBlank also raises a mode 2 STAT interrupt (vblank_stat_intr);
   *  - VRAM and OAM are locked against the CPU as `vramReadLocked` and the others describe.
   * After the boot ROM the PPU is 98 M-cycles into line 153. */
-/** The states of the mode 3 loop (`PpuReference.sbStep`, SameBoy's numbering). */
+/** The states of the mode 3 loop (`GbPpuReference.sbStep`, SameBoy's numbering). */
 object PpuStep {
   val WINDOW = 0       // check for the window
   val OBJ_WAIT = 1     // step the fetcher until the background tile is in, to fetch an object
@@ -50,7 +50,7 @@ object PpuStep {
   val OBJ_CHECK = 9    // any object at this X?
 }
 
-/** The background fetcher's steps (`PpuReference.advance`); each read takes the step before for
+/** The background fetcher's steps (`GbPpuReference.advance`); each read takes the step before for
   * its address. */
 object FetchStep {
   val INDEX_ADDR = 0
@@ -62,7 +62,7 @@ object FetchStep {
   val PUSH = 6
 }
 
-class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
+class GbPpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   import FetchStep._
   import PpuStep._
 
