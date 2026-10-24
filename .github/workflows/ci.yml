@@ -21,6 +21,9 @@ jobs:
       - name: Install Verilator
         run: sudo apt-get update && sudo apt-get install -y verilator
 
+      - name: Check formatting
+        run: sbt -batch scalafmtCheckAll Test/scalafmtCheckAll scalafmtSbtCheck
+
       - name: Test (elaboration + Verilator sims)
         run: sbt -batch test
 
