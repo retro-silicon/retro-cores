@@ -14,7 +14,7 @@ import scala.util.Random
   * branch rules) against an independent model, on top of the single-step tests. */
 class R2A03CosimSim extends AnyFunSuite {
   lazy val compiled = SimConfig.withVerilator.compile(R2A03Core())
-  val jams = Set(0x02, 0x12, 0x22, 0x32, 0x42, 0x52, 0x62, 0x72, 0x92, 0xB2, 0xD2, 0xF2)
+  val jams = Ricoh2A03.JAMS
   val opcodes = (0 until 256).filterNot(jams).toIndexedSeq
 
   class CosimBackend(ref: R2A03Reference) extends TraceBackend {
