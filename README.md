@@ -166,10 +166,11 @@ scripts/synth-nes-ecp5.sh                          # Yosys and nextpnr for an EC
 |---|---|---|
 | `RamPlugin` | 0000-1FFF | 2 KB of RAM, mirrored |
 | `NesPpuPlugin` | 2000-3FFF | the 2C02, dot for dot as `NesPpuReference`: one dot per fast clock (three per CPU cycle, the access between the second and third; on PAL a fourth every fifth cycle), CIRAM, OAM, palette, `ppu_pixel` port |
-| `NesApuPlugin` | 4000-4017 | frame counter and IRQ, length counters, pulses, triangle, noise, DMC, mixer (`audio` port, one sample per cycle), 4015, controller 1 (`joypad1` pins), and the DMA unit (OAM DMA and DMC fetches) as a second bus master above the CPU |
-| `NesCartridgePlugin` | 6000-FFFF | PRG ROM, 8 KB PRG RAM, CHR ROM or RAM, mirroring, CNROM's bank, MMC1's registers, MMC3's banks and scanline IRQ (fed every PPU bus address), MMC2/MMC4's latches (on the fast clock, fed every PPU bus address), FME-7's registers and IRQ counter, or a discrete board's register (mappers 2, 7, 11, 34, 66, 180); images loaded by the sim |
-| `NesOpenBusPlugin` | everything else | the data bus latch, for unmapped reads and undriven bits |
-| `NesInterruptsPlugin` | | the CPU's NMI (from the PPU) and IRQ (from the APU and the cartridge), and the reset button (`reset_button` pin, taken at the next opcode fetch) |
+| `NesApuPlugin` | 4000-4015, 4017 | frame counter and IRQ, length counters, pulses, triangle, noise, DMC, mixer (`audio` port, one sample per cycle), 4015, and the DMA unit (OAM DMA and DMC fetches) as a second bus master above the CPU |
+| `NesJoypadPlugin` | 4016 | controller 1 (`joypad1` pins) |
+| `NesCartridgePlugin` | 6000-FFFF | PRG ROM, PRG RAM, CHR ROM or RAM, and the board's mapper (`NesBoardLogic`, one class per board as the model's `NesBoard`: CNROM, MMC1, MMC3 with its scanline IRQ and MMC2/MMC4 with their latches (fed every PPU bus address, on the fast clock), FME-7, and the discrete boards 2, 7, 11, 34, 66, 180); images loaded by the sim |
+| `OpenBusPlugin(latched = true)` | everything else | the data bus latch, for unmapped reads and undriven bits |
+| `NesInterruptsPlugin` | | `IrqService` for the CPU's NMI (from the PPU) and IRQ (from the APU and the cartridge), and the reset button (`reset_button` pin, taken at the next opcode fetch) |
 
 `NesRtl.cosim` runs a test ROM on the RTL and the model in lockstep: every instruction must
 match in cycles (DMA stalls included), bus accesses (so every PPU and APU register read) and
