@@ -68,26 +68,30 @@ class GameBoySim extends AnyFunSuite {
       var pressed = 0
       io.stall #= false
       buttons #= 0
+      val probe = new Probe(dut.host[TracePlugin], dut.clockDomain, autoSample = false).add(cosim)
+      fork { while (true) { io.rdata #= mem(io.cmd.address.toInt); sleep(1) } }
+      var cycles = 0L
+      // A pixel every clock; the rest every M-cycle, at the clock ending it.
+      val cpuEnable = dut.cpuEnable
       dut.clockDomain.forkStimulus(10)
       dut.clockDomain.onSamplings {
-        if (done.toBoolean) {
-          buttonLog += pressed
-          if (!refReset) { cpu.reset(); refReset = true }
-          rtlAudio ++= audio.map(_.toInt)
-        }
-        if (io.cmd.valid.toBoolean && io.cmd.write.toBoolean && io.cmd.address.toInt >= 0x8000) mem(io.cmd.address.toInt) = io.cmd.data.toInt
-        if (tx.valid.toBoolean) serial += tx.payload.toInt
-        LcdPixels.capture(lcd, frame)
+        LcdPixel.capture(lcd, frame)
         val y = lcd.y.toInt
         if (lastY == Gb.visibleLines - 1 && y == Gb.visibleLines) rtlFrames += frame.clone()
         lastY = y
-        if (rnd.nextDouble() < buttonRate) { pressed = rnd.nextInt(256); buttons #= pressed }
+        if (cpuEnable.toBoolean) {
+          probe.sample()
+          cycles += 1
+          if (done.toBoolean) {
+            buttonLog += pressed
+            if (!refReset) { cpu.reset(); refReset = true }
+            rtlAudio ++= audio.map(_.toInt)
+          }
+          if (io.cmd.valid.toBoolean && io.cmd.write.toBoolean && io.cmd.address.toInt >= 0x8000) mem(io.cmd.address.toInt) = io.cmd.data.toInt
+          if (tx.valid.toBoolean) serial += tx.payload.toInt
+          if (rnd.nextDouble() < buttonRate) { pressed = rnd.nextInt(256); buttons #= pressed }
+        }
       }
-      new Probe(dut.host[TracePlugin], dut.clockDomain).add(cosim)
-      fork { while (true) { io.rdata #= mem(io.cmd.address.toInt); sleep(1) } }
-
-      var cycles = 0L
-      dut.clockDomain.onSamplings(cycles += 1)
       val budget = if (maxCycles > 0) maxCycles else instructions * 50L
       dut.clockDomain.waitSamplingWhere(checked >= instructions || cycles > budget)
       assert(serial == ref.serialOut, s"serial: rtl $serial, reference ${ref.serialOut}")

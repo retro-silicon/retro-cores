@@ -379,10 +379,12 @@ object GbSuites {
       var nextFrame = frameCycles.toLong
       var lastY = 0
       var shownAt = Long.MaxValue
+      // A pixel every clock; the rest every M-cycle, at the clock ending it.
+      val cpuEnable = dut.cpuEnable
       dut.clockDomain.forkStimulus(10)
       dut.clockDomain.onSamplings {
-        if (outcome == null || cycles < shownAt) {
-          LcdPixels.capture(lcd, buf)
+        if (outcome == null || cycles < shownAt) LcdPixel.capture(lcd, buf)
+        if ((outcome == null || cycles < shownAt) && cpuEnable.toBoolean) {
           if (tx.valid.toBoolean) serialText += tx.payload.toInt.toChar
           val y = lcd.y.toInt
           val vblank = lastY == Gb.visibleLines - 1 && y == Gb.visibleLines

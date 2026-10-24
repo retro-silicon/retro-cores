@@ -9,26 +9,23 @@ import spinal.lib.bus.misc._
 import FetchStep._
 import PpuStep._
 
-/** Up to four pixels a cycle (one per dot) for the LCD: `valid(i)` marks the pixels sent, `x(i)`
-  * their columns on line `y`, `shade(i)` their shades, 0 (white) to 3 (black). `fill` ends a line
-  * that sent fewer than 160 pixels (the window can draw a column twice): columns `fillX` to 159
-  * take `fillShade`. */
-case class LcdPixels() extends Bundle {
-  val valid = Bits(4 bits)
-  val x = Vec(UInt(8 bits), 4)
-  val y = UInt(8 bits)
-  val shade = Vec(UInt(2 bits), 4)
+/** A dot's pixel for the LCD: when `valid`, column `x` of line `y` takes `shade`, 0 (white) to 3
+  * (black). `fill` ends a line that sent fewer than 160 pixels (the window can draw a column
+  * twice): columns `fillX` to 159 take `fillShade`. */
+case class LcdPixel() extends Bundle {
+  val valid = Bool()
+  val x, y = UInt(8 bits)
+  val shade = UInt(2 bits)
   val fill = Bool()
   val fillX = UInt(8 bits)
   val fillShade = UInt(2 bits)
 }
 
-object LcdPixels {
-  /** For sims: draws the pixels on `lcd` this cycle into `frame` (160 x 144, row-major). */
-  def capture(lcd: LcdPixels, frame: Array[Int]): Unit = {
-    val valid = lcd.valid.toInt
+object LcdPixel {
+  /** For sims: draws the pixel on `lcd` this clock into `frame` (160 x 144, row-major). */
+  def capture(lcd: LcdPixel, frame: Array[Int]): Unit = {
     val y = lcd.y.toInt
-    if (valid != 0) for (i <- 0 until 4 if (valid >> i & 1) != 0) frame(y * 160 + lcd.x(i).toInt) = lcd.shade(i).toInt
+    if (lcd.valid.toBoolean) frame(y * 160 + lcd.x.toInt) = lcd.shade.toInt
     if (lcd.fill.toBoolean) for (x <- lcd.fillX.toInt until 160) frame(y * 160 + x) = lcd.fillShade.toInt
   }
 }
@@ -69,14 +66,16 @@ case class PpuDot() extends Bundle {
   * interrupts, and the pixels, sent out on `lcd`. It reads VRAM and OAM through their own ports
   * (`RamPlugin.directRead`, `GbOamDmaPlugin.oamRead`), not over the CPU's bus.
   *
-  * The design runs one clock per M-cycle and the PPU works in dots, four per M-cycle, so each
-  * clock chains four copies of the one-dot step (`dot`), each with its own VRAM read port; the
-  * OAM scan checks two OAM entries a clock. Mode 3 ends for the CPU 3 dots before the transfer
-  * does, so three more copies look ahead, without VRAM. A CPU write to a PPU register lands
-  * between the dots (`GbPpuReference.writeDot`). The timing, and what it leaves out, is described
-  * at `GbPpuReference`, the model the system cosim checks this against dot for dot. */
+  * One dot per fast clock (`CoreClocks`, four per M-cycle): phase `p` runs dot `p + 1` of the
+  * M-cycle (`dot`), on the state the dot before left, with one VRAM read port. The registers,
+  * the OAM scan (two entries an M-cycle), modes and interrupts work per M-cycle, from the state
+  * at the M-cycle's start (`st`). Mode 3 ends for the CPU 3 dots before the transfer does, so in
+  * the M-cycle's last clock three more copies of the dot look ahead, without VRAM. A CPU write to
+  * a PPU register lands between the dots (`GbPpuReference.writeDot`). The timing, and what it
+  * leaves out, is described at `GbPpuReference`, the model the system cosim checks this against
+  * dot for dot. */
 class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMapping(Gb.LCDC, 0x0C), Gb.Irq.VBLANK, Gb.Irq.STAT) {
-  val pins = during setup new Area { val lcd = out(LcdPixels()).setName("lcd") }
+  val pins = during setup new Area { val lcd = out(LcdPixel()).setName("lcd") }
   def lcd = pins.lcd
   /** LCDC, for a sim to tell whether the LCD is on. */
   val lcdcReg = Handle[UInt]()
@@ -91,6 +90,8 @@ class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMappin
 
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val lcd = pins.lcd
+    val clocks = RetroCore.clocks.get
+    require(clocks.cycleClocks == Seq(4), "the PPU runs a dot per fast clock, so the core's M-cycles need 4 clocks")
     val vram = host[GbVramPlugin]
     val dma = host[GbOamDmaPlugin]
 
@@ -239,16 +240,16 @@ class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMappin
     /** LCDC writes that keep the LCD on or off land between the dots; others after them. */
     val lcdcWrite = writes(Gb.LCDC) && wData(7) === lcdc(7)
     /** A register as dot `i` sees it, the write landing before dot `landsAt`. */
-    def seen(reg: UInt, a: Int, landsAt: Int, i: Int) = if (i >= landsAt) writes(a) ? wData | reg else reg
+    def seen(reg: UInt, a: Int, landsAt: Int, i: UInt) = (i >= landsAt && writes(a)) ? wData | reg
     /** A palette: it shows old | new for the dot before the write lands. */
-    def palette(reg: UInt, a: Int, i: Int) = if (i == 1) writes(a) ? (reg | wData) | reg else seen(reg, a, 2, i)
+    def palette(reg: UInt, a: Int, i: UInt) = (i === 1 && writes(a)) ? (reg | wData) | seen(reg, a, 2, i)
 
     def shift[T <: Data](v: Vec[T], zero: T) = Vec((1 until 8).map(v(_)) :+ zero)
 
-    /** Dot `i` of the M-cycle (5 to 7: the look-ahead, with no VRAM, no pixels and no writes
-      * landing). `lcdcIn` is LCDC as the dot before left it, which a write can glitch. */
-    def dot(s: PpuDot, lcdcIn: UInt, i: Int) = new Area {
-      val dry = i > 4
+    /** Dot `i` (1 to 4) of the M-cycle, or with `dry` one of the look-ahead (5 to 7: no VRAM, no
+      * pixels and no writes landing). `lcdcIn` is LCDC as the dot before left it, which a write
+      * can glitch. */
+    def dot(s: PpuDot, lcdcIn: UInt, i: UInt, dry: Boolean) = new Area {
       val n = PpuDot().allowOverride()
       val lcdcOut = UInt(8 bits)
       val pixel = Flow(UInt(2 bits))
@@ -264,7 +265,7 @@ class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMappin
       val bgpD = palette(bgp, Gb.BGP, i)
       val obp0D = palette(obp0, Gb.OBP0, i)
       val obp1D = palette(obp1, Gb.OBP1, i)
-      val wxJustChanged = if (i == 3) writes(Gb.WX) else False
+      val wxJustChanged = i === 3 && writes(Gb.WX)
 
       // LCDC: the write lands before dot 2, aborting an object fetch if it hides objects; before
       // that it shows old | new BG_EN, with OBJ_EN cleared at X 0 or during an object fetch.
@@ -272,11 +273,11 @@ class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMappin
       s1 := s
       val lcdcD = UInt(8 bits)
       lcdcD := lcdcIn
-      if (i == 2) when(lcdcWrite) {
+      when(i === 2 && lcdcWrite) {
         when(lcdcIn(1) && !wData(1) && s.duringObjFetch) { s1.abortObj := True }
         lcdcD := wData
       }
-      if (i == 1) when(lcdcWrite) {
+      when(i === 1 && lcdcWrite) {
         val old = UInt(8 bits)
         old := lcdcIn
         when((s.pos === 0 || s.duringObjFetch) && !wData(1)) {
@@ -300,7 +301,7 @@ class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMappin
       }
       val st0 = s2.st
       val stepping = s2.sleep === 0
-      val wyHitD = if (i >= 4) wyHit4 else wyHitTicked
+      val wyHitD = (i >= 4) ? wyHit4 | wyHitTicked
 
       // The window check.
       val win = new Area {
@@ -523,27 +524,35 @@ class GbPpuPlugin(postBoot: Boolean = false) extends PeripheralPlugin(SizeMappin
           n.sleep := 0
         }
       }
-    }.setCompositeName(this, s"dot$i")
-
-    // After the scan, LY = WY is checked on the last dot, against WY as of the last M-cycle.
-    lazy val wyMatch = transferPart && lyTicked === wy && dots(2).lcdcOut(5)
-    lazy val wyHit4 = wyHitTicked || wyMatch && wy === wyLast
-    val dots = scala.collection.mutable.ArrayBuffer[Area { val n: PpuDot; val lcdcOut: UInt; val pixel: Flow[UInt]; val pixelX: UInt; val fill: Bool }]()
-    for (i <- 1 to 7) dots += dot(if (i == 1) s0 else dots(i - 2).n, if (i == 1) lcdc else dots(i - 2).lcdcOut, i)
-    // Mode 3 as the CPU sees it after dot `i`: the transfer has not ended 3 dots later.
-    def transferAfter(i: Int) = s0.transfer && dots(i + 2).n.active
-    st.allowOverride()
-    st := dots(3).n
-    st.transfer := transferPart ? transferAfter(4) | s0.transfer
-    for (i <- 0 until 4) {
-      lcd.valid(i) := dots(i).pixel.valid
-      lcd.x(i) := dots(i).pixelX
-      lcd.shade(i) := blankFrame ? U(0, 2 bits) | dots(i).pixel.payload
     }
+
+    // The dots, one per fast clock: the first from the M-cycle's start, the others from the state
+    // and LCDC the dot before left. Signals that use `left` or the look-ahead hold in the
+    // M-cycle's last clock (dot 4), where the registers on the CPU's clock take them.
+    val left = new ClockingArea(clocks.fast) {
+      val st = Reg(PpuDot())
+      val lcdc = Reg(UInt(8 bits))
+    }
+    // After the scan, LY = WY is checked on the last dot, against WY as of the last M-cycle.
+    def wyMatch = transferPart && lyTicked === wy && left.lcdc(5)
+    def wyHit4 = wyHitTicked || wyMatch && wy === wyLast
+    val first = clocks.phase === 0
+    val now = dot(first ? s0 | left.st, first ? lcdc | left.lcdc, (clocks.phase +^ 1).resize(3), dry = false)
+    left.st := now.n
+    left.lcdc := now.lcdcOut
+    val ahead = (5 to 7).scanLeft(now: Area { val n: PpuDot; val lcdcOut: UInt })((d, i) => dot(d.n, d.lcdcOut, U(i, 3 bits), dry = true)).tail
+    // Mode 3 as the CPU sees it after dot `i`: the transfer has not ended 3 dots later.
+    def transferAfter(i: Int) = s0.transfer && (if (i == 1) now.n.active else ahead(i - 2).n.active)
+    st.allowOverride()
+    st := now.n
+    st.transfer := transferPart ? transferAfter(4) | s0.transfer
+    lcd.valid := now.pixel.valid
+    lcd.x := now.pixelX
+    lcd.shade := blankFrame ? U(0, 2 bits) | now.pixel.payload
     lcd.y := lyTicked
-    lcd.fill := (0 until 4).map(dots(_).fill).orR
-    lcd.fillX := dots(3).n.lcdX
-    lcd.fillShade := blankFrame ? U(0, 2 bits) | dots(3).n.lastShade
+    lcd.fill := now.fill
+    lcd.fillX := now.n.lcdX
+    lcd.fillShade := blankFrame ? U(0, 2 bits) | now.n.lastShade
 
     // STAT reads the mode after the third dot, the STAT interrupt after the second (before the
     // dots in the transfer's first M-cycle). The first line after the LCD is turned on has no

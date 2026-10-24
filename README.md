@@ -395,11 +395,12 @@ CPU's interrupt check sees requests raised by that tick too. Mooneye's `div_timi
 `GbPpuPlugin` is a dot-level pixel FIFO: OAM scan (two entries per M-cycle, ten objects per line),
 then a background fetcher that fills an 8-pixel FIFO, an object fetcher that stalls it, and an
 object FIFO that mixes by priority, so mode 3 stretches by SCX, the window and each object exactly
-as on the DMG. The design runs one clock per M-cycle, so each clock chains four copies of the
-one-dot step, each with its own VRAM read port. VRAM and OAM are read through their own ports
-(`RamPlugin.directRead`, `GbOamDmaPlugin.oamRead`), not over the CPU's bus.
+as on the DMG. The Game Boy runs on the dot clock (`cycleClocks = Seq(4)`, like the NES's
+`CoreClocks`): the PPU steps one dot per clock with one VRAM read port, everything else one
+M-cycle per four clocks. VRAM and OAM are read through their own ports (`RamPlugin.directRead`,
+`GbOamDmaPlugin.oamRead`), not over the CPU's bus.
 
-Pixels leave on the `lcd` port, up to four per clock with their x, y and shade, for a sim to
+Pixels leave on the `lcd` port, one per clock with its x, y and shade, for a sim to
 collect or an FPGA build to write into a scan-out framebuffer. `GbPpuReference` is the same
 pipeline as a Scala model inside `GbReference`; the system cosim checks every STAT read and every
 frame against it, including a test with random tiles, objects, scroll and window. The timing

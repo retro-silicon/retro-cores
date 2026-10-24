@@ -219,7 +219,7 @@ class DividerPlugin extends FiberPlugin {
 ```
 
 - **Timing.** Plugins run on the `cpu` clock, one tick per M-cycle. A core built with a
-  divided clock (`RetroCore(plugins, cycleClocks)`, the NES) also has a `fast` clock, several per
+  divided clock (`RetroCore(plugins, cycleClocks)`, the NES and the Game Boy) also has a `fast` clock, several per
   M-cycle, for logic that works per dot (`ClockingArea(RetroCore.clocks.get.fast)`). A read is
   answered combinationally in the cycle it is issued; a write lands at the end of it (`slave.writeFire`). The slave may raise `slave.stall`
   to hold the cycle.

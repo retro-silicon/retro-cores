@@ -342,7 +342,8 @@ class GbVramPlugin extends RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000
 /** HRAM (FF80-FFFE). */
 class GbHramPlugin extends RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F)
 
-/** The Game Boy: the SM83 plugins plus the SoC plugins, in one host. Whatever no plugin maps
+/** The Game Boy: the SM83 plugins plus the SoC plugins, in one host, on the dot clock (4 MHz):
+  * the PPU runs a dot per clock, everything else an M-cycle per four (`CoreClocks`). Whatever no plugin maps
   * (cartridge ROM 0000-7FFF and cartridge RAM A000-BFFF) is the external bus, unless a
   * `cartridge` is given, in which case a `GbCartridgePlugin` answers there. */
 object GameBoy {
@@ -364,7 +365,7 @@ object GameBoy {
 
   /** `romDecoder`: see `SequencerPlugin` (faster in Verilator). */
   def apply(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[GbCartSpec] = None, romDecoder: Boolean = false): RetroCore =
-    RetroCore(plugins(withTrace, postBoot, cartridge, romDecoder)).setDefinitionName("GameBoy")
+    RetroCore(plugins(withTrace, postBoot, cartridge, romDecoder), cycleClocks = Seq(4)).setDefinitionName("GameBoy")
 }
 
 object GameBoyVerilog extends App {
