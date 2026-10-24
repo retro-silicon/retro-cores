@@ -547,7 +547,7 @@ class ApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping(0
     }
 
     /** A write to FF10 + `r`, `r` below 0x20 (wave RAM is `writeWave`). */
-    def write(r: Int, value: UInt, duringDivWrite: Bool, counter: UInt = null): Unit = {
+    def write(r: Int, value: UInt, duringDivWrite: Bool): Unit = {
       val blocked = r != 0x16 && r != 0x01 && r != 0x06 && r != 0x0B && r != 0x10
       If(if (blocked) enabled.v else True) {
         var stored = value
@@ -555,7 +555,8 @@ class ApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping(0
           case 0x14 | 0x15 =>
           case 0x16 =>
             val oldLengths = Seq(square(0).length.v, square(1).length.v, waveLength.v, noiseLength.v)
-            IfElse(value(7) && !enabled) { powerOn(counter) } { If(!value(7) && enabled) { powerOff() } }
+            // It sees the counter one M-cycle later (Gambatte's ch2_init_reset_env_counter_timing_5).
+            IfElse(value(7) && !enabled) { powerOn(timer.tickedCounter.get + 4) } { If(!value(7) && enabled) { powerOff() } }
             If(value(7)) {
               square(0).length := oldLengths(0); square(1).length := oldLengths(1)
               waveLength := oldLengths(2); noiseLength := oldLengths(3)
@@ -742,8 +743,7 @@ class ApuPlugin(postBoot: Boolean = true) extends PeripheralPlugin(SizeMapping(0
     val data = slave.cmd.data
     If(slave.writeFire) {
       for (r <- 0 until 0x20 if r < 0x17) If(offset === r) {
-        // It sees the counter one M-cycle later (Gambatte's ch2_init_reset_env_counter_timing_5).
-        write(r, data, False, if (r == 0x16) timer.tickedCounter.get + 4 else null)
+        write(r, data, False)
       }
       for (k <- 0 until 16) If(offset === 0x20 + k) { writeWave(k, data) }
     }

@@ -23,7 +23,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   private def isVram(a: Int) = a >= 0x8000 && a < 0xA000
   private val requestLog = Array.fill(64)(0)
   private var cycles = 0L
-  val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => { iflag &= ~(1 << i); acked = 1 << i; if (onAck != null) onAck(i) })
+  val cpu = new Sm83Reference(this, k => { require(cycles - k <= 64); requestLog((k & 63).toInt) }, i => { iflag &= ~(1 << i); acked = 1 << i; onAck(i) })
 
   val vram = if (postBoot) Gb.PostBoot.vram(external) else Array.fill(0x2000)(0)
   val wram = Array.tabulate(0x2000)(Gb.wramInit)
@@ -48,7 +48,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   /** Gambatte's audio test verdict over this output (`AudioWindows`). */
   val audioWindows = new AudioWindows
   /** For cosimulation: called with the two samples (left, right, left, right) of each M-cycle. */
-  var onAudio: Array[Int] => Unit = null
+  var onAudio: Array[Int] => Unit = _ => ()
   // OAM DMA
   var dmaRegister = 0xFF
   var dmaStartIn, dmaSource, dmaIndex = 0
@@ -92,15 +92,15 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
   }
 
   /** Called with every write to the PPU's registers (address, value), for tracing. */
-  var onPpuWrite: (Int, Int) => Unit = null
+  var onPpuWrite: (Int, Int) => Unit = (_, _) => ()
   /** Called with every CPU access to I/O registers (write?, address, value), for tracing. */
-  var onIoAccess: (Boolean, Int, Int) => Unit = null
+  var onIoAccess: (Boolean, Int, Int) => Unit = (_, _, _) => ()
   /** Called when the STAT interrupt is requested, for tracing. */
-  var onStatIrq: () => Unit = null
-  var onAck: Int => Unit = null
+  var onStatIrq: () => Unit = () => ()
+  var onAck: Int => Unit = _ => ()
   /** The request the CPU acknowledged in the last M-cycle. */
   private var acked = 0
-  var onPpuTick: () => Unit = null
+  var onPpuTick: () => Unit = () => ()
 
   private var iduAddress = -1
   override def idu(address: Int): Unit = iduAddress = address & 0xFFFF
@@ -164,7 +164,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
       apu.tick(); audio(2 * k) = apu.left; audio(2 * k + 1) = apu.right
       audioWindows.sample(apu.left, apu.right)
     }
-    if (onAudio != null) onAudio(audio)
+    onAudio(audio)
     // PPU. A write to its registers lands during its dots (`PpuReference.writeDots`).
     if (a >= Gb.LCDC && a <= Gb.WX && a != Gb.LY && a != Gb.DMA) for (v <- wdata) ppu.schedule(a, v)
     // A CPU halted in this M-cycle and the last stops OAM DMA (SameBoy).
@@ -176,12 +176,12 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     ppu.dmaDest = if (dmaActive) dmaIndex else -1
     if (!dmaStopped) dmaLast = false
     val (vblank, stat) = ppu.tick()
-    if (onPpuTick != null) onPpuTick()
+    onPpuTick()
     // An acknowledge also clears the request if it rises in the next M-cycle before the dots.
     val cleared = acked & ~(if (ppu.statRiseInDots) 1 << Gb.Irq.STAT.index else 0) & (1 << Gb.Irq.STAT.index | 1 << Gb.Irq.VBLANK.index)
     acked = 0
     if (vblank) { iflag |= 1 << Gb.Irq.VBLANK.index & ~cleared; audioWindows.vblank() }
-    if (stat) { iflag |= 1 << Gb.Irq.STAT.index & ~cleared; if (onStatIrq != null) onStatIrq() }
+    if (stat) { iflag |= 1 << Gb.Irq.STAT.index & ~cleared; onStatIrq() }
     // OAM DMA
     dmaCopying = (dmaStartIn == 1 || dmaActive) && !dmaStopped
     if (dmaCopying) {
@@ -225,7 +225,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
     val v = if (conflict) dmaByte else if (a >= 0) peek(a) else 0
     if (conflict) for (_ <- wdata)
       oam(dmaRaw & 0xFF) = if (dmaRaw >= 0xC000) dmaByte & d else d
-    if (onIoAccess != null && a >= 0xFF00 && (a < 0xFF80 || a == 0xFFFF)) onIoAccess(wdata.isDefined, a, wdata.getOrElse(v))
+    if (a >= 0xFF00 && (a < 0xFF80 || a == 0xFFFF)) onIoAccess(wdata.isDefined, a, wdata.getOrElse(v))
     for (_ <- wdata if !conflict) {
       val (counterTicked, tacTicked) = (counter, tac)
       a match {
@@ -261,7 +261,7 @@ class GbReference(val external: Array[Int], postBoot: Boolean = true, externalDm
         case Gb.TMA => tma = d; if (reloading) tima = d
         case Gb.TAC => tac = d & 7
         case Gb.DMA => dmaRegister = d; dmaStartIn = 2
-        case _ if a >= Gb.LCDC && a <= Gb.WX => if (onPpuWrite != null) onPpuWrite(a, d) // landed in the tick
+        case _ if a >= Gb.LCDC && a <= Gb.WX => onPpuWrite(a, d) // landed in the tick
         case _ =>
       }
       // Resetting DIV or changing TAC can drop the selected bit: that is a falling edge too.

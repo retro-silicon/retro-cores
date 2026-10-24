@@ -56,7 +56,7 @@ class CartridgePlugin(val spec: CartridgeSpec) extends FiberPlugin with DirectRe
   def directRead(address: UInt): UInt = {
     val l = logic.get
     val rom = l.rom.readAsync(l.romIndex(address))
-    if (l.ram == null) address(15) ? U(0xFF, 8 bits) | rom
+    if (spec.ramBytes == 0) address(15) ? U(0xFF, 8 bits) | rom
     else address(15) ? l.ram.read(address) | rom
   }
 

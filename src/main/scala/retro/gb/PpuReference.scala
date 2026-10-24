@@ -95,7 +95,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
   var onFrame: Array[Int] => Unit = _ => ()
   /** Called with each pixel drawn (line, x, dot): dots count from 1, four per M-cycle tick, for
     * comparing dot timing against other emulators. */
-  var onPixel: (Int, Int, Long) => Unit = null
+  var onPixel: (Int, Int, Long) => Unit = (_, _, _) => ()
   private var dots = 0L
   private var dotNow = 0L
   /** Dots since reset, up to the end of the last tick: when this M-cycle's write lands. */
@@ -449,7 +449,7 @@ class PpuReference(vram: Array[Int], oam: Array[Int], postBoot: Boolean) {
     val shade = if (draw) ((if (opal != 0) obp1 else obp0) >> (2 * op)) & 3 else (bgp >> (2 * c)) & 3
     if (lcdX < 160 && !dry) {
       frame(ly * 160 + lcdX) = if (blankFrame) 0 else shade
-      if (onPixel != null) onPixel(ly, lcdX, dotNow)
+      onPixel(ly, lcdX, dotNow)
     }
     lastShade = shade
     pos += 1; lcdX += 1
