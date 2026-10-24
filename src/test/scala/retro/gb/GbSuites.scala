@@ -312,7 +312,7 @@ object GbSuites {
       val lcd = dut.host[PpuPlugin].lcd
       val lcdc = dut.host[PpuPlugin].lcdcReg.get
       val ir = dut.host[SequencerService].opcode
-      val hramMem = dut.host.list[RamPlugin].find(_.ramName == "hram").get.logic.mem
+      val hramMem = dut.host[HramPlugin].logic.mem
       val cartRam = Option(dut.host[CartridgePlugin].logic.ram).map(_.mem)
       val cartBytes = spec.ramBytes max 1
       val tx = dut.host[SerialPlugin].tx

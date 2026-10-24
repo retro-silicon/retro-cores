@@ -328,10 +328,15 @@ class PostBootPlugin extends FiberPlugin {
     * (`Gb.PostBoot.vram`). `CartridgePlugin.load` calls it. */
   def simLoadVram(rom: Int => Int): Unit = {
     import spinal.core.sim._
-    val mem = host.list[RamPlugin].find(_.ramName == "vram").get.logic.mem
+    val mem = host[VramPlugin].logic.mem
     for ((v, i) <- Gb.PostBoot.vram(rom).zipWithIndex) mem.setBigInt(i, v)
   }
 }
+
+/** VRAM (8000-9FFF), locked by the PPU. */
+class VramPlugin extends RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000, lockable = true)
+/** HRAM (FF80-FFFE). */
+class HramPlugin extends RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F)
 
 /** The Game Boy: the SM83 plugins plus the SoC plugins, in one host. Whatever no plugin maps
   * (cartridge ROM 0000-7FFF and cartridge RAM A000-BFFF) is the external bus, unless a
@@ -339,10 +344,10 @@ class PostBootPlugin extends FiberPlugin {
 object GameBoy {
   def plugins(withTrace: Boolean = true, postBoot: Boolean = true, cartridge: Option[CartridgeSpec] = None,
               romDecoder: Boolean = false): Seq[Hostable] = Sm83.plugins(withTrace, romDecoder) ++ Seq(
-    new RamPlugin("vram", SizeMapping(0x8000, 0x2000), 0x2000, lockable = true), // locked by the PPU
+    new VramPlugin,
     new RamPlugin("wram", SizeMapping(0xC000, 0x3E00), 0x2000, init = Gb.wramInit), // E000-FDFF echoes C000-DDFF
     new OamDmaPlugin,
-    new RamPlugin("hram", SizeMapping(0xFF80, 0x7F), 0x7F),
+    new HramPlugin,
     new OpenBusPlugin(SizeMapping(0xFEA0, 0x60), value = 0x00),
     new OpenBusPlugin(SizeMapping(0xFF00, 0x100)),
     new InterruptControllerPlugin(if (postBoot) Gb.PostBoot.iflag else 0),

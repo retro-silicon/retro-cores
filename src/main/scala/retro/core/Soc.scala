@@ -53,7 +53,7 @@ trait DirectRead {
   * must be aligned to that and may cover mirrors (Game Boy echo RAM). Reads are combinational,
   * as the M-cycle bus expects; contents start at zero.
   *
-  * @param ramName  used for the memory's signal name, so sims can find it
+  * @param ramName  names the memory signal (`ram_<ramName>`)
   * @param lockable another plugin (the Game Boy PPU) loads `readLock` and `writeLock`: while
   *                 they are high the bus reads FF and writes are lost. `directRead` ports are
   *                 not affected.

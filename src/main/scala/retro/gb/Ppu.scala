@@ -90,7 +90,7 @@ class PpuPlugin(postBoot: Boolean = false)
 
   def body(slave: BusSlave, irq: Seq[Bool]) = new Area {
     val lcd = pins.lcd
-    val vram = host.list[RamPlugin].find(_.ramName == "vram").get
+    val vram = host[VramPlugin]
     val dma = host[OamDmaPlugin]
 
     def boot(after: Int, before: Int = 0) = if (postBoot) after else before
